@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPIKE · Techo de canales multicanal Opus (Quest)</title>
+<style>
+  :root{--bg:#080a0f;--surface:#161b22;--accent:#00d4ff;--ok:#34d399;--bad:#ff4444;--muted:#8b949e;--text:#e6edf3;--mono:'Space Mono',monospace}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;padding:24px;line-height:1.5}
+  h1{font-size:16px;letter-spacing:.05em;color:var(--accent);margin-bottom:4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px;max-width:640px}
+  button{background:var(--accent);color:#000;border:none;border-radius:6px;padding:14px 28px;font-size:16px;font-weight:700;cursor:pointer;letter-spacing:.05em}
+  button:disabled{opacity:.4;cursor:default}
+  #verdict{font-family:var(--mono);font-size:22px;margin:20px 0;padding:14px 18px;border-radius:8px;background:var(--surface);border:1px solid #ffffff14}
+  #verdict b{font-size:30px}
+  .ch{display:flex;align-items:center;gap:12px;margin:8px 0;font-family:var(--mono);font-size:13px}
+  .ch .lbl{width:170px;flex:none;color:var(--muted)}
+  .ch .lbl b{color:var(--text)}
+  .bar{flex:1;height:22px;background:#ffffff0d;border-radius:4px;overflow:hidden;position:relative}
+  .bar i{position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,var(--accent),var(--ok));transition:width .05s}
+  .meta{width:150px;flex:none;text-align:right;color:var(--muted)}
+  .meta.live b{color:var(--ok)} .meta.dead b{color:var(--bad)}
+  .info{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:20px}
+  .info span{color:var(--text)}
+  .vol{display:flex;align-items:center;gap:10px;margin-top:16px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  audio{display:none}
+  .note{margin-top:24px;padding:14px;border-left:2px solid var(--accent);background:#00d4ff0a;font-size:13px;color:var(--muted);max-width:680px}
+  .note b{color:var(--text)}
+</style>
+</head>
+<body>
+  <h1>SPIKE · ¿cuántos canales Opus expone la Quest a Web Audio?</h1>
+  <p class="sub">
+    Carga <code>encoded10/manifest.mpd</code> (1 pista Opus de 10 canales: 4 FOA + 6 stems) por el
+    MISMO camino que el player real: Shaka → MSE → <code>MediaElementSource</code> →
+    <code>ChannelSplitter</code>. Mide cuántos canales llegan separados — si son 10, la Quest
+    aguanta la banda completa.
+  </p>
+
+  <button id="start">▶ START TEST</button>
+
+  <div id="verdict">Canales activos: <b id="count">—</b> / <span id="total">6</span></div>
+
+  <div id="channels"></div>
+
+  <div class="vol">
+    salida (para oír los tonos en la Quest):
+    <input type="range" id="vol" min="0" max="1" step="0.02" value="0">
+    <span id="volval">0.00</span>
+  </div>
+
+  <div class="info">
+    sampleRate: <span id="sr">—</span> ·
+    splitter.numberOfOutputs: <span id="outs">—</span> ·
+    estado: <span id="state">idle</span>
+  </div>
+
+  <div class="note">
+    <b>Cómo leerlo:</b> tras START, los canales 0-3 (FOA) llevan música → niveles que varían juntos.
+    El canal 4 debe marcar <b>~300 Hz</b> y el 5 <b>~2000 Hz</b>, con niveles
+    <b>independientes</b>. Si los 6 viven → la vía "un único stream multicanal" para el spotlight
+    por músico es viable en la Quest. Si solo 2 (o se cae en 8) → ése es el techo y limita cuántos
+    músicos caben (o toca partir en 2 pistas / segmentado).
+  </div>
+
+  <audio id="aud" crossorigin="anonymous"></audio>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.6/shaka-player.compiled.js"></script>
+  <script>
+    // Por defecto: 10 canales (4 FOA + 6 stems) desde encoded10/, etiquetados con
+    // los músicos del proyecto. Override opcional con ?ch= / ?src= / ?labels=.
+    const _q = new URLSearchParams(location.search);
+    const N = parseInt(_q.get('ch') || '10', 10);
+    const MANIFEST = _q.get('src') || (location.origin + '/encoded10/manifest.mpd');
+    const FOA = ['FOA W', 'FOA Y', 'FOA Z', 'FOA X'];
+    const _stemLabels = (_q.get('labels') || 'DR,GT,KEY,SAX,TBONE,TPT')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const LABELS = Array.from({ length: N }, (_, i) =>
+      i < 4 ? `CH${i} · ${FOA[i]}`
+            : `CH${i} · ${_stemLabels[i - 4] || ('Stem ' + (i - 4 + 1))}`);
+
+    const aud = document.getElementById('aud');
+    const chBox = document.getElementById('channels');
+    const rows = [];
+    for (let i = 0; i < N; i++) {
+      const r = document.createElement('div');
+      r.className = 'ch';
+      r.innerHTML =
+        `<div class="lbl"><b>${LABELS[i].split('·')[0]}</b>·${LABELS[i].split('·').slice(1).join('·')}</div>` +
+        `<div class="bar"><i></i></div>` +
+        `<div class="meta"><b>—</b></div>`;
+      chBox.appendChild(r);
+      rows.push({ fill: r.querySelector('i'), meta: r.querySelector('.meta'), metaB: r.querySelector('.meta b') });
+    }
+
+    const $ = id => document.getElementById(id);
+    $('total').textContent = N;
+    let ctx, analysers = [], td = [], fd = [], masterGain;
+
+    document.getElementById('start').onclick = async () => {
+      document.getElementById('start').disabled = true;
+      $('state').textContent = 'cargando manifest…';
+      try {
+        // ── Mismo camino que index.html: Shaka al <audio> ──
+        shaka.polyfill.installAll();
+        const player = new shaka.Player(aud);
+        player.configure({ abr: { enabled: false } });
+        await player.load(MANIFEST);
+
+        // ── Web Audio: source → splitter(6) → 6 analizadores ──
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+        if (ctx.state === 'suspended') await ctx.resume();
+        $('sr').textContent = ctx.sampleRate;
+
+        const source = ctx.createMediaElementSource(aud);
+        const splitter = ctx.createChannelSplitter(N);
+        source.connect(splitter);
+        $('outs').textContent = splitter.numberOfOutputs;
+
+        for (let i = 0; i < N; i++) {
+          const a = ctx.createAnalyser();
+          a.fftSize = 2048;
+          splitter.connect(a, i);     // salida i del splitter → analizador i
+          analysers.push(a);
+          td.push(new Float32Array(a.fftSize));
+          fd.push(new Uint8Array(a.frequencyBinCount));
+        }
+
+        // Salida audible (downmix completo), por defecto a 0 para no molestar.
+        masterGain = ctx.createGain();
+        masterGain.gain.value = parseFloat($('vol').value);
+        source.connect(masterGain);
+        masterGain.connect(ctx.destination);
+
+        await aud.play();
+        $('state').textContent = 'reproduciendo';
+        loop();
+      } catch (e) {
+        $('state').textContent = 'ERROR: ' + e.message;
+        console.error(e);
+        document.getElementById('start').disabled = false;
+      }
+    };
+
+    $('vol').oninput = e => {
+      $('volval').textContent = (+e.target.value).toFixed(2);
+      if (masterGain) masterGain.gain.value = +e.target.value;
+    };
+
+    function loop() {
+      requestAnimationFrame(loop);
+      let active = 0;
+      for (let i = 0; i < N; i++) {
+        const a = analysers[i];
+        a.getFloatTimeDomainData(td[i]);
+        a.getByteFrequencyData(fd[i]);
+
+        // RMS → nivel
+        let sum = 0;
+        for (let n = 0; n < td[i].length; n++) sum += td[i][n] * td[i][n];
+        const rms = Math.sqrt(sum / td[i].length);
+        const db = 20 * Math.log10(rms + 1e-9);            // -inf..0
+        const pct = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+        rows[i].fill.style.width = pct + '%';
+
+        // Frecuencia dominante (prueba de separación en los stems)
+        let maxV = 0, maxBin = 0;
+        for (let b = 1; b < fd[i].length; b++) if (fd[i][b] > maxV) { maxV = fd[i][b]; maxBin = b; }
+        const hz = Math.round(maxBin * ctx.sampleRate / a.fftSize);
+
+        const live = rms > 1e-4;
+        if (live) active++;
+        rows[i].meta.className = 'meta ' + (live ? 'live' : 'dead');
+        rows[i].metaB.textContent = live ? (hz + ' Hz') : 'silencio';
+      }
+      const c = $('count');
+      c.textContent = active;
+      c.style.color = active >= N ? 'var(--ok)' : active <= 2 ? 'var(--bad)' : '#ffd400';
+    }
+  </script>
+</body>
+</html>

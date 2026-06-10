@@ -719,8 +719,52 @@ async function setupFOA() {
     // (delante/detrás/elevación). Si Omnitone no cargara, cae a cardioides.
     // Override desde la URL: ?renderer=hoast
     const _renderer = new URLSearchParams(location.search).get('renderer') || 'omnitone';
-    engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer });
+
+    // Stems por músico (spotlight posicional). El stream multicanal trae
+    // 4 FOA + N stems en los canales 4..N. La colocación 3D y los nombres los
+    // define el editor (editor.html) y se guardan en /scene.json.
+    // Prioridad:  ?stems= (override azimuts)  >  scene.json  >  DEFAULT_STEMS.
+    //   ?stems=-50,-30,-10,10,30,50      azimut por músico (grados)
+    //   ?stems=-50:5,-30,-10:-3,…        con elevación opcional «az:el»
+    const DEFAULT_STEMS = [
+      { azimuthDeg: -50, name: 'DR'    },   // batería
+      { azimuthDeg: -30, name: 'GT'    },   // guitarra
+      { azimuthDeg: -10, name: 'KEY'   },   // teclado
+      { azimuthDeg:  10, name: 'SAX'   },
+      { azimuthDeg:  30, name: 'TBONE' },   // trombón
+      { azimuthDeg:  50, name: 'TPT'   },   // trompeta
+    ];
+    let _stems = null, _spot = null;
+    try {
+      const _r = await fetch('/scene.json', { cache: 'no-store' });
+      if (_r.ok) {
+        const _sc = await _r.json();
+        if (Array.isArray(_sc.stems) && _sc.stems.length)
+          _stems = _sc.stems.map(s => ({
+            azimuthDeg: +s.azimuthDeg || 0, elevationDeg: +s.elevationDeg || 0, name: s.name }));
+        if (_sc.spotlight) _spot = _sc.spotlight;
+      }
+    } catch (_) { /* sin escena → DEFAULT_STEMS */ }
+
+    const _stemsParam = new URLSearchParams(location.search).get('stems');
+    if (_stemsParam) {
+      _stems = _stemsParam.split(',').map((tok, i) => {
+        const [az, el] = tok.split(':');
+        return { azimuthDeg: parseFloat(az) || 0, elevationDeg: parseFloat(el) || 0, name: 'músico ' + (i + 1) };
+      });
+    }
+    if (!_stems) _stems = DEFAULT_STEMS;
+
+    engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer, stems: _stems });
     await engine.attach(audioEl);
+    if (_stems.length) {
+      // zoomMin = vista actual (sin zoom) → en reposo los stems quedan en
+      // silencio y crecen solo al acercar mirando al músico. Vale para PC y VR
+      // (en VR el zoom normalizado mapea t=0 → factor=zoomMin → boost 0).
+      engine.setSpotlightParams({ zoomMin: getZoomFactor() });
+      if (_spot) engine.setSpotlightParams(_spot);   // maxBoost/focusExp/restGain/zoomMax
+      toast(`${_stems.length} stems · spotlight en zoom`);
+    }
 
     // Alineación audio↔vídeo desde la URL (ajustable en el visor sin recompilar):
     //   ?ayaw=90    → offset de azimut en grados (prueba 90 / 180 / -90 / 45…)
@@ -1100,6 +1144,12 @@ async function enterXR() {
                   xrZoomDist = Math.max(0, Math.min(80, xrZoomDist - jy * 1.2));
               }
             }
+
+            // El zoom de VR (joystick) alimenta el spotlight de stems: en
+            // escritorio lo hace el FOV vía setZoomByFactor, pero en VR no hay
+            // FOV controlable, así que mapeamos xrZoomDist → zoom normalizado.
+            // Boost completo a media carrera (≈40) para que responda pronto.
+            engine?.setZoomNormalized(xrZoomDist / 40);
 
             // Centrar la esfera en la cabeza y desplazarla EN CONTRA de la vista
             // para "acercar" lo que miras (xrZoomDist = 0 → solo centrada).

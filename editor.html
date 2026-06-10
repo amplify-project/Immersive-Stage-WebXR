@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Editor · 360 Ambisonics Player</title>
+<style>
+  :root{--bg:#080a0f;--surface:#0d1117;--surface2:#161b22;--accent:#00d4ff;--accent2:#7c3aed;
+        --ok:#34d399;--bad:#ff4444;--warn:#ffd400;--text:#e6edf3;--muted:#8b949e;--mono:'Space Mono',monospace}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;line-height:1.5;padding:20px;
+       display:grid;grid-template-columns:1fr 420px;gap:20px;max-width:1280px;margin:0 auto}
+  h1{font-size:18px;letter-spacing:.04em;color:var(--accent);margin-bottom:2px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:18px 0 8px;font-family:var(--mono)}
+  .col{min-width:0}
+  .card{background:var(--surface);border:1px solid #ffffff12;border-radius:10px;padding:16px;margin-bottom:16px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  select,input[type=text],input[type=number]{width:100%;background:var(--surface2);border:1px solid #ffffff1a;
+       border-radius:6px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none}
+  select:focus,input:focus{border-color:var(--accent)}
+  .row{display:flex;gap:10px}.row>*{flex:1}
+  button{background:var(--accent);color:#000;border:none;border-radius:6px;padding:9px 14px;font-weight:700;
+       font-family:var(--mono);font-size:12px;letter-spacing:.05em;cursor:pointer;text-transform:uppercase}
+  button:hover{opacity:.85} button:disabled{opacity:.35;cursor:default}
+  button.ghost{background:transparent;border:1px solid #ffffff22;color:var(--text)}
+  button.danger{background:var(--bad);color:#fff} button.go{background:var(--ok);color:#04231a}
+  button.alt{background:var(--accent2);color:#fff}
+  .stemrow{display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid #ffffff12;
+       border-radius:6px;padding:8px;margin-bottom:6px;font-family:var(--mono);font-size:12px}
+  .stemrow .dot{width:12px;height:12px;border-radius:50%;flex:none}
+  .stemrow input[type=text]{flex:1;padding:4px 8px}
+  .stemrow .az{width:78px;flex:none;text-align:right}
+  .stemrow.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+  .x{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px}.x:hover{color:var(--bad)}
+  canvas#radar{width:100%;aspect-ratio:1;background:radial-gradient(circle,#0d1620,#080a0f);border:1px solid #ffffff14;border-radius:50%;touch-action:none}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  .slider{display:flex;align-items:center;gap:10px;margin:8px 0;font-family:var(--mono);font-size:12px}
+  .slider input[type=range]{flex:1} .slider .v{width:54px;text-align:right;color:var(--accent)}
+  #log{background:#05080c;border:1px solid #ffffff12;border-radius:6px;padding:10px;font-family:var(--mono);
+       font-size:11px;color:var(--muted);height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;padding:3px 8px;border-radius:4px;border:1px solid}
+  .b-run{color:var(--ok);border-color:#34d39955;background:#34d39915}
+  .b-idle{color:var(--muted);border-color:#ffffff22}
+  .b-warn{color:var(--warn);border-color:#ffd40055;background:#ffd40012}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--surface2);
+       border:1px solid #ffffff1a;border-radius:6px;padding:10px 18px;font-size:13px;opacity:0;transition:.3s;z-index:50}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  a{color:var(--accent)}
+  .small{font-size:11px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<div class="col">
+  <h1>Editor de escena · 360 Ambisonics</h1>
+  <p class="small">Elige fuentes, coloca a cada músico en el espacio y lanza el encode. Guarda → el player (<code>index.html</code>) lee <code>scene.json</code>.</p>
+  <div id="apiErr" style="display:none;margin:12px 0;padding:12px 14px;border-radius:8px;border:1px solid #ff444455;background:#ff444415;color:#ffb3b3;font-size:13px">
+    ⚠ No conecto con la API (<code>/api/media</code>). Reinicia el backend para cargar la nueva versión:
+    <code style="display:block;margin-top:6px;color:#fff">Ctrl-C en el node actual  →  node server.js</code>
+  </div>
+
+  <div class="card">
+    <h2>Fuentes</h2>
+    <label>Vídeo 360 (equirectangular)</label>
+    <select id="video"></select>
+    <div class="row">
+      <div>
+        <label>Lecho ambisónico (FOA · 4 canales)</label>
+        <select id="bed"></select>
+      </div>
+      <div style="flex:0 0 130px">
+        <label>Formato</label>
+        <select id="bedFormat">
+          <option value="fuma">FuMa (WXYZ)</option>
+          <option value="ambix">AmbiX (ACN/SN3D)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Músicos / stems</h2>
+    <div class="row">
+      <select id="addStem"><option value="">+ añadir stem…</option></select>
+      <button class="ghost" style="flex:0 0 auto" onclick="addSelectedStem()">Añadir</button>
+    </div>
+    <div id="stems" style="margin-top:10px"></div>
+    <p class="hint">Arrastra los puntos en el radar para colocar a cada músico. El orden aquí = orden de canales en el stream.</p>
+  </div>
+
+  <div class="card">
+    <h2>Colocación 3D (vista cenital)</h2>
+    <canvas id="radar" width="600" height="600"></canvas>
+    <div id="selPanel" style="display:none;margin-top:12px">
+      <div class="row">
+        <div><label>Nombre</label><input type="text" id="selName"></div>
+        <div style="flex:0 0 110px"><label>Azimut °</label><input type="number" id="selAz" step="1"></div>
+        <div style="flex:0 0 110px"><label>Elevación °</label><input type="number" id="selEl" step="1"></div>
+      </div>
+    </div>
+    <p class="hint">Arriba = frente del vídeo (0°). Izquierda = +90°. Derecha = −90°.</p>
+  </div>
+</div>
+
+<div class="col">
+  <div class="card">
+    <h2>Spotlight</h2>
+    <div class="slider">maxBoost <input type="range" id="maxBoost" min="0" max="4" step="0.1"><span class="v" id="maxBoostV"></span></div>
+    <div class="slider">focusExp <input type="range" id="focusExp" min="1" max="8" step="0.5"><span class="v" id="focusExpV"></span></div>
+    <div class="slider">restGain <input type="range" id="restGain" min="0" max="1" step="0.05"><span class="v" id="restGainV"></span></div>
+    <div class="slider">zoomMax  <input type="range" id="zoomMax" min="1.2" max="4" step="0.1"><span class="v" id="zoomMaxV"></span></div>
+    <p class="hint">maxBoost = cuánto sube el músico mirado. focusExp bajo = cono más ancho (perdona puntería). restGain = nivel de fondo de los stems (0 = solo en zoom).</p>
+  </div>
+
+  <div class="card">
+    <h2>Encode</h2>
+    <div class="row">
+      <div><label>Códec vídeo</label>
+        <select id="codec"><option value="vp9">VP9 / WebM (Quest ✓)</option><option value="h264">H.264 / MP4</option></select>
+      </div>
+      <div style="flex:0 0 120px"><label>Segmento s</label><input type="number" id="seg" min="1" max="6" step="1"></div>
+    </div>
+    <div class="row">
+      <div><label>Escala (vacío = original)</label><input type="text" id="scale" placeholder="1920:960"></div>
+      <div style="flex:0 0 120px"><label>Bitrate vídeo</label><input type="text" id="vbitrate" placeholder="6000k"></div>
+    </div>
+    <p class="hint" id="codecWarn"></p>
+    <div class="row" style="margin-top:12px">
+      <button class="go" onclick="encode('vod')">Generar VOD</button>
+      <button class="go" onclick="encode('live')">Lanzar LIVE</button>
+      <button class="danger" style="flex:0 0 auto" onclick="stopEncode()">Parar</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Proxy ligero (para live en tiempo real)</h2>
+    <p class="hint">Si el origen es 4K/HEVC, el live no llega a 1×. Crea un proxy 8-bit que decodifica barato.</p>
+    <div class="row">
+      <div><label>Origen</label><select id="proxySrc"></select></div>
+      <div style="flex:0 0 120px"><label>Escala</label><input type="text" id="proxyScale" value="1920:960"></div>
+    </div>
+    <button class="alt" style="margin-top:10px" onclick="makeProxy()">Crear proxy</button>
+  </div>
+
+  <div class="card">
+    <h2>Estado · <span id="statusBadge" class="badge b-idle">idle</span></h2>
+    <div class="small" id="statusLine" style="margin-bottom:8px"></div>
+    <div id="log"></div>
+    <div class="row" style="margin-top:12px">
+      <button onclick="saveScene(true)">Guardar escena</button>
+      <button class="ghost" onclick="openPlayer()">Abrir player</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const PALETTE = ['#00d4ff','#34d399','#ffd400','#ff7ab6','#a78bfa','#ff8a3d','#7ee787','#f778ba','#79c0ff','#ffa657'];
+let media = [];
+let scene = {
+  video: '', bed: '', bedFormat: 'fuma',
+  stems: [],
+  spotlight: { maxBoost: 1.5, focusExp: 4, restGain: 0, zoomMax: 2.5 },
+  encode: { codec: 'vp9', scale: '1920:960', vbitrate: '6000k', seg: 2 },
+};
+let selected = -1;
+
+const $ = id => document.getElementById(id);
+function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2600); }
+
+// ── Carga inicial ───────────────────────────────────────────────────────────
+async function init() {
+  let apiOk = true;
+  const [mRes, sRes] = await Promise.all([
+    fetch('/api/media').then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).catch(()=>{ apiOk=false; return {media:[]}; }),
+    fetch('/api/scene').then(r=>r.ok?r.json():{}).catch(()=>({})),
+  ]);
+  if (!apiOk) $('apiErr').style.display = 'block';
+  media = mRes.media || [];
+  if (apiOk && !media.length) toast('La carpeta media/ está vacía');
+  if (sRes && (sRes.stems || sRes.video)) scene = Object.assign(scene, sRes,
+    { spotlight: Object.assign(scene.spotlight, sRes.spotlight||{}),
+      encode: Object.assign(scene.encode, sRes.encode||{}) });
+  buildSelectors();
+  bindControls();
+  renderStems();
+  drawRadar();
+  pollStatus();
+  setInterval(pollStatus, 1500);
+}
+
+function buildSelectors() {
+  const vids = media.filter(m=>m.kind==='video');
+  const auds = media.filter(m=>m.kind==='audio');
+  const opt = (m, label) => `<option value="${m.file}">${label||m.name}${m.channels?` · ${m.channels}ch`:''}</option>`;
+  $('video').innerHTML = vids.map(m=>opt(m)).join('') || '<option>— sin vídeos en media/ —</option>';
+  // bed: preferimos los de 4 canales
+  $('bed').innerHTML = auds.map(m=>opt(m)).join('') || '<option>— sin audio —</option>';
+  $('addStem').innerHTML = '<option value="">+ añadir stem…</option>' + auds.map(m=>opt(m)).join('');
+  $('proxySrc').innerHTML = vids.map(m=>opt(m)).join('');
+  if (scene.video) $('video').value = scene.video; else scene.video = $('video').value;
+  // bed por defecto: el primer audio de 4 canales
+  if (scene.bed) $('bed').value = scene.bed;
+  else { const foa = auds.find(m=>m.channels===4); scene.bed = foa ? foa.file : ($('bed').value||''); $('bed').value = scene.bed; }
+  $('bedFormat').value = scene.bedFormat || 'fuma';
+  $('proxySrc').value = scene.video || ($('proxySrc').value||'');
+}
+
+function bindControls() {
+  $('video').onchange   = e => scene.video = e.target.value;
+  $('bed').onchange     = e => scene.bed = e.target.value;
+  $('bedFormat').onchange = e => scene.bedFormat = e.target.value;
+  // spotlight
+  for (const k of ['maxBoost','focusExp','restGain','zoomMax']) {
+    const el = $(k); el.value = scene.spotlight[k];
+    $(k+'V').textContent = (+el.value).toFixed(2);
+    el.oninput = e => { scene.spotlight[k] = +e.target.value; $(k+'V').textContent = (+e.target.value).toFixed(2); };
+  }
+  // encode
+  $('codec').value = scene.encode.codec; $('seg').value = scene.encode.seg;
+  $('scale').value = scene.encode.scale||''; $('vbitrate').value = scene.encode.vbitrate||'';
+  const codecWarn = () => $('codecWarn').innerHTML = scene.encode.codec==='h264'
+    ? '<span class="badge b-warn">aviso</span> H.264 mete el audio en MP4; el navegador de la Quest NO reproduce Opus multicanal en MP4. Usa VP9 para VR.'
+    : '';
+  $('codec').onchange = e => { scene.encode.codec = e.target.value; codecWarn(); };
+  $('seg').oninput = e => scene.encode.seg = +e.target.value||2;
+  $('scale').oninput = e => scene.encode.scale = e.target.value.trim();
+  $('vbitrate').oninput = e => scene.encode.vbitrate = e.target.value.trim();
+  codecWarn();
+  // selected panel
+  $('selName').oninput = e => { if(selected>=0){ scene.stems[selected].name=e.target.value; renderStems(); } };
+  $('selAz').oninput   = e => { if(selected>=0){ scene.stems[selected].azimuthDeg=+e.target.value; renderStems(); drawRadar(); } };
+  $('selEl').oninput   = e => { if(selected>=0){ scene.stems[selected].elevationDeg=+e.target.value; } };
+}
+
+// ── Stems ───────────────────────────────────────────────────────────────────
+function addSelectedStem() {
+  const file = $('addStem').value; if (!file) return;
+  const m = media.find(x=>x.file===file);
+  const name = (m?m.name:'stem').replace(/\.[^.]+$/,'').split(/[\s_-]/)[0].toUpperCase();
+  // azimut por defecto: reparte por el frente
+  const n = scene.stems.length;
+  const az = Math.round(-50 + (n*20));
+  scene.stems.push({ file, name, azimuthDeg: Math.max(-160,Math.min(160,az)), elevationDeg: 0 });
+  $('addStem').value = '';
+  selected = scene.stems.length-1;
+  renderStems(); drawRadar(); syncSelPanel();
+}
+function removeStem(i){ scene.stems.splice(i,1); if(selected>=scene.stems.length) selected=-1; renderStems(); drawRadar(); syncSelPanel(); }
+function selectStem(i){ selected=i; renderStems(); drawRadar(); syncSelPanel(); }
+
+function renderStems() {
+  $('stems').innerHTML = scene.stems.map((s,i)=>`
+    <div class="stemrow ${i===selected?'sel':''}" onclick="selectStem(${i})">
+      <span class="dot" style="background:${PALETTE[i%PALETTE.length]}"></span>
+      <input type="text" value="${s.name||''}" onclick="event.stopPropagation()"
+             oninput="scene.stems[${i}].name=this.value;drawRadar()">
+      <span class="az">${Math.round(s.azimuthDeg)}°/${Math.round(s.elevationDeg||0)}°</span>
+      <span class="x" onclick="event.stopPropagation();removeStem(${i})">✕</span>
+    </div>`).join('') || '<p class="small">Sin stems. Añade músicos arriba.</p>';
+}
+function syncSelPanel() {
+  const p = $('selPanel');
+  if (selected<0 || !scene.stems[selected]) { p.style.display='none'; return; }
+  p.style.display='block';
+  const s = scene.stems[selected];
+  $('selName').value = s.name||''; $('selAz').value = Math.round(s.azimuthDeg); $('selEl').value = Math.round(s.elevationDeg||0);
+}
+
+// ── Radar (azimut por arrastre) ───────────────────────────────────────────────
+const radar = $('radar'); const rctx = radar.getContext('2d');
+function azToXY(az){ const r=radar.width*0.40, cx=radar.width/2, cy=radar.height/2, a=az*Math.PI/180;
+  return { x: cx - r*Math.sin(a), y: cy - r*Math.cos(a) }; }
+function xyToAz(x,y){ const cx=radar.width/2, cy=radar.height/2; return Math.atan2(-(x-cx), -(y-cy))*180/Math.PI; }
+
+function drawRadar() {
+  const w=radar.width, h=radar.height, cx=w/2, cy=h/2, R=w*0.40;
+  rctx.clearRect(0,0,w,h);
+  // anillos
+  rctx.strokeStyle='#ffffff14'; rctx.lineWidth=2;
+  rctx.beginPath(); rctx.arc(cx,cy,R,0,7); rctx.stroke();
+  rctx.beginPath(); rctx.arc(cx,cy,R*0.5,0,7); rctx.stroke();
+  // ejes + etiquetas
+  rctx.strokeStyle='#ffffff0c'; rctx.beginPath();
+  rctx.moveTo(cx,cy-R); rctx.lineTo(cx,cy+R); rctx.moveTo(cx-R,cy); rctx.lineTo(cx+R,cy); rctx.stroke();
+  rctx.fillStyle='#8b949e'; rctx.font='13px monospace'; rctx.textAlign='center';
+  rctx.fillText('FRENTE 0°',cx,cy-R-10); rctx.fillText('detrás ±180°',cx,cy+R+18);
+  rctx.fillText('+90°',cx-R-22,cy+4); rctx.fillText('−90°',cx+R+22,cy+4);
+  // oyente
+  rctx.fillStyle='#ffffff55'; rctx.beginPath(); rctx.arc(cx,cy,5,0,7); rctx.fill();
+  // stems
+  scene.stems.forEach((s,i)=>{
+    const {x,y}=azToXY(s.azimuthDeg); const c=PALETTE[i%PALETTE.length];
+    rctx.strokeStyle=c+'44'; rctx.beginPath(); rctx.moveTo(cx,cy); rctx.lineTo(x,y); rctx.stroke();
+    rctx.fillStyle=c; rctx.beginPath(); rctx.arc(x,y,i===selected?11:8,0,7); rctx.fill();
+    if(i===selected){ rctx.strokeStyle='#fff'; rctx.lineWidth=2; rctx.beginPath(); rctx.arc(x,y,14,0,7); rctx.stroke(); }
+    rctx.fillStyle='#e6edf3'; rctx.font='bold 12px monospace'; rctx.textAlign='center';
+    rctx.fillText(s.name||('S'+i), x, y-16);
+  });
+}
+
+let dragging=-1;
+function radarPos(ev){ const r=radar.getBoundingClientRect(); const t=ev.touches?ev.touches[0]:ev;
+  return { x:(t.clientX-r.left)/r.width*radar.width, y:(t.clientY-r.top)/r.height*radar.height }; }
+function radarDown(ev){ const {x,y}=radarPos(ev); let best=-1,bd=1e9;
+  scene.stems.forEach((s,i)=>{ const p=azToXY(s.azimuthDeg); const d=Math.hypot(p.x-x,p.y-y); if(d<bd){bd=d;best=i;} });
+  if(best>=0 && bd<40){ dragging=best; selectStem(best); ev.preventDefault(); } }
+function radarMove(ev){ if(dragging<0) return; const {x,y}=radarPos(ev);
+  scene.stems[dragging].azimuthDeg = Math.round(xyToAz(x,y)); renderStems(); drawRadar(); syncSelPanel(); ev.preventDefault(); }
+function radarUp(){ dragging=-1; }
+radar.addEventListener('mousedown',radarDown); window.addEventListener('mousemove',radarMove); window.addEventListener('mouseup',radarUp);
+radar.addEventListener('touchstart',radarDown,{passive:false}); radar.addEventListener('touchmove',radarMove,{passive:false}); radar.addEventListener('touchend',radarUp);
+
+// ── Guardar / encode / proxy / estado ─────────────────────────────────────────
+async function saveScene(notify) {
+  scene.video = $('video').value; scene.bed = $('bed').value;
+  const r = await fetch('/api/scene', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(scene) });
+  if (notify) toast(r.ok ? 'Escena guardada → scene.json' : 'Error guardando');
+  return r.ok;
+}
+async function encode(mode) {
+  if (!scene.stems.length && !confirm('No hay stems. ¿Encodear solo FOA?')) return;
+  await saveScene(false);
+  const r = await fetch('/api/encode', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode}) });
+  const j = await r.json();
+  toast(r.ok ? `Encode ${mode.toUpperCase()} lanzado` : ('Error: '+(j.error||r.status)));
+}
+async function stopEncode(){ const r=await fetch('/api/encode/stop',{method:'POST'}); toast(r.ok?'Parado':'Nada que parar'); }
+async function makeProxy(){
+  const src=$('proxySrc').value, scale=$('proxyScale').value.trim()||'1920:960';
+  const r=await fetch('/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({src,scale})});
+  const j=await r.json();
+  if(r.ok){ toast('Proxy en marcha → '+j.out); } else { toast('Error: '+(j.error||r.status)); }
+}
+function openPlayer(){ window.open(location.origin+'/index.html','_blank'); }
+
+async function pollStatus() {
+  let s; try { s = await fetch('/api/encode/status').then(r=>r.json()); } catch(_){ return; }
+  const badge=$('statusBadge');
+  if (s.running) {
+    badge.className='badge b-run'; badge.textContent=`${s.mode} · ${s.speed||'—'}`;
+    const warn = s.mode!=='proxy' && s.speed && parseFloat(s.speed)<1 ? '  ⚠ por debajo de tiempo real' : '';
+    $('statusLine').textContent=`frame ${s.frame||0} · speed ${s.speed||'—'}${warn}`;
+  } else {
+    badge.className='badge b-idle';
+    badge.textContent = (s.exit===0)?'completado':(s.exit!=null&&s.exit!==0)?('exit '+s.exit):'idle';
+    $('statusLine').textContent = s.exit===0?'último encode OK':'';
+  }
+  if (s.log && s.log.length){ const l=$('log'); l.textContent=s.log.join('\n'); l.scrollTop=l.scrollHeight; }
+}
+
+init();
+window.scene = scene; // debug
+</script>
+</body>
+</html>
