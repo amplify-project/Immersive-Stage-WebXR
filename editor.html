@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -52,24 +52,29 @@
 <body>
 
 <div class="col">
-  <h1>Editor de escena · 360 Ambisonics</h1>
-  <p class="small">Elige fuentes, coloca a cada músico en el espacio y lanza el encode. Guarda → el player (<code>index.html</code>) lee <code>scene.json</code>.</p>
+  <h1>Scene editor · 360 Ambisonics</h1>
+  <p class="small">Pick sources, place each musician in space and launch the encode. Save → the player (<code>index.html</code>) reads <code>scene.json</code>.</p>
   <div id="apiErr" style="display:none;margin:12px 0;padding:12px 14px;border-radius:8px;border:1px solid #ff444455;background:#ff444415;color:#ffb3b3;font-size:13px">
-    ⚠ No conecto con la API (<code>/api/media</code>). Reinicia el backend para cargar la nueva versión:
-    <code style="display:block;margin-top:6px;color:#fff">Ctrl-C en el node actual  →  node server.js</code>
+    ⚠ Cannot reach the API (<code>/api/media</code>). Restart the backend to load the new version:
+    <code style="display:block;margin-top:6px;color:#fff">Ctrl-C the running node  →  node server.js</code>
   </div>
 
-  <div class="card">
-    <h2>Fuentes</h2>
-    <label>Vídeo 360 (equirectangular)</label>
+  <div class="tabs" style="display:flex;gap:8px;margin:14px 0 4px">
+    <button id="tabVod"  class="go"    onclick="setMode('vod')">VOD · files</button>
+    <button id="tabLive" class="ghost" onclick="setMode('live')">LIVE · USB/UDP</button>
+  </div>
+
+  <div class="card" id="vodSources">
+    <h2>Sources (files)</h2>
+    <label>360 video (equirectangular)</label>
     <select id="video"></select>
     <div class="row">
       <div>
-        <label>Lecho ambisónico (FOA · 4 canales)</label>
+        <label>Ambisonic bed (FOA · 4 channels)</label>
         <select id="bed"></select>
       </div>
       <div style="flex:0 0 130px">
-        <label>Formato</label>
+        <label>Format</label>
         <select id="bedFormat">
           <option value="fuma">FuMa (WXYZ)</option>
           <option value="ambix">AmbiX (ACN/SN3D)</option>
@@ -78,27 +83,74 @@
     </div>
   </div>
 
-  <div class="card">
-    <h2>Músicos / stems</h2>
+  <div class="card" id="liveSources" style="display:none">
+    <h2>Live sources</h2>
+    <p class="hint">Video comes in on its own source; <b>all audio (FOA + stems) arrives together</b> on a single multichannel device/stream (e.g. the X32 over USB). Each musician is assigned to a channel below.</p>
+
+    <label>360 video</label>
     <div class="row">
-      <select id="addStem"><option value="">+ añadir stem…</option></select>
-      <button class="ghost" style="flex:0 0 auto" onclick="addSelectedStem()">Añadir</button>
+      <div style="flex:0 0 120px">
+        <select id="lvSrc"><option value="usb">USB (v4l2)</option><option value="udp">UDP</option></select>
+      </div>
+      <div id="lvUsbWrap"><select id="lvDevice"></select></div>
+      <div id="lvUdpWrap" style="display:none"><input type="text" id="lvUrl" placeholder="udp://0.0.0.0:5001?mode=listener"></div>
     </div>
-    <div id="stems" style="margin-top:10px"></div>
-    <p class="hint">Arrastra los puntos en el radar para colocar a cada músico. El orden aquí = orden de canales en el stream.</p>
+    <div class="row" id="lvUsbOpts">
+      <div><label>Resolution (empty=auto)</label><input type="text" id="lvSize" placeholder="3840x1920"></div>
+      <div style="flex:0 0 90px"><label>FPS</label><input type="number" id="lvFr" value="30" min="1" max="60"></div>
+      <div style="flex:0 0 110px"><label>Input format</label>
+        <select id="lvInformat"><option value="">auto</option><option value="mjpeg">mjpeg</option><option value="yuyv422">yuyv422</option><option value="nv12">nv12</option></select>
+      </div>
+    </div>
+
+    <label style="margin-top:14px">Multichannel audio (X32 / mixer)</label>
+    <div class="row">
+      <div style="flex:0 0 120px">
+        <select id="laSrc"><option value="usb">USB (ALSA)</option><option value="udp">UDP</option></select>
+      </div>
+      <div id="laUsbWrap"><select id="laDevice"></select></div>
+      <div id="laUdpWrap" style="display:none"><input type="text" id="laUrl" placeholder="udp://0.0.0.0:5002?mode=listener"></div>
+      <div style="flex:0 0 110px"><label style="margin:0 0 4px">Total ch.</label><input type="number" id="laChannels" value="32" min="4" max="64"></div>
+    </div>
+
+    <label style="margin-top:14px">Ambisonic FOA (NT-SF1) · channels W,X,Y,Z</label>
+    <div class="row">
+      <div style="flex:0 0 60px"><input type="number" id="foa0" value="0" min="0"></div>
+      <div style="flex:0 0 60px"><input type="number" id="foa1" value="1" min="0"></div>
+      <div style="flex:0 0 60px"><input type="number" id="foa2" value="2" min="0"></div>
+      <div style="flex:0 0 60px"><input type="number" id="foa3" value="3" min="0"></div>
+      <div style="flex:0 0 130px">
+        <select id="foaFormat"><option value="fuma">FuMa (WXYZ)</option><option value="ambix">AmbiX</option></select>
+      </div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+      <input type="checkbox" id="foaAformat" style="width:auto"> Convert NT-SF1 A-format → B-format (4×4 matrix)
+    </label>
+    <p class="hint">Check this only if the 4 capsules arrive raw (A-format). If the FOA is already converted to B-format upstream (plugin/DAW), leave it unchecked.</p>
   </div>
 
   <div class="card">
-    <h2>Colocación 3D (vista cenital)</h2>
+    <h2>Musicians / stems</h2>
+    <div class="row" id="addStemRow">
+      <select id="addStem"><option value="">+ add stem…</option></select>
+      <button class="ghost" style="flex:0 0 auto" onclick="addSelectedStem()">Add</button>
+    </div>
+    <button class="ghost" id="addMusicianBtn" style="display:none;width:100%" onclick="addLiveStem()">+ add musician (next channel)</button>
+    <div id="stems" style="margin-top:10px"></div>
+    <p class="hint" id="stemsHint">Drag the dots on the radar to place each musician. The order here = channel order in the stream.</p>
+  </div>
+
+  <div class="card">
+    <h2>3D placement (top-down view)</h2>
     <canvas id="radar" width="600" height="600"></canvas>
     <div id="selPanel" style="display:none;margin-top:12px">
       <div class="row">
-        <div><label>Nombre</label><input type="text" id="selName"></div>
-        <div style="flex:0 0 110px"><label>Azimut °</label><input type="number" id="selAz" step="1"></div>
-        <div style="flex:0 0 110px"><label>Elevación °</label><input type="number" id="selEl" step="1"></div>
+        <div><label>Name</label><input type="text" id="selName"></div>
+        <div style="flex:0 0 110px"><label>Azimuth °</label><input type="number" id="selAz" step="1"></div>
+        <div style="flex:0 0 110px"><label>Elevation °</label><input type="number" id="selEl" step="1"></div>
       </div>
     </div>
-    <p class="hint">Arriba = frente del vídeo (0°). Izquierda = +90°. Derecha = −90°.</p>
+    <p class="hint">Up = front of the video (0°). Left = +90°. Right = −90°.</p>
   </div>
 </div>
 
@@ -109,46 +161,54 @@
     <div class="slider">focusExp <input type="range" id="focusExp" min="1" max="8" step="0.5"><span class="v" id="focusExpV"></span></div>
     <div class="slider">restGain <input type="range" id="restGain" min="0" max="1" step="0.05"><span class="v" id="restGainV"></span></div>
     <div class="slider">zoomMax  <input type="range" id="zoomMax" min="1.2" max="4" step="0.1"><span class="v" id="zoomMaxV"></span></div>
-    <p class="hint">maxBoost = cuánto sube el músico mirado. focusExp bajo = cono más ancho (perdona puntería). restGain = nivel de fondo de los stems (0 = solo en zoom).</p>
+    <p class="hint">maxBoost = how much the looked-at musician is raised. Low focusExp = wider cone (forgives aim). restGain = background level of the stems (0 = only on zoom).</p>
   </div>
 
   <div class="card">
     <h2>Encode</h2>
     <div class="row">
-      <div><label>Códec vídeo</label>
-        <select id="codec"><option value="vp9">VP9 / WebM (Quest ✓)</option><option value="h264">H.264 / MP4</option></select>
+      <div><label>Video codec</label>
+        <select id="codec">
+          <option value="h264_nvenc">H.264 NVENC · GPU NVIDIA (4K live ✓)</option>
+          <option value="vp9">VP9 / WebM (CPU)</option>
+          <option value="h264">H.264 / x264 (CPU)</option>
+        </select>
       </div>
-      <div style="flex:0 0 120px"><label>Segmento s</label><input type="number" id="seg" min="1" max="6" step="1"></div>
+      <div style="flex:0 0 120px"><label>Segment s</label><input type="number" id="seg" min="1" max="6" step="1"></div>
     </div>
     <div class="row">
-      <div><label>Escala (vacío = original)</label><input type="text" id="scale" placeholder="1920:960"></div>
-      <div style="flex:0 0 120px"><label>Bitrate vídeo</label><input type="text" id="vbitrate" placeholder="6000k"></div>
+      <div><label>Scale (empty = original)</label><input type="text" id="scale" placeholder="1920:960"></div>
+      <div style="flex:0 0 120px"><label>Video bitrate</label><input type="text" id="vbitrate" placeholder="6000k"></div>
+    </div>
+    <div class="row">
+      <div><label>Publish to S3 (empty = local)</label><input type="text" id="s3Bucket" placeholder="s3://my-bucket/live"></div>
+      <div style="flex:0 0 140px"><label>AWS region</label><input type="text" id="s3Region" placeholder="eu-west-1"></div>
     </div>
     <p class="hint" id="codecWarn"></p>
     <div class="row" style="margin-top:12px">
-      <button class="go" onclick="encode('vod')">Generar VOD</button>
-      <button class="go" onclick="encode('live')">Lanzar LIVE</button>
-      <button class="danger" style="flex:0 0 auto" onclick="stopEncode()">Parar</button>
+      <button class="go" id="btnVod"  onclick="encode('vod')">Generate VOD</button>
+      <button class="go" id="btnLive" onclick="encode('live')">Start LIVE</button>
+      <button class="danger" style="flex:0 0 auto" onclick="stopEncode()">Stop</button>
     </div>
   </div>
 
   <div class="card">
-    <h2>Proxy ligero (para live en tiempo real)</h2>
-    <p class="hint">Si el origen es 4K/HEVC, el live no llega a 1×. Crea un proxy 8-bit que decodifica barato.</p>
+    <h2>Light proxy (for real-time live)</h2>
+    <p class="hint">If the source is 4K/HEVC, live won't reach 1×. Create an 8-bit proxy that decodes cheaply.</p>
     <div class="row">
-      <div><label>Origen</label><select id="proxySrc"></select></div>
-      <div style="flex:0 0 120px"><label>Escala</label><input type="text" id="proxyScale" value="1920:960"></div>
+      <div><label>Source</label><select id="proxySrc"></select></div>
+      <div style="flex:0 0 120px"><label>Scale</label><input type="text" id="proxyScale" value="1920:960"></div>
     </div>
-    <button class="alt" style="margin-top:10px" onclick="makeProxy()">Crear proxy</button>
+    <button class="alt" style="margin-top:10px" onclick="makeProxy()">Create proxy</button>
   </div>
 
   <div class="card">
-    <h2>Estado · <span id="statusBadge" class="badge b-idle">idle</span></h2>
+    <h2>Status · <span id="statusBadge" class="badge b-idle">idle</span></h2>
     <div class="small" id="statusLine" style="margin-bottom:8px"></div>
     <div id="log"></div>
     <div class="row" style="margin-top:12px">
-      <button onclick="saveScene(true)">Guardar escena</button>
-      <button class="ghost" onclick="openPlayer()">Abrir player</button>
+      <button onclick="saveScene(true)">Save scene</button>
+      <button class="ghost" onclick="openPlayer()">Open player</button>
     </div>
   </div>
 </div>
@@ -158,13 +218,21 @@
 <script>
 const PALETTE = ['#00d4ff','#34d399','#ffd400','#ff7ab6','#a78bfa','#ff8a3d','#7ee787','#f778ba','#79c0ff','#ffa657'];
 let media = [];
+let devices = { video: [], audio: [] };
 let scene = {
+  mode: 'vod',
   video: '', bed: '', bedFormat: 'fuma',
   stems: [],
   spotlight: { maxBoost: 1.5, focusExp: 4, restGain: 0, zoomMax: 2.5 },
-  encode: { codec: 'vp9', scale: '1920:960', vbitrate: '6000k', seg: 2 },
+  encode: { codec: 'h264_nvenc', scale: '1920:960', vbitrate: '6000k', seg: 2, s3Bucket: '', s3Region: '' },
+  live: {
+    video: { src: 'usb', device: '', url: '', size: '', fr: 30, informat: '' },
+    audio: { src: 'usb', device: '', url: '', channels: 32,
+             foa: { ch: [0,1,2,3], format: 'fuma', aformat: false } },
+  },
 };
 let selected = -1;
+let mode = 'vod';
 
 const $ = id => document.getElementById(id);
 function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2600); }
@@ -172,32 +240,62 @@ function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show');
 // ── Carga inicial ───────────────────────────────────────────────────────────
 async function init() {
   let apiOk = true;
-  const [mRes, sRes] = await Promise.all([
+  const [mRes, sRes, dRes] = await Promise.all([
     fetch('/api/media').then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).catch(()=>{ apiOk=false; return {media:[]}; }),
     fetch('/api/scene').then(r=>r.ok?r.json():{}).catch(()=>({})),
+    fetch('/api/devices').then(r=>r.ok?r.json():{video:[],audio:[]}).catch(()=>({video:[],audio:[]})),
   ]);
   if (!apiOk) $('apiErr').style.display = 'block';
   media = mRes.media || [];
-  if (apiOk && !media.length) toast('La carpeta media/ está vacía');
-  if (sRes && (sRes.stems || sRes.video)) scene = Object.assign(scene, sRes,
-    { spotlight: Object.assign(scene.spotlight, sRes.spotlight||{}),
-      encode: Object.assign(scene.encode, sRes.encode||{}) });
+  devices = { video: dRes.video||[], audio: dRes.audio||[] };
+  if (apiOk && !media.length) toast('The media/ folder is empty');
+  if (sRes && (sRes.stems || sRes.video || sRes.live)) {
+    const live = sRes.live ? {
+      video: Object.assign(scene.live.video, sRes.live.video||{}),
+      audio: Object.assign(scene.live.audio, sRes.live.audio||{},
+        { foa: Object.assign(scene.live.audio.foa, (sRes.live.audio||{}).foa||{}) }),
+    } : scene.live;
+    scene = Object.assign(scene, sRes,
+      { spotlight: Object.assign(scene.spotlight, sRes.spotlight||{}),
+        encode: Object.assign(scene.encode, sRes.encode||{}), live });
+  }
+  mode = scene.mode || 'vod';
   buildSelectors();
+  buildLiveSelectors();
   bindControls();
+  bindLiveControls();
+  setMode(mode);
   renderStems();
   drawRadar();
   pollStatus();
   setInterval(pollStatus, 1500);
 }
 
+// ── Modo VOD / LIVE ───────────────────────────────────────────────────────────
+function setMode(m) {
+  mode = m; scene.mode = m;
+  $('vodSources').style.display  = m==='vod'  ? '' : 'none';
+  $('liveSources').style.display = m==='live' ? '' : 'none';
+  $('addStemRow').style.display     = m==='vod'  ? 'flex' : 'none';
+  $('addMusicianBtn').style.display = m==='live' ? 'block' : 'none';
+  $('tabVod').className  = m==='vod'  ? 'go' : 'ghost';
+  $('tabLive').className = m==='live' ? 'go' : 'ghost';
+  $('btnVod').style.display  = m==='vod'  ? '' : 'none';
+  $('btnLive').style.display = m==='live' ? '' : 'none';
+  $('stemsHint').textContent = m==='live'
+    ? 'Each musician maps to a channel of the multichannel audio. The order = output channel order; set the position on the radar.'
+    : 'Drag the dots on the radar to place each musician. The order here = channel order in the stream.';
+  renderStems();
+}
+
 function buildSelectors() {
   const vids = media.filter(m=>m.kind==='video');
   const auds = media.filter(m=>m.kind==='audio');
   const opt = (m, label) => `<option value="${m.file}">${label||m.name}${m.channels?` · ${m.channels}ch`:''}</option>`;
-  $('video').innerHTML = vids.map(m=>opt(m)).join('') || '<option>— sin vídeos en media/ —</option>';
-  // bed: preferimos los de 4 canales
-  $('bed').innerHTML = auds.map(m=>opt(m)).join('') || '<option>— sin audio —</option>';
-  $('addStem').innerHTML = '<option value="">+ añadir stem…</option>' + auds.map(m=>opt(m)).join('');
+  $('video').innerHTML = vids.map(m=>opt(m)).join('') || '<option>— no videos in media/ —</option>';
+  // bed: prefer the 4-channel ones
+  $('bed').innerHTML = auds.map(m=>opt(m)).join('') || '<option>— no audio —</option>';
+  $('addStem').innerHTML = '<option value="">+ add stem…</option>' + auds.map(m=>opt(m)).join('');
   $('proxySrc').innerHTML = vids.map(m=>opt(m)).join('');
   if (scene.video) $('video').value = scene.video; else scene.video = $('video').value;
   // bed por defecto: el primer audio de 4 canales
@@ -205,6 +303,54 @@ function buildSelectors() {
   else { const foa = auds.find(m=>m.channels===4); scene.bed = foa ? foa.file : ($('bed').value||''); $('bed').value = scene.bed; }
   $('bedFormat').value = scene.bedFormat || 'fuma';
   $('proxySrc').value = scene.video || ($('proxySrc').value||'');
+}
+
+// ── Selectores de dispositivos en directo ─────────────────────────────────────
+function buildLiveSelectors() {
+  const L = scene.live, V = L.video, A = L.audio;
+  const optDev = d => `<option value="${d.device}">${d.label} · ${d.device}</option>`;
+  $('lvDevice').innerHTML = devices.video.map(optDev).join('') || '<option value="">— no v4l2 cameras —</option>';
+  $('laDevice').innerHTML = devices.audio.map(optDev).join('') || '<option value="">— no ALSA devices —</option>';
+  // vídeo
+  $('lvSrc').value = V.src || 'usb';
+  if (V.device) $('lvDevice').value = V.device; else V.device = $('lvDevice').value;
+  $('lvUrl').value = V.url || ''; $('lvSize').value = V.size || '';
+  $('lvFr').value = V.fr || 30; $('lvInformat').value = V.informat || '';
+  // audio
+  $('laSrc').value = A.src || 'usb';
+  if (A.device) $('laDevice').value = A.device; else A.device = $('laDevice').value;
+  $('laUrl').value = A.url || ''; $('laChannels').value = A.channels || 32;
+  const f = A.foa.ch || [0,1,2,3];
+  $('foa0').value=f[0]; $('foa1').value=f[1]; $('foa2').value=f[2]; $('foa3').value=f[3];
+  $('foaFormat').value = A.foa.format || 'fuma';
+  $('foaAformat').checked = !!A.foa.aformat;
+  liveSrcToggle();
+}
+
+function liveSrcToggle() {
+  const v = $('lvSrc').value, a = $('laSrc').value;
+  $('lvUsbWrap').style.display = v==='usb' ? '' : 'none';
+  $('lvUdpWrap').style.display = v==='udp' ? '' : 'none';
+  $('lvUsbOpts').style.display = v==='usb' ? 'flex' : 'none';
+  $('laUsbWrap').style.display = a==='usb' ? '' : 'none';
+  $('laUdpWrap').style.display = a==='udp' ? '' : 'none';
+}
+
+function bindLiveControls() {
+  const V = scene.live.video, A = scene.live.audio;
+  $('lvSrc').onchange = e => { V.src = e.target.value; liveSrcToggle(); };
+  $('lvDevice').onchange = e => V.device = e.target.value;
+  $('lvUrl').oninput = e => V.url = e.target.value.trim();
+  $('lvSize').oninput = e => V.size = e.target.value.trim();
+  $('lvFr').oninput = e => V.fr = +e.target.value || 30;
+  $('lvInformat').onchange = e => V.informat = e.target.value;
+  $('laSrc').onchange = e => { A.src = e.target.value; liveSrcToggle(); };
+  $('laDevice').onchange = e => A.device = e.target.value;
+  $('laUrl').oninput = e => A.url = e.target.value.trim();
+  $('laChannels').oninput = e => A.channels = +e.target.value || 32;
+  for (let i=0;i<4;i++) $('foa'+i).oninput = e => A.foa.ch[i] = +e.target.value || 0;
+  $('foaFormat').onchange = e => A.foa.format = e.target.value;
+  $('foaAformat').onchange = e => A.foa.aformat = e.target.checked;
 }
 
 function bindControls() {
@@ -220,13 +366,21 @@ function bindControls() {
   // encode
   $('codec').value = scene.encode.codec; $('seg').value = scene.encode.seg;
   $('scale').value = scene.encode.scale||''; $('vbitrate').value = scene.encode.vbitrate||'';
-  const codecWarn = () => $('codecWarn').innerHTML = scene.encode.codec==='h264'
-    ? '<span class="badge b-warn">aviso</span> H.264 mete el audio en MP4; el navegador de la Quest NO reproduce Opus multicanal en MP4. Usa VP9 para VR.'
+  $('s3Bucket').value = scene.encode.s3Bucket||''; $('s3Region').value = scene.encode.s3Region||'';
+  // Vídeo y audio van en adaptation sets separados con contenedores mezclados
+  // (H.264→mp4 + Opus→webm), así que H.264 es compatible con la Quest. El audio
+  // multicanal siempre sale en WebM. Solo avisamos del coste de VP9 software.
+  const codecWarn = () => $('codecWarn').innerHTML = scene.encode.codec==='vp9'
+    ? '<span class="badge b-warn">warning</span> VP9 is software (CPU) and won\'t reach 4K in real time. For live use H.264 NVENC (GPU).'
+    : scene.encode.codec==='h264_nvenc'
+    ? '<span class="badge b-run">GPU</span> H.264 via NVENC: real-time 4K. Video in MP4 + multichannel Opus audio in WebM (Quest ✓).'
     : '';
   $('codec').onchange = e => { scene.encode.codec = e.target.value; codecWarn(); };
   $('seg').oninput = e => scene.encode.seg = +e.target.value||2;
   $('scale').oninput = e => scene.encode.scale = e.target.value.trim();
   $('vbitrate').oninput = e => scene.encode.vbitrate = e.target.value.trim();
+  $('s3Bucket').oninput = e => scene.encode.s3Bucket = e.target.value.trim();
+  $('s3Region').oninput = e => scene.encode.s3Region = e.target.value.trim();
   codecWarn();
   // selected panel
   $('selName').oninput = e => { if(selected>=0){ scene.stems[selected].name=e.target.value; renderStems(); } };
@@ -250,15 +404,31 @@ function addSelectedStem() {
 function removeStem(i){ scene.stems.splice(i,1); if(selected>=scene.stems.length) selected=-1; renderStems(); drawRadar(); syncSelPanel(); }
 function selectStem(i){ selected=i; renderStems(); drawRadar(); syncSelPanel(); }
 
+// LIVE: añade un músico mapeado al siguiente canal libre tras el FOA.
+function addLiveStem() {
+  const foaMax = Math.max(...(scene.live.audio.foa.ch||[0,1,2,3]));
+  const used = scene.stems.map(s=>s.channel).filter(c=>c!=null);
+  let ch = foaMax + 1; while (used.includes(ch)) ch++;
+  const n = scene.stems.length;
+  const az = Math.max(-160, Math.min(160, Math.round(-50 + n*20)));
+  scene.stems.push({ name: 'M'+(n+1), channel: ch, azimuthDeg: az, elevationDeg: 0 });
+  selected = scene.stems.length-1;
+  renderStems(); drawRadar(); syncSelPanel();
+}
+
 function renderStems() {
+  const live = mode==='live';
   $('stems').innerHTML = scene.stems.map((s,i)=>`
     <div class="stemrow ${i===selected?'sel':''}" onclick="selectStem(${i})">
       <span class="dot" style="background:${PALETTE[i%PALETTE.length]}"></span>
       <input type="text" value="${s.name||''}" onclick="event.stopPropagation()"
              oninput="scene.stems[${i}].name=this.value;drawRadar()">
+      ${live ? `<span class="small" style="flex:none">ch</span>
+      <input type="number" class="az" style="width:54px" min="0" value="${s.channel!=null?s.channel:''}"
+             onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=+this.value">` : ''}
       <span class="az">${Math.round(s.azimuthDeg)}°/${Math.round(s.elevationDeg||0)}°</span>
       <span class="x" onclick="event.stopPropagation();removeStem(${i})">✕</span>
-    </div>`).join('') || '<p class="small">Sin stems. Añade músicos arriba.</p>';
+    </div>`).join('') || '<p class="small">No stems. Add musicians above.</p>';
 }
 function syncSelPanel() {
   const p = $('selPanel');
@@ -285,7 +455,7 @@ function drawRadar() {
   rctx.strokeStyle='#ffffff0c'; rctx.beginPath();
   rctx.moveTo(cx,cy-R); rctx.lineTo(cx,cy+R); rctx.moveTo(cx-R,cy); rctx.lineTo(cx+R,cy); rctx.stroke();
   rctx.fillStyle='#8b949e'; rctx.font='13px monospace'; rctx.textAlign='center';
-  rctx.fillText('FRENTE 0°',cx,cy-R-10); rctx.fillText('detrás ±180°',cx,cy+R+18);
+  rctx.fillText('FRONT 0°',cx,cy-R-10); rctx.fillText('behind ±180°',cx,cy+R+18);
   rctx.fillText('+90°',cx-R-22,cy+4); rctx.fillText('−90°',cx+R+22,cy+4);
   // oyente
   rctx.fillStyle='#ffffff55'; rctx.beginPath(); rctx.arc(cx,cy,5,0,7); rctx.fill();
@@ -316,22 +486,22 @@ radar.addEventListener('touchstart',radarDown,{passive:false}); radar.addEventLi
 async function saveScene(notify) {
   scene.video = $('video').value; scene.bed = $('bed').value;
   const r = await fetch('/api/scene', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(scene) });
-  if (notify) toast(r.ok ? 'Escena guardada → scene.json' : 'Error guardando');
+  if (notify) toast(r.ok ? 'Scene saved → scene.json' : 'Error saving');
   return r.ok;
 }
 async function encode(mode) {
-  if (!scene.stems.length && !confirm('No hay stems. ¿Encodear solo FOA?')) return;
+  if (!scene.stems.length && !confirm('No stems. Encode FOA only?')) return;
   await saveScene(false);
   const r = await fetch('/api/encode', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode}) });
   const j = await r.json();
-  toast(r.ok ? `Encode ${mode.toUpperCase()} lanzado` : ('Error: '+(j.error||r.status)));
+  toast(r.ok ? `Encode ${mode.toUpperCase()} started` : ('Error: '+(j.error||r.status)));
 }
-async function stopEncode(){ const r=await fetch('/api/encode/stop',{method:'POST'}); toast(r.ok?'Parado':'Nada que parar'); }
+async function stopEncode(){ const r=await fetch('/api/encode/stop',{method:'POST'}); toast(r.ok?'Stopped':'Nothing to stop'); }
 async function makeProxy(){
   const src=$('proxySrc').value, scale=$('proxyScale').value.trim()||'1920:960';
   const r=await fetch('/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({src,scale})});
   const j=await r.json();
-  if(r.ok){ toast('Proxy en marcha → '+j.out); } else { toast('Error: '+(j.error||r.status)); }
+  if(r.ok){ toast('Proxy running → '+j.out); } else { toast('Error: '+(j.error||r.status)); }
 }
 function openPlayer(){ window.open(location.origin+'/index.html','_blank'); }
 
@@ -340,12 +510,12 @@ async function pollStatus() {
   const badge=$('statusBadge');
   if (s.running) {
     badge.className='badge b-run'; badge.textContent=`${s.mode} · ${s.speed||'—'}`;
-    const warn = s.mode!=='proxy' && s.speed && parseFloat(s.speed)<1 ? '  ⚠ por debajo de tiempo real' : '';
+    const warn = s.mode!=='proxy' && s.speed && parseFloat(s.speed)<1 ? '  ⚠ below real time' : '';
     $('statusLine').textContent=`frame ${s.frame||0} · speed ${s.speed||'—'}${warn}`;
   } else {
     badge.className='badge b-idle';
-    badge.textContent = (s.exit===0)?'completado':(s.exit!=null&&s.exit!==0)?('exit '+s.exit):'idle';
-    $('statusLine').textContent = s.exit===0?'último encode OK':'';
+    badge.textContent = (s.exit===0)?'completed':(s.exit!=null&&s.exit!==0)?('exit '+s.exit):'idle';
+    $('statusLine').textContent = s.exit===0?'last encode OK':'';
   }
   if (s.log && s.log.length){ const l=$('log'); l.textContent=s.log.join('\n'); l.scrollTop=l.scrollHeight; }
 }
