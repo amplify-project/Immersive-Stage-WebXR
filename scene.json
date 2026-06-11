@@ -1,45 +1,9 @@
 {
-  "video": "media/video_1920.mp4",
+  "mode": "vod",
+  "video": "media/video.mp4",
   "bed": "media/ambisonic_bformat.wav",
   "bedFormat": "fuma",
-  "stems": [
-    {
-      "file": "media/GT - stem - sync.mp3",
-      "name": "GT",
-      "azimuthDeg": -128,
-      "elevationDeg": 0
-    },
-    {
-      "file": "media/KEY - stem - sync.mp3",
-      "name": "KEY",
-      "azimuthDeg": 0,
-      "elevationDeg": 0
-    },
-    {
-      "file": "media/SAX - stem - sync.mp3",
-      "name": "SAX",
-      "azimuthDeg": -58,
-      "elevationDeg": 0
-    },
-    {
-      "file": "media/TBONE - stem - sync.mp3",
-      "name": "TBONE",
-      "azimuthDeg": 45,
-      "elevationDeg": 0
-    },
-    {
-      "file": "media/TPT - stem - sync.mp3",
-      "name": "TPT",
-      "azimuthDeg": 138,
-      "elevationDeg": 0
-    },
-    {
-      "file": "media/DR - stem - sync.mp3",
-      "name": "DR",
-      "azimuthDeg": 90,
-      "elevationDeg": 0
-    }
-  ],
+  "stems": [],
   "spotlight": {
     "maxBoost": 1.5,
     "focusExp": 4,
@@ -47,9 +11,37 @@
     "zoomMax": 2.5
   },
   "encode": {
-    "codec": "vp9",
+    "codec": "h264_nvenc",
     "scale": "1920:960",
     "vbitrate": "6000k",
-    "seg": 2
+    "seg": 2,
+    "s3Bucket": "",
+    "s3Region": ""
+  },
+  "live": {
+    "video": {
+      "src": "usb",
+      "device": "/dev/video0",
+      "url": "",
+      "size": "",
+      "fr": 30,
+      "informat": ""
+    },
+    "audio": {
+      "src": "usb",
+      "device": "hw:0,0",
+      "url": "",
+      "channels": 32,
+      "foa": {
+        "ch": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "format": "fuma",
+        "aformat": false
+      }
+    }
   }
 }

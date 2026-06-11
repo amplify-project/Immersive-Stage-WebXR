@@ -102,6 +102,53 @@ async function listMedia() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+//  Dispositivos de captura (LIVE). Se enumeran en la MÁQUINA que corre el server
+//  (la de producción, con la Insta360 y la X32 conectadas), no en el navegador.
+//    vídeo → v4l2 (/dev/video*)   ·   audio → ALSA (hw:CARD,DEV con nº canales)
+// ════════════════════════════════════════════════════════════════════════════
+function run(cmd, args) {
+  return new Promise(res => {
+    execFile(cmd, args, { timeout: 5000 }, (err, out, errout) =>
+      res(err ? '' : String(out || '') + String(errout || '')));
+  });
+}
+
+async function listVideoDevices() {
+  // v4l2-ctl agrupa: "Nombre (bus):\n\t/dev/videoN". Nos quedamos el primer
+  // /dev/videoN de cada cámara (los demás suelen ser metadata, no captura).
+  const out = await run('v4l2-ctl', ['--list-devices']);
+  const devs = [];
+  if (out) {
+    let label = '';
+    for (const raw of out.split('\n')) {
+      if (!raw.trim()) { label = ''; continue; }
+      if (!raw.startsWith('\t') && !raw.startsWith(' ')) { label = raw.replace(/:\s*$/, '').trim(); continue; }
+      const dev = raw.trim();
+      if (/^\/dev\/video\d+$/.test(dev) && !devs.some(d => d.label === label)) devs.push({ device: dev, label });
+    }
+  }
+  if (!devs.length) {
+    let files = [];
+    try { files = fs.readdirSync('/dev').filter(f => /^video\d+$/.test(f)); } catch (_) {}
+    for (const f of files) devs.push({ device: '/dev/' + f, label: f });
+  }
+  return devs;
+}
+
+async function listAudioDevices() {
+  // arecord -l → "card N: id [name], device M: ... ". Construimos hw:N,M.
+  const out = await run('arecord', ['-l']);
+  const devs = [];
+  const re = /card (\d+):\s*(\S+)\s*\[([^\]]*)\][^]*?device (\d+):\s*([^\[\n]*)/g;
+  let m;
+  while ((m = re.exec(out))) {
+    const [, card, , cardName, dev, devName] = m;
+    devs.push({ device: `hw:${card},${dev}`, label: `${cardName.trim()} · ${devName.trim()}` });
+  }
+  return devs;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  API
 // ════════════════════════════════════════════════════════════════════════════
 function sendJSON(res, code, obj) {
@@ -127,6 +174,12 @@ async function handleAPI(req, res, pathname) {
       return sendJSON(res, 200, { media: await listMedia() });
     }
 
+    // ── Dispositivos de captura para LIVE (v4l2 + ALSA) ─────────────────────
+    if (pathname === '/api/devices' && req.method === 'GET') {
+      const [video, audio] = await Promise.all([listVideoDevices(), listAudioDevices()]);
+      return sendJSON(res, 200, { video, audio });
+    }
+
     // ── Escena (config del player) ──────────────────────────────────────────
     if (pathname === '/api/scene' && req.method === 'GET') {
       let scene = {};
@@ -146,19 +199,58 @@ async function handleAPI(req, res, pathname) {
       let scene;
       try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); }
       catch (_) { return sendJSON(res, 400, { error: 'No hay scene.json guardada' }); }
-      if (!scene.video || !scene.bed) return sendJSON(res, 400, { error: 'Falta vídeo o bed en la escena' });
 
-      const env = {
-        VIDEO: scene.video,
-        AUDIO: scene.bed,
+      const enc = scene.encode || {};
+      const common = {
         FORMAT: scene.bedFormat || 'fuma',
-        CODEC: (scene.encode && scene.encode.codec) || 'vp9',
-        SEG: String((scene.encode && scene.encode.seg) || 2),
-        VBITRATE: (scene.encode && scene.encode.vbitrate) || '6000k',
-        STEMS: (scene.stems || []).map(s => s.file).join(';'),
+        CODEC: enc.codec || 'vp9',
+        SEG: String(enc.seg || 2),
+        VBITRATE: enc.vbitrate || '6000k',
         KEEP: '1',
       };
-      if (scene.encode && scene.encode.scale) env.SCALE = scene.encode.scale;
+      if (enc.scale) common.SCALE = enc.scale;
+      // Publicación a S3 (opcional): el live sube en background, el VOD al final.
+      if (enc.s3Bucket) {
+        common.S3_BUCKET = enc.s3Bucket;
+        if (enc.s3Region) common.S3_REGION = enc.s3Region;
+      }
+
+      let env;
+      // ── LIVE por captura (USB/UDP): usa scene.live, no archivos ────────────
+      if (mode === 'live' && scene.live) {
+        const L = scene.live, V = L.video || {}, A = L.audio || {}, foa = A.foa || {};
+        if (V.src === 'usb' && !V.device) return sendJSON(res, 400, { error: 'Falta dispositivo de vídeo USB' });
+        if (V.src === 'udp' && !V.url)    return sendJSON(res, 400, { error: 'Falta URL de vídeo UDP' });
+        if (A.src === 'usb' && !A.device) return sendJSON(res, 400, { error: 'Falta dispositivo de audio USB' });
+        if (A.src === 'udp' && !A.url)    return sendJSON(res, 400, { error: 'Falta URL de audio UDP' });
+
+        env = {
+          ...common,
+          CAPTURE: '1',
+          VIDEO_SRC: V.src || 'usb',
+          VIDEO_DEVICE: V.device || '',
+          VIDEO_INFORMAT: V.informat || '',
+          VIDEO_SIZE: V.size || '',
+          VIDEO_FR: String(V.fr || 30),
+          VIDEO_URL: V.url || '',
+          AUDIO_SRC: A.src || 'usb',
+          AUDIO_DEVICE: A.device || '',
+          AUDIO_CHANNELS: String(A.channels || 32),
+          AUDIO_URL: A.url || '',
+          FOA_CH: (foa.ch && foa.ch.length === 4 ? foa.ch : [0, 1, 2, 3]).join(','),
+          FOA_AFORMAT: foa.aformat ? '1' : '0',
+          STEM_CH: (scene.stems || []).map(s => (s.channel != null ? s.channel : '')).join(','),
+        };
+      } else {
+        // ── VOD (o live de bucle de archivos) desde archivos ────────────────
+        if (!scene.video || !scene.bed) return sendJSON(res, 400, { error: 'Falta vídeo o bed en la escena' });
+        env = {
+          ...common,
+          VIDEO: scene.video,
+          AUDIO: scene.bed,
+          STEMS: (scene.stems || []).map(s => s.file).join(';'),
+        };
+      }
 
       try {
         startJob(mode, 'bash', ['stream.sh', mode], env);
