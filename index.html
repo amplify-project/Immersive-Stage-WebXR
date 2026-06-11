@@ -695,8 +695,13 @@ async function loadDualShaka(src) {
 
   } catch(e) {
     showSpinner(false);
-    toast('Error: ' + e.message);
-    console.error(e);
+    // Los errores de Shaka no tienen .message → mostrábamos "undefined".
+    // shaka.util.Error trae code/category/data; lo exponemos para diagnosticar.
+    const msg = (e && e.code != null)
+      ? `Shaka ${e.category}/${e.code}` + (e.data && e.data.length ? ' · ' + JSON.stringify(e.data) : '')
+      : (e && e.message) ? e.message : String(e);
+    toast('Error: ' + msg);
+    console.error('[load] error completo:', e, e && e.data);
   }
 }
 

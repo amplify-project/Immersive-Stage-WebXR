@@ -125,7 +125,9 @@ if [[ "$CAPTURE" != "1" ]]; then
 fi
 
 mkdir -p "$OUT"
-rm -f "$OUT"/*.webm "$OUT"/*.mp4 "$OUT"/*.m4s "$OUT"/*.mpd 2>/dev/null || true
+# Pizarra limpia en cada arranque: fuera segmentos, inits, manifest y .tmp de la
+# pasada anterior, para que un pipeline nuevo nunca mezcle restos.
+rm -f "$OUT"/*.webm "$OUT"/*.mp4 "$OUT"/*.m4s "$OUT"/*.mpd "$OUT"/*.tmp 2>/dev/null || true
 
 # ── Cadena de filtros de vídeo: escala opcional + 8-bit/420 para NVENC ───────
 #  NVENC H.264 necesita entrada 8-bit 4:2:0; un origen 10-bit/HEVC falla sin esto.
@@ -188,15 +190,22 @@ case "$CODEC" in
   *) echo "CODEC desconocido: '$CODEC' (usa 'vp9', 'h264' o 'h264_nvenc')"; exit 1 ;;
 esac
 
+# ── ID de run: nombres de segmento ÚNICOS por arranque ──────────────────────
+#  Los segmentos se sirven como inmutables (cache larga en el CDN). Si cada run
+#  reusara los mismos nombres (chunk_0_00001…), tras reiniciar el live CloudFront
+#  seguiría sirviendo el segmento VIEJO cacheado (contenido de hace rato). Con un
+#  RUN_ID por arranque los nombres nunca colisionan → el CDN nunca sirve restos.
+RUN_ID="${RUN_ID:-$(date +%y%m%d%H%M%S)}"
+
 # ── Empaquetado DASH (común): un manifest, 2 adaptation sets ────────────────
 #  dash_segment_type=auto → cada stream en su contenedor; $ext$ resuelve la
-#  extensión por representación (init_0.m4s vídeo / init_1.webm audio Opus).
+#  extensión por representación (init_<run>_0.m4s vídeo / init_<run>_1.webm audio).
 DASH_COMMON=(
   -f dash -dash_segment_type auto -seg_duration "$SEG"
   -use_template 1 -use_timeline 1
   -adaptation_sets "id=0,streams=0 id=1,streams=1"
-  -init_seg_name "init_\$RepresentationID\$.\$ext\$"
-  -media_seg_name "chunk_\$RepresentationID\$_\$Number%05d\$.\$ext\$"
+  -init_seg_name "init_${RUN_ID}_\$RepresentationID\$.\$ext\$"
+  -media_seg_name "chunk_${RUN_ID}_\$RepresentationID\$_\$Number%05d\$.\$ext\$"
 )
 
 # ── Construcción de inputs y filtro de audio según haya stems o no ──────────
@@ -344,13 +353,26 @@ case "$MODE" in
       trap '[[ -n "$UPLOADER_PID" ]] && kill "$UPLOADER_PID" 2>/dev/null || true' EXIT INT TERM
     fi
     if [[ "$CAPTURE" == "1" ]]; then build_inputs_capture; else build_inputs live; fi
+    # ── Perfil DASH live según destino ──────────────────────────────────────
+    #  Directo (sin S3): baja latencia CMAF (-streaming/-ldash) → muy fluido.
+    #  Por CDN (S3): los chunks parciales + consistencia eventual rompen el
+    #  player → usamos segmentado robusto (segmentos completos) y ventana más
+    #  amplia para que las lecturas tardías del CDN sigan encontrando el segmento.
+    #  Forzar con LOWLATENCY=1|0.
+    if [[ -n "${S3_BUCKET:-}" ]]; then LOWLATENCY="${LOWLATENCY:-0}"; else LOWLATENCY="${LOWLATENCY:-1}"; fi
+    LIVE_LL=(); WIN=(-window_size 5 -extra_window_size 5)
+    if [[ "$LOWLATENCY" == "1" ]]; then
+      LIVE_LL=(-streaming 1 -ldash 1)
+    else
+      WIN=(-window_size 6 -extra_window_size 12)   # CDN: más colchón de segmentos
+    fi
     ffmpeg -y \
       "${IN_ARGS[@]}" \
       "${VF[@]}" "${VID_COMMON[@]}" "${VID_LIVE[@]}" \
       "${A_ARGS[@]}" \
       "${DASH_COMMON[@]}" \
-      -streaming 1 -ldash 1 \
-      -window_size 5 -extra_window_size 5 -remove_at_exit "$REMOVE" \
+      "${LIVE_LL[@]}" \
+      "${WIN[@]}" -remove_at_exit "$REMOVE" \
       "$OUT/manifest.mpd"
     ;;
 
