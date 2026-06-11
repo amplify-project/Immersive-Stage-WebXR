@@ -28,6 +28,13 @@ set -euo pipefail
 OUT="${OUT:-encoded}"
 DEST="${S3_BUCKET:?Define S3_BUCKET=s3://bucket/prefijo}"
 DEST="${DEST%/}"
+# Normaliza el destino: aceptar 'bucket' o 'bucket/prefijo' (se antepone s3://) y
+# rechazar una URL http(s) — eso es la del CDN para el player, NO el bucket.
+if [[ "$DEST" == http://* || "$DEST" == https://* ]]; then
+  echo "S3_BUCKET debe ser el bucket S3 (s3://mi-bucket[/prefijo]), no la URL de CloudFront: $DEST" >&2
+  exit 1
+fi
+[[ "$DEST" == s3://* ]] || DEST="s3://$DEST"
 REGION="${REGION:-}"
 INTERVAL="${INTERVAL:-1}"
 ONESHOT="${ONESHOT:-0}"
