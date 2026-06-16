@@ -816,6 +816,7 @@ async function setupFOA() {
     // el audio del elemento al grafo (no suena por la salida normal del <video>).
     audioEl.muted = false;
     await engine.attach(audioEl);
+    window.engine = engine;   // tuning en vivo desde consola (restGain, posiciones…)
     if (_stems.length) {
       // zoomMin = vista actual (sin zoom) → en reposo los stems quedan en
       // silencio y crecen solo al acercar mirando al músico. Vale para PC y VR
