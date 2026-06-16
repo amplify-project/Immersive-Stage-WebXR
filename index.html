@@ -681,29 +681,52 @@ async function loadDualShaka(src) {
     audioEl.currentTime = videoEl.currentTime;
     audioEl.play();
 
-    // ── Sincronía continua A/V ──────────────────────
+    // ── Sincronía continua A/V (controlador de deriva, objetivo = cero saltos) ──
+    //  El audio se pega al vídeo SOLO variando playbackRate (proporcional al
+    //  desfase, con EMA y bandas de cap: cerca de 0 inaudible, mayor recupera sin
+    //  saltar). Seek solo como ÚLTIMO recurso (>1.5s, tras stall/seek real). El
+    //  vídeo manda la velocidad base (watchdog live-edge). Ajustable en consola:
+    //  avSync.capSmall = 0.02, etc.
+    const SYNC = window.avSync = {
+      dead: 0.02,      // banda muerta (s): por debajo no se corrige
+      kp: 0.8,         // ganancia proporcional
+      capSmall: 0.03,  // cap con desfase pequeño (≤ bigErr) → inaudible
+      capBig: 0.10,    // cap con desfase moderado (recupera sin saltar)
+      bigErr: 0.3,     // umbral (s) entre banda pequeña y grande
+      hardSeek: 1.5,   // (s) por encima → seek (último recurso)
+      ema: 0.3,        // suavizado del error (0..1)
+    };
+    let _avErr = 0;
     syncInterval = setInterval(() => {
       if (!audioEl || !videoEl) return;
-      const diff = Math.abs(audioEl.currentTime - videoEl.currentTime);
-      if (diff > 0.3) {
-        audioEl.currentTime = videoEl.currentTime;
-        console.log('[sync] corrigiendo audio drift:', diff.toFixed(3) + 's');
-      }
-      if (audioEl.playbackRate !== videoEl.playbackRate) {
-        audioEl.playbackRate = videoEl.playbackRate;
+      const base = videoEl.playbackRate;
+      const raw  = audioEl.currentTime - videoEl.currentTime;    // + = audio adelantado
+      if (Math.abs(raw) > SYNC.hardSeek) {
+        audioEl.currentTime = videoEl.currentTime;               // desfase enorme → seek
+        audioEl.playbackRate = base; _avErr = 0;
+        console.log('[sync] seek (desfase', raw.toFixed(2) + 's)');
+      } else {
+        _avErr = _avErr * (1 - SYNC.ema) + raw * SYNC.ema;
+        const err = _avErr, a = Math.abs(err);
+        if (a > SYNC.dead) {
+          const cap = a > SYNC.bigErr ? SYNC.capBig : SYNC.capSmall;
+          audioEl.playbackRate = base * (1 + Math.max(-cap, Math.min(cap, -err * SYNC.kp)));
+        } else if (audioEl.playbackRate !== base) {
+          audioEl.playbackRate = base;
+        }
       }
       if (videoEl.paused && !audioEl.paused) audioEl.pause();
       if (!videoEl.paused && audioEl.paused) audioEl.play().catch(()=>{});
 
       // Close-up: misma timeline → mismo currentTime/playbackRate que el 360.
       if (closeupReady && closeupStem >= 0) {
-        if (Math.abs(closeupEl.currentTime - videoEl.currentTime) > 0.3)
+        if (Math.abs(closeupEl.currentTime - videoEl.currentTime) > 0.5)
           closeupEl.currentTime = videoEl.currentTime;
-        closeupEl.playbackRate = videoEl.playbackRate;
+        closeupEl.playbackRate = base;
         if (videoEl.paused && !closeupEl.paused) closeupEl.pause();
         if (!videoEl.paused && closeupEl.paused) closeupEl.play().catch(()=>{});
       }
-    }, 500);
+    }, 250);
 
     // ── FOA decode via Web Audio ────────────────────
     await setupFOA();
