@@ -648,38 +648,13 @@ async function loadDualShaka(src) {
     }
     videoEl.play();
 
-    // ── Shaka 2: mismo manifest → <audio> → Web Audio
-    shakaAudio = new shaka.Player(audioEl);
-    shakaAudio.configure({
-      ...shakaConfig,
-      // Preferir audio, ignorar vídeo
-      preferredAudioLanguage: 'und',
-      preferredVideoCodecs: [],
-      preferredAudioCodecs: ['mp4a.40.2', 'opus', 'ac-3', 'ec-3'],
-    });
-
-    await shakaAudio.load(src);
-
-    // Seleccionar la pista de menor bandwidth — preferir audio only
-    const variants = shakaAudio.getVariantTracks();
-    console.log('[shakaAudio] variants disponibles:', variants.length);
-    variants.forEach(v => console.log(
-      '  id:', v.id,
-      '| bandwidth:', v.bandwidth,
-      '| audioCodec:', v.audioCodec,
-      '| videoCodec:', v.videoCodec || 'none'
-    ));
-
-    // Buscar pista con menor bandwidth (generalmente audio only)
-    const sorted = [...variants].sort((a, b) => a.bandwidth - b.bandwidth);
-    if (sorted.length > 0) {
-      shakaAudio.selectVariantTrack(sorted[0], true);
-      console.log('[shakaAudio] seleccionada pista:', sorted[0].id, '| bw:', sorted[0].bandwidth);
-    }
-
-    // Sincronizar currentTime con el vídeo
-    audioEl.currentTime = videoEl.currentTime;
-    audioEl.play();
+    // ── UN SOLO Shaka ───────────────────────────────────────────────────────
+    //  El <video> ya trae vídeo + audio Opus multicanal (el MPD tiene ambos
+    //  adaptation sets), así que NO abrimos un 2º Shaka sobre <audio>: un decoder,
+    //  un reloj → A/V sincronizados POR CONSTRUCCIÓN (como mpv), sin bucle de
+    //  corrección. El audio multicanal se toma del PROPIO <video> en setupFOA con
+    //  createMediaElementSource. La deriva entre los dos Shaka era el bug de fondo.
+    audioEl = videoEl;   // todas las refs a audioEl operan ya sobre el <video>
 
     // ── Sincronía continua A/V (controlador de deriva, objetivo = cero saltos) ──
     //  El audio se pega al vídeo SOLO variando playbackRate (proporcional al
@@ -836,6 +811,10 @@ async function setupFOA() {
     stemDefs = _stems;   // el modo AR ancla un objeto 3D por stem con su az/el
 
     engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer, stems: _stems });
+    // El audio sale del <video> vía Web Audio: hay que desmutearlo (si no, el tap
+    // recibe silencio). No hay doble salida: createMediaElementSource reencamina
+    // el audio del elemento al grafo (no suena por la salida normal del <video>).
+    audioEl.muted = false;
     await engine.attach(audioEl);
     if (_stems.length) {
       // zoomMin = vista actual (sin zoom) → en reposo los stems quedan en
