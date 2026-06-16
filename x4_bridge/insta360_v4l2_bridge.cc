@@ -4,7 +4,9 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <condition_variable>
 #include <fcntl.h>
@@ -25,6 +27,19 @@ std::atomic<bool> g_running{true};
 
 void HandleSignal(int) {
     g_running = false;
+}
+
+// Watchdog de frames: instante (steady_clock, ms) del último frame producido. Si
+// el stream se cuelga (autosuspend USB, timeout del SDK, cámara dormida) el
+// proceso seguía VIVO sin entregar frames, y el watchdog de bridge.sh —que solo
+// reacciona si el proceso SALE— no lo reiniciaba. Aquí lo detectamos y salimos
+// para que bridge.sh haga killall + reset_usb.sh + relanzar.
+std::atomic<long long> g_last_frame_ms{0};
+constexpr long long kStallTimeoutMs = 5000;   // sin frame > 5s → stall → salir
+
+long long NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 std::string FourccToString(uint32_t fourcc) {
@@ -286,6 +301,7 @@ int main() {
                     }
                 }
                 queue.Push(std::move(frame));
+                g_last_frame_ms = NowMs();   // watchdog: marca "frame vivo"
             });
 
         // Casteo explícito a la clase base requerida para evitar errores de referencia del compilador
@@ -322,8 +338,20 @@ int main() {
         std::cout << " Control de retraso activado. Presiona Ctrl+C para salir.\n";
         std::cout << "======================================================\n\n";
 
+        // Arranca el contador del watchdog ahora (da kStallTimeoutMs de gracia al
+        // primer frame tras iniciar el stream).
+        g_last_frame_ms = NowMs();
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (NowMs() - g_last_frame_ms > kStallTimeoutMs) {
+                std::cerr << "[watchdog] sin frames > " << kStallTimeoutMs
+                          << " ms — stream colgado, saliendo para que bridge.sh reinicie."
+                          << std::endl;
+                // _exit: terminación inmediata sin destructores (StopLiveStreaming
+                // podría bloquear con la cámara colgada). bridge.sh hará el
+                // killall + reset_usb + relanzar.
+                _exit(1);
+            }
         }
 
         std::cout << "Cerrando captura y liberando descriptores...\n";
