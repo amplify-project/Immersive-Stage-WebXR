@@ -81,6 +81,9 @@ AUDIO_SRC="${AUDIO_SRC:-usb}"
 AUDIO_DEVICE="${AUDIO_DEVICE:-hw:0}"
 AUDIO_CHANNELS="${AUDIO_CHANNELS:-32}"
 AUDIO_URL="${AUDIO_URL:-}"
+# Desfase A/V en la entrada (ms): el stitching de la Insta360 retrasa el vídeo,
+# así que el audio llega adelantado. AUDIO_DELAY>0 retrasa el audio para alinear.
+AUDIO_DELAY="${AUDIO_DELAY:-0}"
 FOA_CH="${FOA_CH:-0,1,2,3}"
 FOA_AFORMAT="${FOA_AFORMAT:-0}"
 STEM_CH="${STEM_CH:-}"
@@ -108,6 +111,31 @@ if [[ "$CAPTURE" == "1" ]]; then
   (( ${#FOA_CH_ARR[@]} == 4 )) || { echo "FOA_CH debe tener 4 canales (tiene ${#FOA_CH_ARR[@]}): '$FOA_CH'"; exit 1; }
 fi
 
+# ── Close-ups (Caso B): vídeos "de cerca" por músico, empaquetados como pistas
+#  de vídeo EXTRA en el MISMO manifest (un AdaptationSet por close-up). Misma
+#  timeline que el 360 y el audio → al cambiar de pista en el player la sincronía
+#  está garantizada. Lista ';'-separada, en el orden de los stems que lo tienen.
+#     CLOSEUPS="media/sax_cu.mp4;media/tpt_cu.mp4"   (solo modo archivo, no captura)
+#     CLOSEUP_SCALE=1280:720     escala de cada close-up (vacío = original)
+#     CLOSEUP_VBITRATE=2500k     bitrate de vídeo de cada close-up
+CLOSEUPS="${CLOSEUPS:-}"
+CLOSEUP_SCALE="${CLOSEUP_SCALE:-1280:720}"
+CLOSEUP_VBITRATE="${CLOSEUP_VBITRATE:-2500k}"
+CLOSE_ARR=()
+if [[ -n "$CLOSEUPS" ]]; then
+  IFS=';' read -r -a _rawc <<< "$CLOSEUPS"
+  for c in "${_rawc[@]}"; do
+    c="${c#"${c%%[![:space:]]*}"}"   # ltrim
+    c="${c%"${c##*[![:space:]]}"}"   # rtrim
+    [[ -n "$c" ]] && CLOSE_ARR+=("$c")
+  done
+fi
+NCLOSE=${#CLOSE_ARR[@]}
+if [[ "$CAPTURE" == "1" && $NCLOSE -gt 0 ]]; then
+  echo "  WARNING: close-ups (CLOSEUPS) aún no soportados en captura LIVE → ignorados."
+  CLOSE_ARR=(); NCLOSE=0
+fi
+
 ABITRATE="${ABITRATE:-$(( 160 + 64 * NSTEMS ))k}"
 
 FPS=24                       # media/video.mp4 → 24 fps (captura: VIDEO_FR)
@@ -121,6 +149,9 @@ if [[ "$CAPTURE" != "1" ]]; then
   [[ -f "$AUDIO" ]] || { echo "No existe el audio: $AUDIO"; exit 1; }
   for s in "${STEM_ARR[@]}"; do
     [[ -f "$s" ]] || { echo "No existe el stem: $s"; exit 1; }
+  done
+  for c in "${CLOSE_ARR[@]}"; do
+    [[ -f "$c" ]] || { echo "No existe el close-up: $c"; exit 1; }
   done
 fi
 
@@ -137,6 +168,11 @@ VF_CHAIN=""
 [[ "$CODEC" == "h264_nvenc" ]] && VF_CHAIN="${VF_CHAIN:+$VF_CHAIN,}format=yuv420p"
 VF=()
 [[ -n "$VF_CHAIN" ]] && VF=(-vf "$VF_CHAIN")
+
+# Filtro de los close-ups (escala propia, normalmente menor que el 360).
+CLOSEUP_VF_CHAIN=""
+[[ -n "$CLOSEUP_SCALE" ]] && CLOSEUP_VF_CHAIN="scale=${CLOSEUP_SCALE}:flags=bicubic"
+[[ "$CODEC" == "h264_nvenc" ]] && CLOSEUP_VF_CHAIN="${CLOSEUP_VF_CHAIN:+$CLOSEUP_VF_CHAIN,}format=yuv420p"
 
 # ── Conversión FuMa→ACN/SN3D del lecho FOA (4 canales) ──────────────────────
 #  FuMa [W,X,Y,Z] (W a −3 dB) → AmbiX [√2·W, Y, Z, X] (SN3D).
@@ -166,7 +202,7 @@ AUDIO_ENC=(-c:a libopus -mapping_family 255 -b:a "$ABITRATE" -ar 48000)
 case "$CODEC" in
   vp9)
     SEGTYPE="webm"
-    VID_COMMON=(-c:v libvpx-vp9 -pix_fmt yuv420p -b:v "$VBITRATE"
+    VID_COMMON=(-c:v libvpx-vp9 -pix_fmt yuv420p
                 -row-mt 1 -tile-columns 2 -frame-parallel 1
                 -g "$GOP" -keyint_min "$GOP")
     VID_VOD=(-deadline good -cpu-used 2)
@@ -174,7 +210,7 @@ case "$CODEC" in
     ;;
   h264)
     SEGTYPE="mp4(v)+webm(a)"
-    VID_COMMON=(-c:v libx264 -pix_fmt yuv420p -b:v "$VBITRATE"
+    VID_COMMON=(-c:v libx264 -pix_fmt yuv420p
                 -g "$GOP" -keyint_min "$GOP")
     VID_VOD=(-preset veryfast)
     VID_LIVE=(-preset ultrafast -tune zerolatency)
@@ -183,7 +219,7 @@ case "$CODEC" in
     # Encode H.264 por GPU NVIDIA (NVENC). ~2.6× tiempo real a 4K, indep. del
     # contenido. pix_fmt forzado en VF (format=yuv420p). Live: low-latency CBR.
     SEGTYPE="mp4(v)+webm(a) · NVENC"
-    VID_COMMON=(-c:v h264_nvenc -b:v "$VBITRATE" -g "$GOP" -keyint_min "$GOP")
+    VID_COMMON=(-c:v h264_nvenc -g "$GOP" -keyint_min "$GOP")
     VID_VOD=(-preset p5 -tune hq -rc vbr -cq 21)
     VID_LIVE=(-preset p4 -tune ll -rc cbr -delay 0)
     ;;
@@ -203,10 +239,42 @@ RUN_ID="${RUN_ID:-$(date +%y%m%d%H%M%S)}"
 DASH_COMMON=(
   -f dash -dash_segment_type auto -seg_duration "$SEG"
   -use_template 1 -use_timeline 1
-  -adaptation_sets "id=0,streams=0 id=1,streams=1"
   -init_seg_name "init_${RUN_ID}_\$RepresentationID\$.\$ext\$"
   -media_seg_name "chunk_${RUN_ID}_\$RepresentationID\$_\$Number%05d\$.\$ext\$"
 )
+
+# ── AdaptationSets dinámicos ────────────────────────────────────────────────
+#  Orden de streams de salida (= orden de -map):  0 = vídeo 360,
+#  1..NCLOSE = close-ups (cada uno en su AdaptationSet, son contenidos distintos),
+#  NCLOSE+1 = audio Opus multicanal. Sin close-ups → "id=0,streams=0 id=1,streams=1"
+#  (idéntico al de siempre). En el player, RepresentationID 0 = 360 y 1..N = close-ups.
+AS_STR="id=0,streams=0"
+_asid=1
+for ((i=0; i<NCLOSE; i++)); do AS_STR+=" id=${_asid},streams=$((i+1))"; ((_asid++)); done
+AS_STR+=" id=${_asid},streams=$((NCLOSE+1))"
+
+# Mapas de los close-ups: input (2+NSTEMS+i) en modo archivo (tras vídeo, FOA y stems).
+CLOSE_MAPS=()
+for ((i=0; i<NCLOSE; i++)); do CLOSE_MAPS+=(-map "$((2 + NSTEMS + i)):v:0"); done
+
+# Ensambla los args de codificación de vídeo en VENC, según haya close-ups o no.
+#  $1 = nombre de un array con las opciones específicas del modo (VID_VOD/VID_LIVE).
+assemble_venc() {
+  local -n _mode="$1"
+  VENC=("${VID_COMMON[@]}")
+  if (( NCLOSE == 0 )); then
+    VENC+=("${VF[@]}" -b:v "$VBITRATE")
+  else
+    # Filtros y bitrate POR stream (el genérico -vf afectaría a todos los vídeos).
+    [[ -n "$VF_CHAIN" ]] && VENC+=(-filter:v:0 "$VF_CHAIN")
+    VENC+=(-b:v:0 "$VBITRATE")
+    for ((i=0; i<NCLOSE; i++)); do
+      [[ -n "$CLOSEUP_VF_CHAIN" ]] && VENC+=(-filter:v:$((i+1)) "$CLOSEUP_VF_CHAIN")
+      VENC+=(-b:v:$((i+1)) "$CLOSEUP_VBITRATE")
+    done
+  fi
+  VENC+=("${_mode[@]}")
+}
 
 # ── Construcción de inputs y filtro de audio según haya stems o no ──────────
 #  Input 0 = vídeo, input 1 = FOA, inputs 2..(1+N) = stems.
@@ -223,10 +291,15 @@ build_inputs() {   # $1 = "live" | "vod"  → rellena IN_ARGS y A_ARGS globales
   for s in "${STEM_ARR[@]}"; do
     IN_ARGS+=("${loop[@]}" -i "$s")
   done
+  # Close-ups: inputs extra tras los stems (índices 2+NSTEMS..1+NSTEMS+NCLOSE).
+  for c in "${CLOSE_ARR[@]}"; do
+    IN_ARGS+=("${loop[@]}" -i "$c")
+  done
 
   if (( NSTEMS == 0 )); then
     # Camino clásico de 4 canales FOA.
-    A_ARGS=(-map 0:v:0 -map 1:a:0 -af "$FOA_FILTER" "${AUDIO_ENC[@]}")
+    A_FILTER=(-af "$FOA_FILTER")
+    MAP_AUDIO=(-map 1:a:0)
   else
     # filter_complex: [foa] + [s0..sN-1] → amerge (4+N canales).
     local fc="[1:a]${FOA_FILTER}[foa];"
@@ -238,7 +311,8 @@ build_inputs() {   # $1 = "live" | "vod"  → rellena IN_ARGS y A_ARGS globales
       ((k++))
     done
     fc+="${merge_in}amerge=inputs=$((NSTEMS+1))[aout]"
-    A_ARGS=(-filter_complex "$fc" -map 0:v:0 -map "[aout]" "${AUDIO_ENC[@]}")
+    A_FILTER=(-filter_complex "$fc")
+    MAP_AUDIO=(-map "[aout]")
   fi
 }
 
@@ -250,7 +324,12 @@ build_inputs_capture() {
   IN_ARGS=()
   local q=(-thread_queue_size 1024)
 
-  # — Vídeo —
+  # — Vídeo — `-framerate` da timestamps regulares (CFR). NO usar
+  #   -use_wallclock_as_timestamps: ataba el timing del MPD a la hora de LLEGADA
+  #   real de cada frame → con el bridge (entrega irregular) y el arranque
+  #   desfasado de v4l2 vs ALSA, audio y vídeo quedaban desincronizados en el
+  #   propio manifiesto → tirones/repeticiones en directo. El delay A/V se aplica
+  #   abajo con el filtro adelay, no por timestamps.
   case "$VIDEO_SRC" in
     usb)
       IN_ARGS+=("${q[@]}" -f v4l2 -framerate "$VIDEO_FR")
@@ -263,7 +342,7 @@ build_inputs_capture() {
     *) echo "VIDEO_SRC desconocido: '$VIDEO_SRC' (usa 'usb' o 'udp')"; exit 1 ;;
   esac
 
-  # — Audio multicanal (un solo input) —
+  # — Audio multicanal (un solo input) — Sin wallclock ni -itsoffset (ver arriba).
   case "$AUDIO_SRC" in
     usb) IN_ARGS+=("${q[@]}" -f alsa -channels "$AUDIO_CHANNELS" -i "$AUDIO_DEVICE") ;;
     udp)
@@ -289,19 +368,33 @@ build_inputs_capture() {
     merge_in+="[s${i}]"
   done
 
+  local out
   if (( NSTEMS == 0 )); then
-    A_ARGS=(-filter_complex "${fc%;}" -map 0:v:0 -map "[foa]" "${AUDIO_ENC[@]}")
+    fc="${fc%;}"; out="[foa]"
   else
-    fc+="${merge_in}amerge=inputs=$((NSTEMS+1))[aout]"
-    A_ARGS=(-filter_complex "$fc" -map 0:v:0 -map "[aout]" "${AUDIO_ENC[@]}")
+    fc+="${merge_in}amerge=inputs=$((NSTEMS+1))[aout]"; out="[aout]"
   fi
+  # Delay A/V con el filtro adelay (rellena silencio inicial), NO con itsoffset/
+  # wallclock: aquél acoplaba el timing del MPD y daba xrun/desincronía. Positivo
+  # = audio más tarde (compensa el vídeo retrasado por el stitching). :all=1 lo
+  # aplica a los 4 (o 4+N) canales.
+  if [[ "$AUDIO_DELAY" != "0" && -n "$AUDIO_DELAY" ]]; then
+    fc+=";${out}adelay=${AUDIO_DELAY}:all=1[adly]"; out="[adly]"
+  fi
+  A_FILTER=(-filter_complex "$fc")
+  MAP_AUDIO=(-map "$out")
 }
 
 echo "  códec vídeo : $CODEC ($SEGTYPE)   FOA: $FORMAT   stems: $NSTEMS   audio: $ABITRATE"
 [[ -n "$SCALE" ]] && echo "  escala      : $SCALE"
+if (( NCLOSE > 0 )); then
+  echo "  close-ups   : $NCLOSE pista(s) de vídeo extra (RepresentationID 1..$NCLOSE)  escala: ${CLOSEUP_SCALE:-original}  bitrate: $CLOSEUP_VBITRATE"
+  for c in "${CLOSE_ARR[@]}"; do echo "    · $c"; done
+fi
 if [[ "$CAPTURE" == "1" ]]; then
   echo "  captura     : vídeo[$VIDEO_SRC]=${VIDEO_SRC/usb/$VIDEO_DEVICE}${VIDEO_URL:+ $VIDEO_URL}   audio[$AUDIO_SRC]=${AUDIO_SRC/usb/$AUDIO_DEVICE}${AUDIO_URL:+ $AUDIO_URL}"
   echo "  FOA canales : ${FOA_CH}${FOA_AFORMAT:+  (A-format NT-SF1→B: ${FOA_AFORMAT})}"
+  [[ "$AUDIO_DELAY" != "0" && -n "$AUDIO_DELAY" ]] && echo "  delay audio : ${AUDIO_DELAY} ms (adelay, +=audio más tarde)"
   (( NSTEMS > 0 )) && { echo "  patch stems (canal del device → orden de salida 4..$((3+NSTEMS))):"; for ((i=0;i<NSTEMS;i++)); do echo "    · ch ${STEM_CH_ARR[i]} → stem $i"; done; }
 elif (( NSTEMS > 0 )); then
   echo "  orden stems (canales 4..$((3+NSTEMS))):"; for s in "${STEM_ARR[@]}"; do echo "    · $s"; done
@@ -312,12 +405,14 @@ case "$MODE" in
   vod)
     echo "▶ VOD → $OUT/manifest.mpd"
     build_inputs vod
+    assemble_venc VID_VOD
     ffmpeg -y \
       "${IN_ARGS[@]}" \
       -map_metadata -1 -map_chapters -1 \
-      "${VF[@]}" "${VID_COMMON[@]}" "${VID_VOD[@]}" \
-      "${A_ARGS[@]}" \
-      "${DASH_COMMON[@]}" \
+      -map 0:v:0 "${CLOSE_MAPS[@]}" "${MAP_AUDIO[@]}" \
+      "${VENC[@]}" \
+      "${A_FILTER[@]}" "${AUDIO_ENC[@]}" \
+      "${DASH_COMMON[@]}" -adaptation_sets "$AS_STR" \
       "$OUT/manifest.mpd"
     echo "✓ Listo. Canales de audio:"
     grep -o 'AudioChannelConfiguration[^/]*' "$OUT/manifest.mpd" || true
@@ -353,6 +448,7 @@ case "$MODE" in
       trap '[[ -n "$UPLOADER_PID" ]] && kill "$UPLOADER_PID" 2>/dev/null || true' EXIT INT TERM
     fi
     if [[ "$CAPTURE" == "1" ]]; then build_inputs_capture; else build_inputs live; fi
+    assemble_venc VID_LIVE
     # ── Perfil DASH live según destino ──────────────────────────────────────
     #  Directo (sin S3): baja latencia CMAF (-streaming/-ldash) → muy fluido.
     #  Por CDN (S3): los chunks parciales + consistencia eventual rompen el
@@ -368,9 +464,10 @@ case "$MODE" in
     fi
     ffmpeg -y \
       "${IN_ARGS[@]}" \
-      "${VF[@]}" "${VID_COMMON[@]}" "${VID_LIVE[@]}" \
-      "${A_ARGS[@]}" \
-      "${DASH_COMMON[@]}" \
+      -map 0:v:0 "${CLOSE_MAPS[@]}" "${MAP_AUDIO[@]}" \
+      "${VENC[@]}" \
+      "${A_FILTER[@]}" "${AUDIO_ENC[@]}" \
+      "${DASH_COMMON[@]}" -adaptation_sets "$AS_STR" \
       "${LIVE_LL[@]}" \
       "${WIN[@]}" -remove_at_exit "$REMOVE" \
       "$OUT/manifest.mpd"

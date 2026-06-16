@@ -103,6 +103,13 @@
       </div>
     </div>
 
+    <div class="row" id="bridgeBox" style="align-items:center;gap:10px;margin-top:8px">
+      <button class="go"     id="btnBridgeStart" style="flex:0 0 auto" onclick="startBridge()">Inicializar cámara Insta360</button>
+      <button class="danger" id="btnBridgeStop"  style="flex:0 0 auto" onclick="stopBridge()" disabled>Parar</button>
+      <span class="small" id="bridgeStatus" style="opacity:.8">puente detenido</span>
+    </div>
+    <p class="hint">Crea la cámara virtual <code>/dev/video10</code> (Insta360 Virtual) y la alimenta vía SDK. Tras inicializar, selecciónala arriba como fuente USB.</p>
+
     <label style="margin-top:14px">Multichannel audio (X32 / mixer)</label>
     <div class="row">
       <div style="flex:0 0 120px">
@@ -111,7 +118,18 @@
       <div id="laUsbWrap"><select id="laDevice"></select></div>
       <div id="laUdpWrap" style="display:none"><input type="text" id="laUrl" placeholder="udp://0.0.0.0:5002?mode=listener"></div>
       <div style="flex:0 0 110px"><label style="margin:0 0 4px">Total ch.</label><input type="number" id="laChannels" value="32" min="4" max="64"></div>
+      <div style="flex:0 0 130px"><label style="margin:0 0 4px">A/V delay (ms)</label><input type="number" id="laDelay" value="0" min="-2000" max="2000" step="10"></div>
     </div>
+    <p class="hint">Si el stitching de la Insta360 retrasa el vídeo, el audio entra adelantado. Sube el delay (ms) hasta que casen; valor negativo adelanta el audio.</p>
+
+    <div class="row" id="monBox" style="align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap">
+      <button class="go"    id="btnFfplay"   style="flex:0 0 auto" onclick="openFfplay()">🎯 Medir sync (ffplay)</button>
+      <button class="alt"   id="btnMonStart" style="flex:0 0 auto" onclick="startMonitor()">▶ Vista navegador</button>
+      <button class="danger" id="btnMonStop" style="flex:0 0 auto" onclick="stopAllMonitors()" disabled>Parar</button>
+      <span class="small" id="monStatus" style="opacity:.8">monitor parado</span>
+    </div>
+    <p class="hint"><b>🎯 Medir sync (ffplay):</b> abre una ventana fiel (&lt;300 ms) en la máquina de producción con el delay actual aplicado — mira un transitorio (palmada/golpe), ajusta el delay y vuelve a medir. Requiere el server con <code>DISPLAY</code> (sesión gráfica). <b>▶ Vista navegador</b> es solo aproximada (MSE añade latencia y sesga el vídeo). ⚠ usan el audio ALSA en exclusiva → párelos antes del directo. Equivale a <code>./monitor_sync.sh &lt;ms&gt;</code>.</p>
+    <video id="monPreview" playsinline controls style="display:none;width:100%;max-width:640px;border-radius:8px;margin-top:6px;background:#000"></video>
 
     <label style="margin-top:14px">Ambisonic FOA (NT-SF1) · channels W,X,Y,Z</label>
     <div class="row">
@@ -227,7 +245,7 @@ let scene = {
   encode: { codec: 'h264_nvenc', scale: '1920:960', vbitrate: '6000k', seg: 2, s3Bucket: '', s3Region: '' },
   live: {
     video: { src: 'usb', device: '', url: '', size: '', fr: 30, informat: '' },
-    audio: { src: 'usb', device: '', url: '', channels: 32,
+    audio: { src: 'usb', device: '', url: '', channels: 32, delay: 0,
              foa: { ch: [0,1,2,3], format: 'fuma', aformat: false } },
   },
 };
@@ -269,6 +287,8 @@ async function init() {
   drawRadar();
   pollStatus();
   setInterval(pollStatus, 1500);
+  pollBridge();
+  setInterval(()=>{ if($('liveSources').style.display!=='none') pollBridge(); }, 3000);
 }
 
 // ── Modo VOD / LIVE ───────────────────────────────────────────────────────────
@@ -284,7 +304,7 @@ function setMode(m) {
   $('btnLive').style.display = m==='live' ? '' : 'none';
   $('stemsHint').textContent = m==='live'
     ? 'Each musician maps to a channel of the multichannel audio. The order = output channel order; set the position on the radar.'
-    : 'Drag the dots on the radar to place each musician. The order here = channel order in the stream.';
+    : 'Drag the dots on the radar to place each musician. Optionally pick a close-up video per musician (extra video track, synced).';
   renderStems();
 }
 
@@ -320,6 +340,7 @@ function buildLiveSelectors() {
   $('laSrc').value = A.src || 'usb';
   if (A.device) $('laDevice').value = A.device; else A.device = $('laDevice').value;
   $('laUrl').value = A.url || ''; $('laChannels').value = A.channels || 32;
+  $('laDelay').value = A.delay || 0;
   const f = A.foa.ch || [0,1,2,3];
   $('foa0').value=f[0]; $('foa1').value=f[1]; $('foa2').value=f[2]; $('foa3').value=f[3];
   $('foaFormat').value = A.foa.format || 'fuma';
@@ -348,6 +369,8 @@ function bindLiveControls() {
   $('laDevice').onchange = e => A.device = e.target.value;
   $('laUrl').oninput = e => A.url = e.target.value.trim();
   $('laChannels').oninput = e => A.channels = +e.target.value || 32;
+  $('laDelay').oninput = e => { A.delay = +e.target.value || 0;
+    if (_mon) { clearTimeout(window._monT); window._monT = setTimeout(startMonitor, 500); } };  // reinicia el monitor con el nuevo delay
   for (let i=0;i<4;i++) $('foa'+i).oninput = e => A.foa.ch[i] = +e.target.value || 0;
   $('foaFormat').onchange = e => A.foa.format = e.target.value;
   $('foaAformat').onchange = e => A.foa.aformat = e.target.checked;
@@ -416,6 +439,13 @@ function addLiveStem() {
   renderStems(); drawRadar(); syncSelPanel();
 }
 
+// Opciones <option> de vídeos de media/ para el selector de close-up.
+function videoOptionsHTML(sel) {
+  const vids = media.filter(m=>m.kind==='video');
+  return '<option value="">— no close-up —</option>' +
+    vids.map(m=>`<option value="${m.file}" ${m.file===sel?'selected':''}>${m.name}</option>`).join('');
+}
+
 function renderStems() {
   const live = mode==='live';
   $('stems').innerHTML = scene.stems.map((s,i)=>`
@@ -426,6 +456,9 @@ function renderStems() {
       ${live ? `<span class="small" style="flex:none">ch</span>
       <input type="number" class="az" style="width:54px" min="0" value="${s.channel!=null?s.channel:''}"
              onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=+this.value">` : ''}
+      ${!live ? `<select title="Close-up video (Caso B)" style="flex:0 0 130px"
+             onclick="event.stopPropagation()"
+             onchange="scene.stems[${i}].closeup=this.value||undefined">${videoOptionsHTML(s.closeup)}</select>` : ''}
       <span class="az">${Math.round(s.azimuthDeg)}°/${Math.round(s.elevationDeg||0)}°</span>
       <span class="x" onclick="event.stopPropagation();removeStem(${i})">✕</span>
     </div>`).join('') || '<p class="small">No stems. Add musicians above.</p>';
@@ -497,6 +530,121 @@ async function encode(mode) {
   toast(r.ok ? `Encode ${mode.toUpperCase()} started` : ('Error: '+(j.error||r.status)));
 }
 async function stopEncode(){ const r=await fetch('/api/encode/stop',{method:'POST'}); toast(r.ok?'Stopped':'Nothing to stop'); }
+
+// ── Monitor de sync A/V (MSE, fragmented-MP4 desde /api/monitor) ───────────────
+let _mon = null;   // { ms, sb, reader, queue, appending }
+async function startMonitor(){
+  stopMonitorClient();
+  await saveScene(false);   // el server lee scene.json para device/canales de audio
+  const v = $('monPreview');
+  v.style.display = '';
+  const ms = new MediaSource();
+  const st = { ms, sb:null, reader:null, queue:[], appending:false };
+  _mon = st;
+  v.src = URL.createObjectURL(ms);
+  $('btnMonStart').disabled = true; $('btnMonStop').disabled = false;
+  $('monStatus').textContent = 'conectando…'; $('monStatus').style.color = '';
+  ms.addEventListener('sourceopen', async () => {
+    if (_mon !== st) return;
+    try {
+      st.sb = ms.addSourceBuffer('video/mp4; codecs="avc1.640028,mp4a.40.2"');
+      st.sb.mode = 'sequence';
+      st.sb.addEventListener('updateend', () => pumpMon(st));
+    } catch(e){ toast('MSE no soporta el codec'); return stopMonitorClient(); }
+    const delay = scene.live.audio.delay || 0;
+    let resp;
+    try { resp = await fetch('/api/monitor?delay='+encodeURIComponent(delay)); }
+    catch(_){ $('monStatus').textContent='error de conexión'; return; }
+    if (!resp.ok || !(resp.headers.get('content-type')||'').includes('mp4')) {
+      const j = await resp.json().catch(()=>({}));
+      toast(j.error || 'No se pudo abrir el monitor');
+      $('monStatus').textContent = j.error || 'error'; $('monStatus').style.color = 'var(--bad)';
+      return stopMonitorClient();
+    }
+    st.reader = resp.body.getReader();
+    $('monStatus').textContent = 'en directo · delay '+delay+' ms'; $('monStatus').style.color='var(--ok)';
+    v.play().catch(()=>{});
+    readMon(st);
+  }, { once:true });
+}
+async function readMon(st){
+  try {
+    while (_mon === st) {
+      const { done, value } = await st.reader.read();
+      if (done) break;
+      st.queue.push(value); pumpMon(st);
+    }
+  } catch(_){}
+}
+function pumpMon(st){
+  if (_mon !== st || !st.sb || st.sb.updating || !st.queue.length) return;
+  try { st.sb.appendBuffer(st.queue.shift()); } catch(e){
+    if (e.name === 'QuotaExceededError') {   // recorta lo viejo y reintenta
+      const v=$('monPreview');
+      try { if (v.buffered.length) st.sb.remove(0, Math.max(0, v.currentTime-1)); } catch(_){}
+    }
+    return;
+  }
+  // mantén la latencia baja: salta al borde en vivo si nos quedamos atrás
+  const v=$('monPreview');
+  if (v.buffered.length){ const end=v.buffered.end(v.buffered.length-1); if (end - v.currentTime > 1.2) v.currentTime = end - 0.2; }
+}
+function stopMonitorClient(){
+  const st=_mon; _mon=null;
+  if (st){ try{ st.reader && st.reader.cancel(); }catch(_){}
+           try{ if (st.ms && st.ms.readyState==='open') st.ms.endOfStream(); }catch(_){} }
+  const v=$('monPreview'); if (v){ v.pause(); v.removeAttribute('src'); v.load(); v.style.display='none'; }
+  $('btnMonStart').disabled=false; $('btnMonStop').disabled=true;
+  $('monStatus').textContent='monitor parado'; $('monStatus').style.color='';
+  fetch('/api/monitor/stop',{method:'POST'}).catch(()=>{});
+}
+
+// Monitor fiel: abre ffplay en la máquina de producción (lo lanza el server).
+async function openFfplay(){
+  stopMonitorClient();   // libera el dispositivo si estaba la vista navegador
+  await saveScene(false);
+  const delay = scene.live.audio.delay || 0;
+  let r, j;
+  try { r = await fetch('/api/monitor/ffplay', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ delay }) }); j = await r.json(); }
+  catch(_){ toast('error de conexión'); return; }
+  if (r.ok){
+    toast('ffplay abierto en la máquina de producción');
+    $('btnMonStop').disabled=false;
+    $('monStatus').textContent='ffplay activo (ventana local) · delay '+delay+' ms'; $('monStatus').style.color='var(--ok)';
+  } else {
+    toast(j.error||'No se pudo abrir ffplay');
+    $('monStatus').textContent=j.error||'error'; $('monStatus').style.color='var(--bad)';
+  }
+}
+function stopAllMonitors(){
+  stopMonitorClient();
+  fetch('/api/monitor/ffplay/stop',{method:'POST'}).catch(()=>{});
+  $('btnMonStop').disabled=true;
+  $('monStatus').textContent='monitor parado'; $('monStatus').style.color='';
+}
+
+// ── Puente Insta360 → cámara virtual v4l2 ─────────────────────────────────────
+async function startBridge(){
+  const r=await fetch('/api/bridge/start',{method:'POST'});
+  const j=await r.json().catch(()=>({}));
+  toast(r.ok?'Puente iniciado':('Error: '+(j.error||r.status)));
+  pollBridge();
+}
+async function stopBridge(){
+  const r=await fetch('/api/bridge/stop',{method:'POST'});
+  toast(r.ok?'Puente detenido':'Nada que parar');
+  pollBridge();
+}
+async function pollBridge(){
+  let s; try { s=await fetch('/api/bridge/status').then(r=>r.json()); } catch(_){ return; }
+  const on=!!s.running;
+  $('btnBridgeStart').disabled=on;
+  $('btnBridgeStop').disabled=!on;
+  const last=(s.log&&s.log.length)?s.log[s.log.length-1]:'';
+  const el=$('bridgeStatus');
+  el.textContent = on ? ('activo · /dev/video10'+(last?(' · '+last):'')) : (s.exit!=null?('detenido (code '+s.exit+')'):'puente detenido');
+  el.style.color = on ? 'var(--ok)' : '';
+}
 async function makeProxy(){
   const src=$('proxySrc').value, scale=$('proxyScale').value.trim()||'1920:960';
   const r=await fetch('/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({src,scale})});

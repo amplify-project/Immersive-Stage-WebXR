@@ -8,30 +8,31 @@
     "maxBoost": 1.5,
     "focusExp": 4,
     "restGain": 0,
-    "zoomMax": 2.5
+    "zoomMax": 3.6
   },
   "encode": {
     "codec": "h264_nvenc",
-    "scale": "1920:960",
+    "scale": "2880x1440",
     "vbitrate": "6000k",
     "seg": 6,
-    "s3Bucket": "mi-360-streaming",
-    "s3Region": "eu-west-2"
+    "s3Bucket": "",
+    "s3Region": ""
   },
   "live": {
     "video": {
       "src": "usb",
-      "device": "/dev/video0",
+      "device": "/dev/video10",
       "url": "",
-      "size": "1920x1080",
-      "fr": 30,
+      "size": "2880x1440",
+      "fr": 24,
       "informat": ""
     },
     "audio": {
       "src": "usb",
-      "device": "hw:0,7",
+      "device": "hw:1,0",
       "url": "",
-      "channels": 2,
+      "channels": 1,
+      "delay": 700,
       "foa": {
         "ch": [
           0,
