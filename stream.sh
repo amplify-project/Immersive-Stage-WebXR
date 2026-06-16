@@ -324,34 +324,30 @@ build_inputs_capture() {
   IN_ARGS=()
   local q=(-thread_queue_size 1024)
 
-  # — Vídeo — (-use_wallclock_as_timestamps: misma referencia temporal que el
-  #   monitor de sync, para que el AUDIO_DELAY ajustado allí transfiera al directo)
+  # — Vídeo — `-framerate` da timestamps regulares (CFR). NO usar
+  #   -use_wallclock_as_timestamps: ataba el timing del MPD a la hora de LLEGADA
+  #   real de cada frame → con el bridge (entrega irregular) y el arranque
+  #   desfasado de v4l2 vs ALSA, audio y vídeo quedaban desincronizados en el
+  #   propio manifiesto → tirones/repeticiones en directo. El delay A/V se aplica
+  #   abajo con el filtro adelay, no por timestamps.
   case "$VIDEO_SRC" in
     usb)
       IN_ARGS+=("${q[@]}" -f v4l2 -framerate "$VIDEO_FR")
       [[ -n "$VIDEO_INFORMAT" ]] && IN_ARGS+=(-input_format "$VIDEO_INFORMAT")
       [[ -n "$VIDEO_SIZE" ]]     && IN_ARGS+=(-video_size "$VIDEO_SIZE")
-      IN_ARGS+=(-use_wallclock_as_timestamps 1 -i "$VIDEO_DEVICE") ;;
+      IN_ARGS+=(-i "$VIDEO_DEVICE") ;;
     udp)
       [[ -n "$VIDEO_URL" ]] || { echo "VIDEO_SRC=udp pero VIDEO_URL vacío"; exit 1; }
-      IN_ARGS+=("${q[@]}" -fflags nobuffer -use_wallclock_as_timestamps 1 -i "$VIDEO_URL") ;;
+      IN_ARGS+=("${q[@]}" -fflags nobuffer -i "$VIDEO_URL") ;;
     *) echo "VIDEO_SRC desconocido: '$VIDEO_SRC' (usa 'usb' o 'udp')"; exit 1 ;;
   esac
 
-  # — Audio multicanal (un solo input) —
-  # Delay A/V: -itsoffset (en segundos) antes del -i desplaza los timestamps del
-  # input de audio. Positivo = audio más tarde (compensa el vídeo retrasado por el
-  # stitching). Se aplica al input crudo, antes de extraer FOA/stems.
-  local off=()
-  if [[ "$AUDIO_DELAY" != "0" && -n "$AUDIO_DELAY" ]]; then
-    local osec; osec=$(awk "BEGIN{printf \"%.3f\", $AUDIO_DELAY/1000}")
-    off=(-itsoffset "$osec")
-  fi
+  # — Audio multicanal (un solo input) — Sin wallclock ni -itsoffset (ver arriba).
   case "$AUDIO_SRC" in
-    usb) IN_ARGS+=("${q[@]}" -f alsa -channels "$AUDIO_CHANNELS" -use_wallclock_as_timestamps 1 "${off[@]}" -i "$AUDIO_DEVICE") ;;
+    usb) IN_ARGS+=("${q[@]}" -f alsa -channels "$AUDIO_CHANNELS" -i "$AUDIO_DEVICE") ;;
     udp)
       [[ -n "$AUDIO_URL" ]] || { echo "AUDIO_SRC=udp pero AUDIO_URL vacío"; exit 1; }
-      IN_ARGS+=("${q[@]}" -fflags nobuffer -use_wallclock_as_timestamps 1 "${off[@]}" -i "$AUDIO_URL") ;;
+      IN_ARGS+=("${q[@]}" -fflags nobuffer -i "$AUDIO_URL") ;;
     *) echo "AUDIO_SRC desconocido: '$AUDIO_SRC' (usa 'usb' o 'udp')"; exit 1 ;;
   esac
 
@@ -372,14 +368,21 @@ build_inputs_capture() {
     merge_in+="[s${i}]"
   done
 
+  local out
   if (( NSTEMS == 0 )); then
-    A_FILTER=(-filter_complex "${fc%;}")
-    MAP_AUDIO=(-map "[foa]")
+    fc="${fc%;}"; out="[foa]"
   else
-    fc+="${merge_in}amerge=inputs=$((NSTEMS+1))[aout]"
-    A_FILTER=(-filter_complex "$fc")
-    MAP_AUDIO=(-map "[aout]")
+    fc+="${merge_in}amerge=inputs=$((NSTEMS+1))[aout]"; out="[aout]"
   fi
+  # Delay A/V con el filtro adelay (rellena silencio inicial), NO con itsoffset/
+  # wallclock: aquél acoplaba el timing del MPD y daba xrun/desincronía. Positivo
+  # = audio más tarde (compensa el vídeo retrasado por el stitching). :all=1 lo
+  # aplica a los 4 (o 4+N) canales.
+  if [[ "$AUDIO_DELAY" != "0" && -n "$AUDIO_DELAY" ]]; then
+    fc+=";${out}adelay=${AUDIO_DELAY}:all=1[adly]"; out="[adly]"
+  fi
+  A_FILTER=(-filter_complex "$fc")
+  MAP_AUDIO=(-map "$out")
 }
 
 echo "  códec vídeo : $CODEC ($SEGTYPE)   FOA: $FORMAT   stems: $NSTEMS   audio: $ABITRATE"
@@ -391,7 +394,7 @@ fi
 if [[ "$CAPTURE" == "1" ]]; then
   echo "  captura     : vídeo[$VIDEO_SRC]=${VIDEO_SRC/usb/$VIDEO_DEVICE}${VIDEO_URL:+ $VIDEO_URL}   audio[$AUDIO_SRC]=${AUDIO_SRC/usb/$AUDIO_DEVICE}${AUDIO_URL:+ $AUDIO_URL}"
   echo "  FOA canales : ${FOA_CH}${FOA_AFORMAT:+  (A-format NT-SF1→B: ${FOA_AFORMAT})}"
-  [[ "$AUDIO_DELAY" != "0" && -n "$AUDIO_DELAY" ]] && echo "  delay audio : ${AUDIO_DELAY} ms (itsoffset, +=audio más tarde)"
+  [[ "$AUDIO_DELAY" != "0" && -n "$AUDIO_DELAY" ]] && echo "  delay audio : ${AUDIO_DELAY} ms (adelay, +=audio más tarde)"
   (( NSTEMS > 0 )) && { echo "  patch stems (canal del device → orden de salida 4..$((3+NSTEMS))):"; for ((i=0;i<NSTEMS;i++)); do echo "    · ch ${STEM_CH_ARR[i]} → stem $i"; done; }
 elif (( NSTEMS > 0 )); then
   echo "  orden stems (canales 4..$((3+NSTEMS))):"; for s in "${STEM_ARR[@]}"; do echo "    · $s"; done
