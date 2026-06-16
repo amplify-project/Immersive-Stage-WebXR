@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Nombre de tu binario compilado
 BINARY="./insta360_v4l2_bridge"
 
@@ -18,10 +20,14 @@ while true; do
     
     # Forzar la muerte de cualquier hilo huérfano del SDK
     sudo killall -9 insta360_v4l2_bridge 2>/dev/null
-    
+
     # Espera de cortesía para que el Kernel de Linux limpie los descriptores USB
     sleep 2
-    
+
+    # Reset del USB: el SIGKILL deja la interfaz reclamada (USB zombi) y el SDK
+    # falla con "timeout to wait for synchronize". unbind/bind lo limpia.
+    sudo bash "${SCRIPT_DIR}/reset_usb.sh"
+
     echo "[Bash Watchdog] Reiniciando puente desde cero..."
     echo "------------------------------------------------------"
 done

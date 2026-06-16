@@ -1,286 +1,160 @@
-# Insta360 live a camara virtual V4L2
+# Insta360 live → V4L2 virtual camera
 
-Este directorio contiene un bridge C++ que abre una camara Insta360 con el SDK oficial, genera el video cosido en tiempo real con `RealTimeStitcher` y publica los frames en una camara virtual Linux compatible con V4L2.
+A C++ bridge that opens an Insta360 camera with the official SDK, stitches the
+video in real time with `RealTimeStitcher`, and publishes the frames to a Linux
+V4L2 virtual camera.
 
-Flujo:
+Flow:
 
 ```text
-Insta360 CameraSDK -> MediaSDK RealTimeStitcher -> OpenCV RGBA a BGR24 -> /dev/videoX
+Insta360 CameraSDK -> MediaSDK RealTimeStitcher (RGBA) -> repack to RGB24 -> /dev/videoX
 ```
 
-El objetivo es poder consumir la Insta360 desde herramientas que esperan una webcam normal, por ejemplo OpenCV, ROS, GStreamer, OBS, navegadores o `ffmpeg`.
+The goal is to consume the Insta360 from tools that expect a normal webcam:
+`ffmpeg` (the live encode reads `/dev/video10`), OpenCV, GStreamer, OBS, browsers.
 
-## Contenido
+## Contents
 
-- `insta360_v4l2_bridge.cc`: codigo fuente del bridge.
-- `download_sdk.sh`: descarga `models/` y `libs/` desde el servidor FTP.
-- `build_insta360_v4l2_bridge.sh`: script de compilacion.
-- `install_insta360_sdk.sh`: instala MediaSDK y CameraSDK desde `libs/`.
-- `insta360_v4l2_bridge`: binario compilado.
-- `models/`: modelos del MediaSDK necesarios para algunos modos/procesados del SDK.
-- `libs/`: paquete `.deb` del MediaSDK y distribucion del CameraSDK.
+- `insta360_v4l2_bridge.cc` — bridge source.
+- `build_insta360_v4l2_bridge.sh` — build script.
+- `install_insta360_sdk.sh` — installs MediaSDK + CameraSDK from `libs/`.
+- `bridge.sh` — persistent watchdog launcher (modprobe + restart loop + USB reset).
+- `reset_usb.sh` — software USB reset for the camera (see *USB zombie* below).
+- `insta360_v4l2_bridge` — compiled binary.
+- `libs/` — MediaSDK `.deb` + CameraSDK distribution (tracked via git LFS).
 
-## Requisitos
+## Configuration (hardcoded)
 
-### SDK y librerias
+> The binary takes **no CLI arguments** — `int main()` has no `argc/argv`. All
+> config lives in the `Options` struct in `insta360_v4l2_bridge.cc`; to change it,
+> edit the struct and rebuild. (The flags in older docs/launchers do nothing.)
 
-Si `models/` y `libs/` no estan ya presentes, descargarlos desde el servidor FTP:
+Current values:
 
-```bash
-./download_sdk.sh
-```
+| Field | Value | Notes |
+|-------|-------|-------|
+| `device` | `/dev/video10` | V4L2 output node |
+| output (`output_width`×`output_height`) | **2880×1440** | published frame; light downscale of the input stream |
+| `fps` | **24** | announced by the V4L2 device |
+| `stream_resolution` | **`RES_3072_1536P30`** | camera input stream — **this caps real quality**, not the output |
+| `flowstate` | **`true`** | **mandatory**, see below |
+| `stitch_type` | `TEMPLATE` | fastest/most stable mode |
 
-El script pide usuario y password de forma interactiva antes de conectar, para evitar el acceso anonimo por defecto del cliente FTP. Descarga:
+- **FlowState must stay `true`.** With `false` the SDK's `DynamicStitcher` leaves
+  `flow_estimator_` null and dereferences it on the first stitch → **segfault**
+  (skipping gyro doesn't help). Stabilization can't be turned off to save CPU.
+- **Quality is capped by the input stream**, not the output: bumping only the
+  output is a wasteful upscale. To raise quality, raise `stream_resolution`
+  (e.g. `RES_3840_1920P30`) too.
+- Output is **`RGB24`** (`V4L2_PIX_FMT_RGB24`): the stitcher delivers RGBA and the
+  bridge repacks to RGB24 (drops alpha, no color conversion, no OpenCV). The old
+  `cv::cvtColor(RGBA→BGR)` was ~21% of bridge CPU (`perf`), so it was removed —
+  and with it the OpenCV dependency. `ffmpeg` reads `rgb24` natively from V4L2 but
+  **cannot** read the 4-byte RGBA fourcc (`AB24`), hence RGB24.
 
-- `ftp://192.168.15.2/NASV1/sharedV1/AMPLIFY/live_v4l2_insta360/models/` a `./models`
-- `ftp://192.168.15.2/NASV1/sharedV1/AMPLIFY/live_v4l2_insta360/libs/` a `./libs`
+## Requirements
 
-Usa `wget` si esta instalado; si no, usa `lftp`. Hace descargas reanudables cuando el cliente lo soporta.
+### SDK and libraries
 
-Instalar el SDK incluido en `libs/`:
+The SDK ships in `libs/` (git LFS). Install it:
 
 ```bash
 ./install_insta360_sdk.sh
 ```
 
-El script hace:
+It runs `dpkg -i` on the MediaSDK `.deb`, copies the CameraSDK to
+`/opt/insta360/CameraSDK-…`, creates the stable symlink `/opt/insta360/CameraSDK`,
+and registers its `lib/` with `ldconfig`.
 
-- `sudo dpkg -i libs/libMediaSDK-dev-3.1.1.0-20250922_191110-amd64.deb`
-- Copia `libs/CameraSDK-20250812_192742-2.1.1-Linux` a `/opt/insta360/CameraSDK-20250812_192742-2.1.1-Linux`
-- Crea el enlace estable `/opt/insta360/CameraSDK`
-- Registra `/opt/insta360/CameraSDK/lib` en `ldconfig`
+The build expects the CameraSDK at `/opt/insta360/CameraSDK` (override with
+`CAMERA_SDK_ROOT=/path ./build_insta360_v4l2_bridge.sh`). It links
+`libCameraSDK.so` + `libMediaSDK.so` and needs `g++` with C++17 and the Linux V4L2
+headers. **OpenCV is no longer required.**
 
-El script de compilacion espera por defecto el CameraSDK instalado en:
+### V4L2 virtual camera
 
-```bash
-/opt/insta360/CameraSDK
-```
-
-Tambien usa:
-
-- `libCameraSDK.so`
-- `libMediaSDK.so`
-- OpenCV, al menos `opencv_core` y `opencv_imgproc`
-- Headers de V4L2 de Linux
-- `g++` con C++17
-- `wget` o `lftp` si se quiere descargar `models/` y `libs/` desde FTP
-
-Si el CameraSDK esta en otra ruta, se puede indicar con `CAMERA_SDK_ROOT`:
+Needs `v4l2loopback`:
 
 ```bash
-CAMERA_SDK_ROOT=/ruta/al/CameraSDK ./build_insta360_v4l2_bridge.sh
-```
-
-### Camara virtual V4L2
-
-Hace falta `v4l2loopback`. En Ubuntu/Debian:
-
-```bash
-sudo apt update
 sudo apt install v4l2loopback-dkms v4l2loopback-utils v4l-utils
-```
-
-Despues cargar el modulo creando, por ejemplo, `/dev/video10`:
-
-```bash
 sudo modprobe v4l2loopback video_nr=10 card_label="Insta360 Virtual" exclusive_caps=1
 ```
 
-Comprobar que existe:
+`bridge.sh` already loads the module, so you usually don't run modprobe by hand.
+
+## Build
 
 ```bash
-ls -l /dev/video10
-v4l2-ctl --list-devices
+./build_insta360_v4l2_bridge.sh        # produces ./insta360_v4l2_bridge
 ```
 
-## Compilar
+## Run
 
-Desde este directorio:
+Preferred — the watchdog launcher (loads v4l2loopback, restarts on crash, and
+**resets the USB** between restarts):
 
 ```bash
-./build_insta360_v4l2_bridge.sh
+./bridge.sh
 ```
 
-Esto genera o actualiza:
+Or the binary directly (needs `/dev/video10` to exist already):
 
 ```bash
-./insta360_v4l2_bridge
+sudo ./insta360_v4l2_bridge      # config is hardcoded; Ctrl+C to stop
 ```
 
-Comprobar dependencias enlazadas:
+On startup the binary **retries device discovery up to 15× (1 s apart)** so it
+self-heals through the USB re-enumeration window after a restart.
+
+## Test the virtual camera
 
 ```bash
-ldd ./insta360_v4l2_bridge | grep -E "CameraSDK|MediaSDK|opencv|not found"
-```
-
-Si aparece `not found`, falta alguna ruta de libreria en el sistema o hay que ajustar `LD_LIBRARY_PATH`.
-
-## Ejecutar
-
-Con la Insta360 conectada y `/dev/video10` creado:
-
-```bash
-./insta360_v4l2_bridge --device /dev/video10 --output 960x480
-```
-
-Para mas resolucion:
-
-```bash
-./insta360_v4l2_bridge \
-  --device /dev/video10 \
-  --output 1920x960 \
-  --stream-res 1920x960p30
-```
-
-Parar con `Ctrl+C`.
-
-## Opciones
-
-Ver ayuda:
-
-```bash
-./insta360_v4l2_bridge --help
-```
-
-Opciones disponibles:
-
-- `--device PATH`: dispositivo V4L2 de salida. Por defecto `/dev/video10`.
-- `--output WxH`: resolucion del frame cosido publicado en V4L2. Por defecto `960x480`.
-- `--fps N`: FPS anunciados por el dispositivo V4L2. Por defecto `30`.
-- `--bitrate N`: bitrate del live stream solicitado a la camara. Por defecto `1048576`.
-- `--stream-res NAME`: resolucion del stream de entrada de la camara. Valores soportados:
-  - `1440x720p30`
-  - `1920x960p30`
-  - `2560x1280p30`
-  - `960x480p30`
-- `--no-flowstate`: desactiva FlowState.
-
-## Probar la camara virtual
-
-Con `ffmpeg`/`ffplay`:
-
-```bash
-ffplay -f v4l2 -input_format bgr24 -video_size 960x480 /dev/video10
-```
-
-Con `v4l2-ctl`:
-
-```bash
+ffplay -f v4l2 /dev/video10        # ffplay auto-detects size/format (rgb24)
 v4l2-ctl --device=/dev/video10 --all
-v4l2-ctl --device=/dev/video10 --list-formats-ext
+v4l2-ctl --device=/dev/video10 --list-formats   # should show 'RGB3' 2880x1440
 ```
 
-Con OpenCV en Python:
+## Implementation notes
 
-```python
-import cv2
+The SDK delivers stitched frames in `SetStitchRealTimeDataCallback(...)` as RGBA.
+The callback repacks RGBA→RGB24 and pushes it to a **latest-frame queue (effective
+size 1)** — it never writes to the device directly, so a slow V4L2 consumer can't
+stall the SDK thread (old frames are dropped instead of queueing latency).
 
-cap = cv2.VideoCapture("/dev/video10", cv2.CAP_V4L2)
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        break
-    cv2.imshow("Insta360 V4L2", frame)
-    if cv2.waitKey(1) == 27:
-        break
+The watchdog (`bridge.sh`) on each restart: `killall -9` → `sleep 2` →
+**`reset_usb.sh`** → relaunch.
 
-cap.release()
-cv2.destroyAllWindows()
+## USB "zombie" after a hard kill
+
+When the bridge is `SIGKILL`'d (watchdog), the camera session isn't closed
+cleanly, so the USB interface stays claimed. The next launch then fails with:
+
+```
+timeout to wait for synchronize
+error: no Insta360 camera found
 ```
 
-## Notas de implementacion
-
-El SDK entrega los frames cosidos en el callback:
-
-```cpp
-stitcher->SetStitchRealTimeDataCallback(...)
-```
-
-El bridge crea un `cv::Mat` `RGBA`, lo convierte a `BGR24` con OpenCV y lo escribe en `/dev/videoX`. La salida V4L2 se configura con:
-
-```cpp
-V4L2_PIX_FMT_BGR24
-```
-
-El hilo del callback no escribe directamente al dispositivo. En su lugar deja el ultimo frame en una cola de tamano efectivo 1. Asi se evita bloquear el hilo del SDK si el consumidor V4L2 va mas lento.
-
-## Problemas frecuentes
-
-### `error: open /dev/video10: No such file or directory`
-
-No existe la camara virtual. Cargar `v4l2loopback`:
+A userspace discovery retry does **not** fix this (it's a stuck kernel-level USB
+endpoint). The fix is a software USB reset via sysfs unbind/bind, done by
+`reset_usb.sh` (finds the camera by vendor id `2e1a`, robust to bus/port changes)
+and wired into the `bridge.sh` watchdog. To clear it manually:
 
 ```bash
-sudo modprobe v4l2loopback video_nr=10 card_label="Insta360 Virtual" exclusive_caps=1
+sudo bash reset_usb.sh
 ```
 
-### `/dev/video10 is not a V4L2 video output device`
+If it still fails, unplug/replug the USB or power-cycle the camera.
 
-El dispositivo existe, pero no es un dispositivo de salida. Asegurarse de usar un nodo creado por `v4l2loopback`, no una webcam fisica.
+## Troubleshooting
 
-### Permiso denegado al abrir `/dev/video10`
+| Symptom | Fix |
+|---------|-----|
+| `open /dev/video10: No such file or directory` | v4l2loopback not loaded — run `bridge.sh` or the `modprobe` above. |
+| `/dev/video10 is not a V4L2 output device` | Pointed at a real webcam; use the v4l2loopback node. |
+| Permission denied on `/dev/video10` | `sudo usermod -aG video "$USER"` (re-login), or run with `sudo`. |
+| `timeout to wait for synchronize` / no camera found | USB zombie — `sudo bash reset_usb.sh` (see above). |
+| `Device or resource busy` on the camera node | Another consumer/the live encode holds it; v4l2loopback allows multiple readers, but the ALSA audio is exclusive. |
+| Black image / wrong colors | Confirm the consumer reads `rgb24` 2880×1440; `ffplay -f v4l2 /dev/video10` auto-detects. |
 
-Comprobar permisos:
-
-```bash
-ls -l /dev/video10
-groups
-```
-
-Soluciones tipicas:
-
-```bash
-sudo usermod -aG video "$USER"
-```
-
-Despues cerrar sesion y volver a entrar. Para una prueba rapida tambien se puede ejecutar el bridge con `sudo`, aunque no es lo ideal para uso diario.
-
-### `no Insta360 device found`
-
-El SDK no detecta la camara. Revisar:
-
-- La camara esta encendida y conectada.
-- El modo USB/conexion de la camara es compatible con el SDK.
-- No hay otro proceso usando la camara.
-- El demo original `realtime_stitcher_demo` funciona en esta maquina.
-
-### `failed to start live stream`
-
-La camara se abre, pero no acepta iniciar el live stream. Probar:
-
-- Otra resolucion con `--stream-res`.
-- Menor salida, por ejemplo `--output 960x480`.
-- Cerrar otros procesos que usen la camara.
-- Reiniciar la camara.
-
-### Imagen negra o consumidor bloqueado
-
-Comprobar que el consumidor usa el tamano correcto:
-
-```bash
-ffplay -f v4l2 -input_format bgr24 -video_size 960x480 /dev/video10
-```
-
-Si se ejecuto el bridge con `--output 1920x960`, usar `-video_size 1920x960`.
-
-## Ejemplo completo
-
-```bash
-cd /home/VICOMTECH/aelosegi/live_v4l2_insta360
-
-./download_sdk.sh
-
-./install_insta360_sdk.sh
-
-./build_insta360_v4l2_bridge.sh
-
-sudo modprobe v4l2loopback video_nr=10 card_label="Insta360 Virtual" exclusive_caps=1
-
-./insta360_v4l2_bridge --device /dev/video10 --output 960x480
-```
-
-En otra terminal:
-
-```bash
-ffplay -f v4l2 -input_format bgr24 -video_size 960x480 /dev/video10
-```
+The `h264 ... switch to software decoding` log line on startup is **benign SDK
+noise** — the camera-stream decode is cheap and not a CPU concern.

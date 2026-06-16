@@ -2,8 +2,6 @@
 #include <camera/camera.h>
 #include <camera/device_discovery.h>
 
-#include <opencv2/imgproc.hpp>
-
 #include <atomic>
 #include <cerrno>
 #include <csignal>
@@ -51,12 +49,14 @@ void Xioctl(int fd, unsigned long request, void* arg, const std::string& what) {
 
 struct Options {
     std::string device = "/dev/video10";
-    int output_width = 3840;  // 4K
-    int output_height = 1920;
+    int output_width = 2880;  // salida 2880x1440 (leve downscale del stream 3072x1536)
+    int output_height = 1440;
     int fps = 24;             // 24 FPS para aliviar CPU
     int bitrate = 45 * 1024 * 1024;
-    bool flowstate = true;
-    ins_camera::VideoResolution stream_resolution = ins_camera::VideoResolution::RES_2560_1280P30;
+    bool flowstate = true;    // OBLIGATORIO: el SDK crashea con flowstate=false (DynamicStitcher
+                              // deja flow_estimator_ nullptr y lo desreferencia al estitchar)
+    // Stream de entrada: limita la calidad real. 3072x1536 para alimentar la salida 2880x1440.
+    ins_camera::VideoResolution stream_resolution = ins_camera::VideoResolution::RES_3072_1536P30;
     ins::STITCH_TYPE stitch_type = ins::STITCH_TYPE::TEMPLATE; // Template por estabilidad y velocidad
 };
 
@@ -80,7 +80,9 @@ public:
         format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
         format.fmt.pix.width = width_;
         format.fmt.pix.height = height_;
-        format.fmt.pix.pixelformat = V4L2_PIX_FMT_BGR24;
+        // RGB24: el stitcher entrega RGBA; soltamos el alpha (sin OpenCV ni swap R↔B).
+        // ffmpeg lee 'rgb24' nativo desde v4l2 (no soporta el RGBA de 4 bytes 'AB24').
+        format.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
         format.fmt.pix.field = V4L2_FIELD_NONE;
         format.fmt.pix.bytesperline = width_ * 3;
         format.fmt.pix.sizeimage = width_ * height_ * 3;
@@ -179,8 +181,8 @@ private:
 
 class StitchDelegate : public ins_camera::StreamDelegate {
 public:
-    StitchDelegate(const std::shared_ptr<ins::RealTimeStitcher>& stitcher)
-        : stitcher_(stitcher) {}
+    StitchDelegate(const std::shared_ptr<ins::RealTimeStitcher>& stitcher, bool use_gyro)
+        : stitcher_(stitcher), use_gyro_(use_gyro) {}
 
     void OnAudioData(const uint8_t*, size_t, int64_t) override {}
 
@@ -189,6 +191,10 @@ public:
     }
 
     void OnGyroData(const std::vector<ins_camera::GyroData>& data) override {
+        // El giroscopio solo lo consume FlowState/DirectionLock. Con FlowState off
+        // (cámara estática) el flow_estimator_ es nullptr; inyectar gyro lo
+        // desreferencia → segfault. Por eso no lo reenviamos si no hay flowstate.
+        if (!use_gyro_) return;
         std::vector<ins::GyroData> gyro(data.size());
         std::memcpy(gyro.data(), data.data(), data.size() * sizeof(ins_camera::GyroData));
         stitcher_->HandleGyroData(gyro);
@@ -203,6 +209,7 @@ public:
 
 private:
     std::shared_ptr<ins::RealTimeStitcher> stitcher_;
+    bool use_gyro_ = true;
 };
 
 }  // namespace
@@ -223,10 +230,19 @@ int main() {
 
         std::cout << "Buscando dispositivo Insta360...\n";
         ins_camera::DeviceDiscovery discovery;
-        auto devices = discovery.GetAvailableDevices();
-        if (devices.empty()) {
+        // Reintento con espera: al rearrancar, el USB puede no haber re-enumerado
+        // todavía (el SDK acaba de soltarlo). Sin esto, un solo intento falla.
+        std::vector<ins_camera::DeviceDescriptor> devices;
+        for (int attempt = 1; attempt <= 15 && g_running; ++attempt) {
+            devices = discovery.GetAvailableDevices();
+            if (!devices.empty()) break;
             discovery.FreeDeviceDescriptors(devices);
-            throw std::runtime_error("no se encontró ninguna cámara Insta360 conectada.");
+            devices.clear();
+            std::cout << "  cámara no encontrada (intento " << attempt << "/15), reintentando en 1s...\n";
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        if (devices.empty()) {
+            throw std::runtime_error("no se encontró ninguna cámara Insta360 tras 15 intentos (¿conectada y en modo USB?).");
         }
 
         auto cam = std::make_shared<ins_camera::Camera>(devices[0].info);
@@ -259,16 +275,21 @@ int main() {
                 if (!g_running || data[0] == nullptr) return;
                 if (width != options.output_width || height != options.output_height) return;
 
-                cv::Mat rgba(height, width, CV_8UC4, data[0], static_cast<size_t>(linesize[0]));
-                cv::Mat bgr;
-                cv::cvtColor(rgba, bgr, cv::COLOR_RGBA2BGR);
-
-                std::vector<uint8_t> frame(bgr.data, bgr.data + bgr.total() * bgr.elemSize());
+                // RGBA → RGB24: copia 3 de cada 4 bytes (suelta el alpha), sin swap ni
+                // conversión de color. Respeta linesize[0] por si hay padding de fila.
+                std::vector<uint8_t> frame(static_cast<size_t>(width) * height * 3);
+                uint8_t* dst = frame.data();
+                for (int y = 0; y < height; ++y) {
+                    const uint8_t* src = data[0] + static_cast<size_t>(y) * linesize[0];
+                    for (int x = 0; x < width; ++x, src += 4, dst += 3) {
+                        dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+                    }
+                }
                 queue.Push(std::move(frame));
             });
 
         // Casteo explícito a la clase base requerida para evitar errores de referencia del compilador
-        std::shared_ptr<ins_camera::StreamDelegate> delegate = std::make_shared<StitchDelegate>(stitcher);
+        std::shared_ptr<ins_camera::StreamDelegate> delegate = std::make_shared<StitchDelegate>(stitcher, options.flowstate);
         cam->SetStreamDelegate(delegate);
 
         ins_camera::LiveStreamParam param;

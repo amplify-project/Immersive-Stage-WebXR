@@ -1,5 +1,5 @@
 {
-  "mode": "live",
+  "mode": "vod",
   "video": "media/video.mp4",
   "bed": "media/ambisonic_bformat.wav",
   "bedFormat": "fuma",
@@ -12,7 +12,7 @@
   },
   "encode": {
     "codec": "h264_nvenc",
-    "scale": "1920:960",
+    "scale": "2880x1440",
     "vbitrate": "6000k",
     "seg": 6,
     "s3Bucket": "mi-360-streaming",
@@ -21,17 +21,18 @@
   "live": {
     "video": {
       "src": "usb",
-      "device": "/dev/video0",
+      "device": "/dev/video10",
       "url": "",
-      "size": "1920x1080",
-      "fr": 30,
+      "size": "2880x1440",
+      "fr": 24,
       "informat": ""
     },
     "audio": {
       "src": "usb",
-      "device": "hw:0,7",
+      "device": "hw:1,0",
       "url": "",
-      "channels": 2,
+      "channels": 1,
+      "delay": 0,
       "foa": {
         "ch": [
           0,

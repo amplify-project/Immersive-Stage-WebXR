@@ -8,6 +8,11 @@ position in space.
 Ships with a **visual editor** to place each musician in the 3D scene and launch
 the encodes (VOD and live) from the browser.
 
+It also supports a **WebXR AR** mode (3D objects as positional audio sources in
+passthrough) and **synchronized per-musician close-up videos** (extra DASH video
+tracks). See **[`docs/core-api.md`](docs/core-api.md)** for the engine API and
+these features in detail.
+
 ---
 
 ## How it works
@@ -100,6 +105,14 @@ CODEC=vp9 ./stream.sh live
 Variables (all optional): `STEMS` (`;`-separated list), `FORMAT`
 (`fuma`|`ambix`), `CODEC` (`vp9`|`h264`), `SCALE` (e.g. `1920:960`), `VIDEO`,
 `AUDIO`, `OUT`, `SEG`, `VBITRATE`. Output in `encoded/manifest.mpd`.
+For live capture (`CAPTURE=1`): `VIDEO_SRC`/`AUDIO_SRC` (`usb`|`udp`),
+`VIDEO_DEVICE`, `AUDIO_DEVICE`, `AUDIO_CHANNELS`, and **`AUDIO_DELAY`** (ms,
+positive = audio later, to compensate the stitch latency — see *A/V sync* below).
+
+**Close-up videos** (Caso B): add per-musician "see them closer" tracks to the
+same manifest with `CLOSEUPS` (`;`-separated, in stem order), `CLOSEUP_SCALE`
+(default `1280:720`) and `CLOSEUP_VBITRATE` (default `2500k`). See
+[`docs/core-api.md`](docs/core-api.md).
 
 ### ⚠️ Two things that matter for the Quest
 
@@ -116,6 +129,47 @@ Variables (all optional): `STEMS` (`;`-separated list), `FORMAT`
 
 ---
 
+## Live capture & A/V sync
+
+For a live show the 360 video comes from an **Insta360 X4** through a bridge that
+stitches it and exposes a virtual camera at `/dev/video10` (see
+[`x4_bridge/`](x4_bridge/README.md)); the audio (FOA + stems) comes from the X32
+over ALSA. Start the bridge, then in the editor (**LIVE** mode) pick the virtual
+camera as the USB video source and the X32 as the audio device.
+
+### The desync
+
+The stitching adds latency to the **video** (~hundreds of ms), so the audio
+arrives ahead. All capture inputs are timestamped with the wall clock
+(`-use_wallclock_as_timestamps 1`) so the residual offset equals the real stitch
+latency — **stable, measurable, and identical** in the monitor and in the live
+encode. The fix is a one-time calibration: delay the audio to match the late
+video.
+
+### Calibrating the delay
+
+1. Bridge running, **LIVE** mode, audio device set.
+2. **🎯 Medir sync (ffplay)** — opens a faithful, low-latency (<300 ms) window on
+   the production machine (requires the server started from a graphical session
+   with `DISPLAY`). It muxes `/dev/video10` + audio with the current delay applied.
+   Equivalent CLI: `./monitor_sync.sh <ms> [audio_dev] [video_dev]` (`CH=` for the
+   channel count).
+3. Watch a transient (a clap / snare hit): the gap you see↔hear is the desync.
+   Set it in **A/V delay (ms)**, press 🎯 again to verify, repeat until aligned.
+4. **Parar**, then **Start LIVE** — the value is saved in `scene.json`
+   (`live.audio.delay`) and applied to the encode.
+
+> **▶ Vista navegador** is an MSE preview — handy to confirm A+V are flowing, but
+> it adds latency and biases the video, so **don't trust it for the exact offset**;
+> use ffplay for the measurement.
+>
+> The monitor and the live encode share the X32 (ALSA is **exclusive**), so they
+> can't run at once — stop the monitor before going live. The encode applies the
+> delay via `-itsoffset` on the raw audio input, before FOA/stems are split, so the
+> whole audio bed shifts together.
+
+---
+
 ## Player controls
 
 | Action | Desktop | WebXR (Quest) |
@@ -124,6 +178,10 @@ Variables (all optional): `STEMS` (`;`-separated list), `FORMAT`
 | Zoom (spotlight) | mouse wheel | right thumbstick (Y axis) |
 | Play/pause | spacebar | HUD controls |
 | Enter VR | **VR** button | — |
+| Enter AR (passthrough) | **AR** button | **AR** button |
+
+When you look at a musician + zoom in, their **close-up video** (if the manifest
+has one) appears on a floating panel, synced to the audio.
 
 With no zoom only the FOA bed plays (everything mixed). When you **look at a
 musician + zoom in**, their stem appears from its position.
@@ -152,6 +210,7 @@ src/audio/              Reusable immersive-audio engine (ESM)
   OmnitoneFOADecoder.js     Binaural FOA decode (HRTF) via Omnitone
   HOAST*.js / *.js          Cardioid fallback, matrices, axes
 media/                  360 video, FOA bed and stems (Git LFS)
+docs/core-api.md        Engine API + AR mode + close-up multi-track reference
 ```
 
 ### Backend API (`/api/*`)
@@ -173,7 +232,8 @@ media/                  360 video, FOA bed and stems (Git LFS)
   "bed":   "media/ambisonic_bformat.wav",
   "bedFormat": "fuma",                       // fuma | ambix
   "stems": [
-    { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0 }
+    // "closeup" is optional (Caso B): a per-musician close-up video track
+    { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0, "closeup": "media/dr_cu.mp4" }
   ],
   "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5 },
   "encode":    { "codec": "vp9", "scale": "1920:960", "vbitrate": "6000k", "seg": 2 }

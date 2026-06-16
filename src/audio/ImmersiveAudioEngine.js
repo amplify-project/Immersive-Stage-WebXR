@@ -15,6 +15,11 @@
 //      engine.setZoomByFactor(1.4);
 //      engine.setVolume(0.8);
 //
+//  Fuentes espaciales dinámicas (objetos 3D / anclas AR):
+//      engine.bindStemToObject('violin', violinObject3D);  // sigue su matrixWorld
+//      engine.setStemPosition(0, 1.2, 0, -2);              // posición mundo fija
+//      engine.update();                                    // 1×/frame en el render loop
+//
 //  Dependencias globales (cargadas por <script> en el navegador):
 //      sht      — spherical-harmonic-transform
 //      numeric  — numericjs
@@ -69,14 +74,24 @@ export class ImmersiveAudioEngine {
     this._attached = false;
     this._viewR3 = null;       // rotación de cabeza (3x3 ambisónico) para DoA
 
-    // ── Stems por músico (spotlight posicional) ──────────────────────────────
+    // ── Stems / fuentes espaciales (spotlight posicional) ────────────────────
+    // Cada fuente arranca colocada por azimut/elevación sobre una esfera de
+    // radio _stemRadius (compat. con el comportamiento original), pero su
+    // posición puede pasar a ser dinámica: fijada con setStemPosition() o
+    // vinculada a un Object3D con bindStemToObject() (p.ej. un ancla AR). Así el
+    // mismo motor sirve para músicos colocados en el 360 y para objetos 3D que
+    // se mueven por la sala en AR.
     const D2R = Math.PI / 180;
     this._stems = (stems || []).map((s, i) => ({
       az:   (s.azimuthDeg   || 0) * D2R,
       el:   (s.elevationDeg || 0) * D2R,
       name: s.name || ('stem' + i),
       gain: null, panner: null, dir: null,
+      pos: null,          // posición mundo [x,y,z]; null → derivada de az/el
+      object3d: null,     // fuente vinculada (lee su matrixWorld) o null
     }));
+    this._stemRadius  = 1;            // radio de la colocación estática por az/el
+    this._listenerPos = [0, 0, 0];    // posición de cabeza en marco mundo (AR)
     this._chSplitter = null;
     this._stemBus    = null;
     this._lookForward = [0, 0, -1];   // frente de cabeza en marco mundo
@@ -250,6 +265,16 @@ export class ImmersiveAudioEngine {
     } else if (L.setOrientation) {
       L.setOrientation(fwd[0], fwd[1], fwd[2], up[0], up[1], up[2]);
     }
+    // Posición de la cabeza (traslación de la matriz mundo). En 360 puro es el
+    // origen; en AR la cabeza se mueve por la sala y las fuentes ancladas deben
+    // espacializarse relativas a ella.
+    const px = e[12] || 0, py = e[13] || 0, pz = e[14] || 0;
+    this._listenerPos = [px, py, pz];
+    if (L.positionX) {
+      L.positionX.value = px; L.positionY.value = py; L.positionZ.value = pz;
+    } else if (L.setPosition) {
+      L.setPosition(px, py, pz);
+    }
     this._updateSpotlight();
   }
 
@@ -315,25 +340,124 @@ export class ImmersiveAudioEngine {
       const ce = Math.cos(s.el), se = Math.sin(s.el);
       const dir = [-ce * Math.sin(s.az), se, -ce * Math.cos(s.az)];
       s.dir = dir;
+      // Posición inicial: la fijada de antemano (setStemPosition/bind antes de
+      // attach) o la derivada del azimut/elevación sobre la esfera _stemRadius.
+      if (!s.pos) s.pos = [dir[0] * this._stemRadius, dir[1] * this._stemRadius, dir[2] * this._stemRadius];
 
       const g = this.ctx.createGain();
       g.gain.value = this._restGain;
 
       const p = this.ctx.createPanner();
       p.panningModel  = 'HRTF';
-      p.distanceModel = 'inverse';
+      p.distanceModel = 'inverse';   // atenuación natural por distancia (útil en AR)
       p.refDistance   = 1;
-      if (p.positionX) {
-        p.positionX.value = dir[0]; p.positionY.value = dir[1]; p.positionZ.value = dir[2];
-      } else if (p.setPosition) {
-        p.setPosition(dir[0], dir[1], dir[2]);
-      }
 
       this._chSplitter.connect(g, ch, 0);   // canal 4+i (mono) → gain
       g.connect(p);
       p.connect(this._stemBus);
       s.gain = g; s.panner = p;
+      this._setPannerPos(s, s.pos);          // coloca el panner en su posición
     });
+  }
+
+  // ── Fuentes espaciales dinámicas (posición fija o ancla AR) ────────────────
+
+  // Resuelve el índice de stem a partir de un índice numérico o de su nombre.
+  _stemIndex(ref) {
+    if (typeof ref === 'number') return ref;
+    return this._stems.findIndex(s => s.name === ref);
+  }
+
+  // Extrae una posición mundo [x,y,z] de: un Object3D (matrixWorld de Three.js),
+  // un array [x,y,z], un {x,y,z} o un {position:{x,y,z}}. null si no puede.
+  _extractPos(src) {
+    if (!src) return null;
+    if (Array.isArray(src)) return [src[0], src[1], src[2]];
+    if (src.matrixWorld && src.matrixWorld.elements) {
+      const e = src.matrixWorld.elements;
+      return [e[12], e[13], e[14]];
+    }
+    if (typeof src.x === 'number') return [src.x, src.y, src.z];
+    if (src.position && typeof src.position.x === 'number')
+      return [src.position.x, src.position.y, src.position.z];
+    return null;
+  }
+
+  // Coloca el PannerNode de un stem en una posición mundo.
+  _setPannerPos(s, pos) {
+    if (!s || !s.panner || !pos) return;
+    const p = s.panner;
+    if (p.positionX) {
+      p.positionX.value = pos[0]; p.positionY.value = pos[1]; p.positionZ.value = pos[2];
+    } else if (p.setPosition) {
+      p.setPosition(pos[0], pos[1], pos[2]);
+    }
+  }
+
+  /**
+   * Fija la posición mundo de una fuente (stem). La fuente deja de seguir
+   * cualquier Object3D vinculado previamente.
+   * @param {number|string} ref  Índice (0..N-1) o nombre del stem.
+   * @param {number|number[]|{x,y,z}} x  X, o un [x,y,z] / {x,y,z}.
+   * @param {number} [y]
+   * @param {number} [z]
+   */
+  setStemPosition(ref, x, y, z) {
+    const s = this._stems[this._stemIndex(ref)];
+    if (!s) return;
+    const pos = (typeof x === 'number') ? [x, y, z] : this._extractPos(x);
+    if (!pos) return;
+    s.object3d = null;        // posición explícita → desvincula del Object3D
+    s.pos = pos;
+    this._setPannerPos(s, pos);
+    this._updateSpotlight();
+  }
+
+  /**
+   * Vincula una fuente (stem) a un Object3D (p.ej. un ancla AR de Three.js). A
+   * partir de update() la posición del panner sigue su matrixWorld cada frame.
+   * @param {number|string} ref  Índice o nombre del stem.
+   * @param {object} object3d    Object3D con matrixWorld (o array/{x,y,z}).
+   */
+  bindStemToObject(ref, object3d) {
+    const s = this._stems[this._stemIndex(ref)];
+    if (!s) return;
+    s.object3d = object3d || null;
+    if (s.object3d) {
+      const pos = this._extractPos(s.object3d);
+      if (pos) { s.pos = pos; this._setPannerPos(s, pos); }
+    }
+  }
+
+  /** Desvincula la fuente de su Object3D (conserva la última posición conocida). */
+  unbindStem(ref) {
+    const s = this._stems[this._stemIndex(ref)];
+    if (s) s.object3d = null;
+  }
+
+  /** Radio de la colocación estática por azimut/elevación (por defecto 1). */
+  setStemRadius(r) { this._stemRadius = Number(r) || 1; }
+
+  /** Nº de fuentes/stems espaciales activas. */
+  get stemCount() { return this._stems.length; }
+
+  /**
+   * Refresca las posiciones de las fuentes vinculadas a un Object3D y recalcula
+   * el spotlight. Llamar una vez por frame desde el bucle de render cuando se
+   * usan fuentes ancladas (AR). Sin fuentes vinculadas no hace trabajo extra.
+   */
+  update() {
+    if (!this._stems.length) return;
+    let moved = false;
+    for (const s of this._stems) {
+      if (!s.object3d) continue;
+      const pos = this._extractPos(s.object3d);
+      if (!pos) continue;
+      s.pos = pos;
+      this._setPannerPos(s, pos);
+      moved = true;
+    }
+    if (moved) this._updateSpotlight();
   }
 
   // Reparte ganancia a cada stem según mirada (alineación con su dirección) y
@@ -341,18 +465,44 @@ export class ImmersiveAudioEngine {
   // _restGain + _maxBoost. Suavizado para no chasquear.
   _updateSpotlight() {
     if (!this._stems.length || !this.ctx) return;
-    const f = this._lookForward;
+    const f = this._lookForward, lp = this._listenerPos;
     const lo = this._zoomMin, hi = this._zoomMax;
     const zN = Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)));
     const now = this.ctx.currentTime;
     for (const s of this._stems) {
-      if (!s.gain || !s.dir) continue;
-      const dot = s.dir[0] * f[0] + s.dir[1] * f[1] + s.dir[2] * f[2];
-      const aim = Math.max(0, dot);                  // 1 = mirándolo de frente
+      if (!s.gain) continue;
+      // Dirección actual cabeza→fuente (normalizada). Para fuentes estáticas en
+      // la esfera coincide con s.dir; para fuentes con posición/ancla dinámica
+      // se recalcula a partir de su posición mundo y la de la cabeza.
+      const p = s.pos || s.dir;
+      if (!p) continue;
+      let dx = p[0] - lp[0], dy = p[1] - lp[1], dz = p[2] - lp[2];
+      const len = Math.hypot(dx, dy, dz) || 1;
+      dx /= len; dy /= len; dz /= len;
+      const dot = dx * f[0] + dy * f[1] + dz * f[2];
+      const aim = Math.max(0, dot);                  // 1 = mirándola de frente
       const focus = Math.pow(aim, this._focusExp);
-      const target = this._restGain + focus * zN * this._maxBoost;
+      s._weight = focus * zN;                         // 0..1: cuán "enfocada" está
+      const target = this._restGain + s._weight * this._maxBoost;
       s.gain.gain.setTargetAtTime(target, now, 0.08);
     }
+  }
+
+  /**
+   * Índice del stem actualmente más enfocado (mirada × zoom), o -1 si ninguno
+   * supera el umbral. Reutiliza el peso del spotlight, así que sirve para
+   * disparar el close-up del músico al que miras (Caso B) con el mismo criterio
+   * que el realce de audio.
+   * @param {number} [minWeight=0.2]
+   * @returns {number}
+   */
+  getFocusedStem(minWeight = 0.2) {
+    let bi = -1, bw = minWeight;
+    for (let i = 0; i < this._stems.length; i++) {
+      const w = this._stems[i]._weight || 0;
+      if (w > bw) { bw = w; bi = i; }
+    }
+    return bi;
   }
 
   /**
@@ -371,6 +521,12 @@ export class ImmersiveAudioEngine {
     if (zoomMin  != null) this._zoomMin  = zoomMin;
     if (zoomMax  != null) this._zoomMax  = zoomMax;
     this._updateSpotlight();
+  }
+
+  /** Parámetros actuales del spotlight (para guardar/restaurar, p.ej. al entrar/salir de AR). */
+  getSpotlightParams() {
+    return { restGain: this._restGain, maxBoost: this._maxBoost,
+             focusExp: this._focusExp, zoomMin: this._zoomMin, zoomMax: this._zoomMax };
   }
 
   // ── Volumen ──────────────────────────────────────────────────────────────
