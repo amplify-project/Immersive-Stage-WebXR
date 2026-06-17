@@ -1,0 +1,48 @@
+{
+  "mode": "live",
+  "video": "media/video.mp4",
+  "bed": "media/ambisonic_bformat.wav",
+  "bedFormat": "fuma",
+  "stems": [],
+  "spotlight": {
+    "maxBoost": 1.5,
+    "focusExp": 4,
+    "restGain": 0,
+    "zoomMax": 3.6
+  },
+  "encode": {
+    "codec": "h264_nvenc",
+    "scale": "2880x1440",
+    "vbitrate": "6000k",
+    "seg": 6,
+    "s3Bucket": "",
+    "s3Region": ""
+  },
+  "live": {
+    "video": {
+      "src": "usb",
+      "device": "/dev/video10",
+      "url": "",
+      "size": "2880x1440",
+      "fr": 24,
+      "informat": ""
+    },
+    "audio": {
+      "src": "usb",
+      "device": "hw:1,0",
+      "url": "",
+      "channels": 1,
+      "delay": 700,
+      "foa": {
+        "ch": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "format": "fuma",
+        "aformat": false
+      }
+    }
+  }
+}

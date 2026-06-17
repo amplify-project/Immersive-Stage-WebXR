@@ -160,7 +160,7 @@
     box-shadow: 0 0 6px var(--accent);
   }
 
-  #xr-btn {
+  #xr-btn, #ar-btn {
     margin-left: 8px;
     font-family: var(--mono);
     font-size: 11px;
@@ -174,8 +174,9 @@
     transition: opacity 0.2s, transform 0.1s;
     text-transform: uppercase;
   }
-  #xr-btn:hover { opacity: 0.85; transform: scale(1.03); }
-  #xr-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+  #ar-btn { background: linear-gradient(135deg, #0ea5e9, #0369a1); }
+  #xr-btn:hover, #ar-btn:hover { opacity: 0.85; transform: scale(1.03); }
+  #xr-btn:disabled, #ar-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
 
   #ambi-viz {
     position: fixed;
@@ -314,6 +315,9 @@
   style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;top:-9999px"></video>
 <audio id="hidden-audio" crossorigin="anonymous"
   style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;top:-9999px"></audio>
+<!-- Close-up (Caso B): vídeo del músico enfocado, en un plano flotante -->
+<video id="hidden-closeup" playsinline crossorigin="anonymous" muted
+  style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;top:-9999px"></video>
 
 <!-- Source loader -->
 <div id="loader">
@@ -375,6 +379,7 @@
       <button class="ctrl-btn" onclick="resetView()" title="Centrar vista">⊙</button>
       <button class="ctrl-btn" onclick="toggleFS()"  title="Pantalla completa">⛶</button>
       <button id="xr-btn" disabled onclick="enterXR()">VR</button>
+      <button id="ar-btn" disabled onclick="enterAR()">AR</button>
     </div>
   </div>
 </div>
@@ -404,11 +409,23 @@ import { ImmersiveAudioEngine } from './src/audio/ImmersiveAudioEngine.js';
 let renderer, scene, camera, sphere, videoTexture;
 let videoEl   = document.getElementById('hidden-video');
 let audioEl   = document.getElementById('hidden-audio');
+let closeupEl = document.getElementById('hidden-closeup');
 let shakaVideo = null;
 let shakaAudio = null;
+let shakaCloseup = null;             // 3ª instancia Shaka: pista de close-up
+let shakaCfg   = null;               // config compartida (la fija loadDualShaka)
+// Close-ups (Caso B): plano flotante con el vídeo del músico enfocado.
+let closeupTexture = null, closeupMesh = null;
+let closeupReady = false;            // hay pistas de close-up en el manifest
+let closeupStem  = -1;               // stem mostrado ahora (-1 = ninguno)
+let closeupRepByStem = {};           // índice de stem → RepresentationID del MPD
 let engine     = null;               // ImmersiveAudioEngine (motor de audio)
 let audioCtx   = null, gainNode = null;  // referencias derivadas del engine
 let xrSession  = null;
+let arSession  = null;               // sesión WebXR immersive-ar (passthrough)
+let arSources  = [];                 // Object3D por stem, anclados en la sala
+let arPrevSpot = null;               // spotlight previo (restaurar al salir de AR)
+let stemDefs   = [];                 // definición de stems en uso (az/el/name)
 let isDragging = false, prevMouse = {x:0, y:0};
 let yaw = 0, pitch = 0;
 let useGyro = false;
@@ -424,7 +441,9 @@ const AUDIO_SPIN_TEST = new URLSearchParams(location.search).get('audiotest') ==
 // ══════════════════════════════════════════════════════
 function initThree() {
   const canvas = document.getElementById('three-canvas');
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  // alpha:true → buffer con canal alfa para que el passthrough AR se vea por
+  // detrás de la escena (en VR/escritorio la esfera 360 lo tapa todo igual).
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
@@ -440,6 +459,18 @@ function initThree() {
   sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x111111 }));
   sphere.position.set(0, 0, 0);  // centrada en el origen
   scene.add(sphere);
+
+  // Close-up (Caso B): plano 16:9 ~2.5 m delante de la cámara. Como es hijo de
+  // la cámara, queda siempre centrado en la vista (escritorio y XR). Oculto
+  // hasta que se enfoca a un músico que tenga close-up.
+  closeupMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.0, 1.125),
+    new THREE.MeshBasicMaterial({ transparent: true, depthTest: false }));
+  closeupMesh.position.set(0, 0, -2.5);
+  closeupMesh.renderOrder = 999;       // por encima de la esfera 360
+  closeupMesh.visible = false;
+  camera.add(closeupMesh);
+  scene.add(camera);                   // necesario para que los hijos se rendericen
 
   window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -466,6 +497,7 @@ function renderLoop() {
     if (videoTexture) videoTexture.needsUpdate = true;
     updateProgress();
   }
+  if (closeupReady && closeupMesh.visible && closeupTexture) closeupTexture.needsUpdate = true;
   updateAmbiViz();
   renderer.render(scene, camera);
 }
@@ -501,6 +533,7 @@ function applyRotation() {
     camera.updateMatrixWorld();
     engine.setRotationFromMatrix4(camera.matrixWorld.elements);
     engine.setZoomByFactor(getZoomFactor());
+    updateCloseupFocus();   // muestra el close-up del músico que miras al hacer zoom
   }
 }
 
@@ -527,9 +560,13 @@ async function startManifest(src) {
   if (syncInterval) { clearInterval(syncInterval); syncInterval = null; }
   if (shakaVideo) { try { await shakaVideo.destroy(); } catch(e){} shakaVideo = null; }
   if (shakaAudio) { try { await shakaAudio.destroy(); } catch(e){} shakaAudio = null; }
+  if (shakaCloseup) { try { await shakaCloseup.destroy(); } catch(e){} shakaCloseup = null; }
+  closeupReady = false; closeupStem = -1; closeupRepByStem = {};
+  if (closeupMesh) closeupMesh.visible = false;
 
   videoEl.pause();
   audioEl.pause();
+  closeupEl.pause();
   videoEl.muted = true;
 
   if (src.endsWith('.mpd')) {
@@ -589,6 +626,7 @@ async function loadDualShaka(src) {
       },
     },
   };
+  shakaCfg = shakaConfig;   // reutilizada por la instancia de close-up (Caso B)
 
   try {
     // ── Shaka 1: vídeo (muted) → Three.js ──────────
@@ -610,56 +648,66 @@ async function loadDualShaka(src) {
     }
     videoEl.play();
 
-    // ── Shaka 2: mismo manifest → <audio> → Web Audio
-    shakaAudio = new shaka.Player(audioEl);
-    shakaAudio.configure({
-      ...shakaConfig,
-      // Preferir audio, ignorar vídeo
-      preferredAudioLanguage: 'und',
-      preferredVideoCodecs: [],
-      preferredAudioCodecs: ['mp4a.40.2', 'opus', 'ac-3', 'ec-3'],
-    });
+    // ── UN SOLO Shaka ───────────────────────────────────────────────────────
+    //  El <video> ya trae vídeo + audio Opus multicanal (el MPD tiene ambos
+    //  adaptation sets), así que NO abrimos un 2º Shaka sobre <audio>: un decoder,
+    //  un reloj → A/V sincronizados POR CONSTRUCCIÓN (como mpv), sin bucle de
+    //  corrección. El audio multicanal se toma del PROPIO <video> en setupFOA con
+    //  createMediaElementSource. La deriva entre los dos Shaka era el bug de fondo.
+    audioEl = videoEl;   // todas las refs a audioEl operan ya sobre el <video>
 
-    await shakaAudio.load(src);
-
-    // Seleccionar la pista de menor bandwidth — preferir audio only
-    const variants = shakaAudio.getVariantTracks();
-    console.log('[shakaAudio] variants disponibles:', variants.length);
-    variants.forEach(v => console.log(
-      '  id:', v.id,
-      '| bandwidth:', v.bandwidth,
-      '| audioCodec:', v.audioCodec,
-      '| videoCodec:', v.videoCodec || 'none'
-    ));
-
-    // Buscar pista con menor bandwidth (generalmente audio only)
-    const sorted = [...variants].sort((a, b) => a.bandwidth - b.bandwidth);
-    if (sorted.length > 0) {
-      shakaAudio.selectVariantTrack(sorted[0], true);
-      console.log('[shakaAudio] seleccionada pista:', sorted[0].id, '| bw:', sorted[0].bandwidth);
-    }
-
-    // Sincronizar currentTime con el vídeo
-    audioEl.currentTime = videoEl.currentTime;
-    audioEl.play();
-
-    // ── Sincronía continua A/V ──────────────────────
+    // ── Sincronía continua A/V (controlador de deriva, objetivo = cero saltos) ──
+    //  El audio se pega al vídeo SOLO variando playbackRate (proporcional al
+    //  desfase, con EMA y bandas de cap: cerca de 0 inaudible, mayor recupera sin
+    //  saltar). Seek solo como ÚLTIMO recurso (>1.5s, tras stall/seek real). El
+    //  vídeo manda la velocidad base (watchdog live-edge). Ajustable en consola:
+    //  avSync.capSmall = 0.02, etc.
+    const SYNC = window.avSync = {
+      dead: 0.02,      // banda muerta (s): por debajo no se corrige
+      kp: 0.8,         // ganancia proporcional
+      capSmall: 0.03,  // cap con desfase pequeño (≤ bigErr) → inaudible
+      capBig: 0.10,    // cap con desfase moderado (recupera sin saltar)
+      bigErr: 0.3,     // umbral (s) entre banda pequeña y grande
+      hardSeek: 1.5,   // (s) por encima → seek (último recurso)
+      ema: 0.3,        // suavizado del error (0..1)
+    };
+    let _avErr = 0;
     syncInterval = setInterval(() => {
       if (!audioEl || !videoEl) return;
-      const diff = Math.abs(audioEl.currentTime - videoEl.currentTime);
-      if (diff > 0.3) {
-        audioEl.currentTime = videoEl.currentTime;
-        console.log('[sync] corrigiendo audio drift:', diff.toFixed(3) + 's');
-      }
-      if (audioEl.playbackRate !== videoEl.playbackRate) {
-        audioEl.playbackRate = videoEl.playbackRate;
+      const base = videoEl.playbackRate;
+      const raw  = audioEl.currentTime - videoEl.currentTime;    // + = audio adelantado
+      if (Math.abs(raw) > SYNC.hardSeek) {
+        audioEl.currentTime = videoEl.currentTime;               // desfase enorme → seek
+        audioEl.playbackRate = base; _avErr = 0;
+        console.log('[sync] seek (desfase', raw.toFixed(2) + 's)');
+      } else {
+        _avErr = _avErr * (1 - SYNC.ema) + raw * SYNC.ema;
+        const err = _avErr, a = Math.abs(err);
+        if (a > SYNC.dead) {
+          const cap = a > SYNC.bigErr ? SYNC.capBig : SYNC.capSmall;
+          audioEl.playbackRate = base * (1 + Math.max(-cap, Math.min(cap, -err * SYNC.kp)));
+        } else if (audioEl.playbackRate !== base) {
+          audioEl.playbackRate = base;
+        }
       }
       if (videoEl.paused && !audioEl.paused) audioEl.pause();
       if (!videoEl.paused && audioEl.paused) audioEl.play().catch(()=>{});
-    }, 500);
+
+      // Close-up: misma timeline → mismo currentTime/playbackRate que el 360.
+      if (closeupReady && closeupStem >= 0) {
+        if (Math.abs(closeupEl.currentTime - videoEl.currentTime) > 0.5)
+          closeupEl.currentTime = videoEl.currentTime;
+        closeupEl.playbackRate = base;
+        if (videoEl.paused && !closeupEl.paused) closeupEl.pause();
+        if (!videoEl.paused && closeupEl.paused) closeupEl.play().catch(()=>{});
+      }
+    }, 250);
 
     // ── FOA decode via Web Audio ────────────────────
     await setupFOA();
+
+    // ── Close-ups (Caso B): pistas de vídeo extra del mismo manifest ─────────
+    await setupCloseups(src);
 
     // ── Watchdog live edge ──────────────────────────
     setInterval(() => {
@@ -695,8 +743,13 @@ async function loadDualShaka(src) {
 
   } catch(e) {
     showSpinner(false);
-    toast('Error: ' + e.message);
-    console.error(e);
+    // Los errores de Shaka no tienen .message → mostrábamos "undefined".
+    // shaka.util.Error trae code/category/data; lo exponemos para diagnosticar.
+    const msg = (e && e.code != null)
+      ? `Shaka ${e.category}/${e.code}` + (e.data && e.data.length ? ' · ' + JSON.stringify(e.data) : '')
+      : (e && e.message) ? e.message : String(e);
+    toast('Error: ' + msg);
+    console.error('[load] error completo:', e, e && e.data);
   }
 }
 
@@ -719,8 +772,59 @@ async function setupFOA() {
     // (delante/detrás/elevación). Si Omnitone no cargara, cae a cardioides.
     // Override desde la URL: ?renderer=hoast
     const _renderer = new URLSearchParams(location.search).get('renderer') || 'omnitone';
-    engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer });
+
+    // Stems por músico (spotlight posicional). El stream multicanal trae
+    // 4 FOA + N stems en los canales 4..N. La colocación 3D y los nombres los
+    // define el editor (editor.html) y se guardan en /scene.json.
+    // Prioridad:  ?stems= (override azimuts)  >  scene.json  >  DEFAULT_STEMS.
+    //   ?stems=-50,-30,-10,10,30,50      azimut por músico (grados)
+    //   ?stems=-50:5,-30,-10:-3,…        con elevación opcional «az:el»
+    const DEFAULT_STEMS = [
+      { azimuthDeg: -50, name: 'DR'    },   // batería
+      { azimuthDeg: -30, name: 'GT'    },   // guitarra
+      { azimuthDeg: -10, name: 'KEY'   },   // teclado
+      { azimuthDeg:  10, name: 'SAX'   },
+      { azimuthDeg:  30, name: 'TBONE' },   // trombón
+      { azimuthDeg:  50, name: 'TPT'   },   // trompeta
+    ];
+    let _stems = null, _spot = null;
+    try {
+      const _r = await fetch('/scene.json', { cache: 'no-store' });
+      if (_r.ok) {
+        const _sc = await _r.json();
+        if (Array.isArray(_sc.stems) && _sc.stems.length)
+          _stems = _sc.stems.map(s => ({
+            azimuthDeg: +s.azimuthDeg || 0, elevationDeg: +s.elevationDeg || 0,
+            name: s.name, closeup: s.closeup || null }));
+        if (_sc.spotlight) _spot = _sc.spotlight;
+      }
+    } catch (_) { /* sin escena → DEFAULT_STEMS */ }
+
+    const _stemsParam = new URLSearchParams(location.search).get('stems');
+    if (_stemsParam) {
+      _stems = _stemsParam.split(',').map((tok, i) => {
+        const [az, el] = tok.split(':');
+        return { azimuthDeg: parseFloat(az) || 0, elevationDeg: parseFloat(el) || 0, name: 'músico ' + (i + 1) };
+      });
+    }
+    if (!_stems) _stems = DEFAULT_STEMS;
+    stemDefs = _stems;   // el modo AR ancla un objeto 3D por stem con su az/el
+
+    engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer, stems: _stems });
+    // El audio sale del <video> vía Web Audio: hay que desmutearlo (si no, el tap
+    // recibe silencio). No hay doble salida: createMediaElementSource reencamina
+    // el audio del elemento al grafo (no suena por la salida normal del <video>).
+    audioEl.muted = false;
     await engine.attach(audioEl);
+    window.engine = engine;   // tuning en vivo desde consola (restGain, posiciones…)
+    if (_stems.length) {
+      // zoomMin = vista actual (sin zoom) → en reposo los stems quedan en
+      // silencio y crecen solo al acercar mirando al músico. Vale para PC y VR
+      // (en VR el zoom normalizado mapea t=0 → factor=zoomMin → boost 0).
+      engine.setSpotlightParams({ zoomMin: getZoomFactor() });
+      if (_spot) engine.setSpotlightParams(_spot);   // maxBoost/focusExp/restGain/zoomMax
+      toast(`${_stems.length} stems · spotlight en zoom`);
+    }
 
     // Alineación audio↔vídeo desde la URL (ajustable en el visor sin recompilar):
     //   ?ayaw=90    → offset de azimut en grados (prueba 90 / 180 / -90 / 45…)
@@ -750,6 +854,70 @@ async function setupFOA() {
     videoEl.volume = document.getElementById('vol-slider').value;
     toast('Audio nativo (FOA no disponible)');
   }
+}
+
+// ══════════════════════════════════════════════════════
+// CLOSE-UPS (Caso B) — vídeo "de cerca" por músico
+// ══════════════════════════════════════════════════════
+// El manifest trae pistas de vídeo extra (un AdaptationSet por close-up, misma
+// timeline que el 360 y el audio). Una 3ª instancia de Shaka sobre <video> las
+// reproduce sobre un plano flotante; al mirar a un músico con close-up + zoom,
+// se selecciona su pista. Mismo manifest → sincronía garantizada por currentTime.
+async function setupCloseups(src) {
+  if (!shakaVideo || !shakaCfg) return;
+  // RepresentationID 0 = 360; >0 = close-ups. Si solo hay 0, no hay nada que hacer.
+  const repIds = new Set(shakaVideo.getVariantTracks().map(v => v.originalVideoId));
+  if (repIds.size <= 1) return;
+
+  // Mapa stem→RepresentationID: los stems con closeup reciben 1,2,… EN ORDEN,
+  // igual que stream.sh los empaqueta (filter(closeup) en orden de escena).
+  closeupRepByStem = {};
+  let rep = 1;
+  stemDefs.forEach((s, i) => { if (s && s.closeup) closeupRepByStem[i] = String(rep++); });
+  if (!Object.keys(closeupRepByStem).length) return;
+
+  try {
+    shakaCloseup = new shaka.Player(closeupEl);
+    shakaCloseup.configure(shakaCfg);
+    await shakaCloseup.load(src);
+    closeupEl.muted = true;   // el audio sale del motor FOA, no de aquí
+
+    closeupTexture = new THREE.VideoTexture(closeupEl);
+    closeupTexture.minFilter = THREE.LinearFilter;
+    closeupTexture.magFilter = THREE.LinearFilter;
+    closeupMesh.material.map = closeupTexture;
+    closeupMesh.material.needsUpdate = true;
+
+    closeupReady = true;
+    toast('Close-ups disponibles · mira a un músico y haz zoom');
+  } catch (e) {
+    console.warn('[closeup] no disponible:', e.message);
+    closeupReady = false;
+  }
+}
+
+// Muestra el close-up del stem `idx` (o lo oculta con idx<0). Cambia la pista de
+// vídeo de shakaCloseup; al ser el mismo manifest, sigue sincronizado.
+function showCloseup(idx) {
+  if (idx === closeupStem) return;          // sin cambios
+  closeupStem = idx;
+  const hide = () => { closeupMesh.visible = false; closeupEl.pause(); };
+  if (idx < 0 || !closeupReady) return hide();
+  const repId = closeupRepByStem[idx];
+  if (repId == null) return hide();
+  const v = shakaCloseup.getVariantTracks().find(t => t.originalVideoId === repId);
+  if (!v) return hide();
+  shakaCloseup.selectVariantTrack(v, /*clearBuffer*/ true);
+  closeupEl.currentTime = videoEl.currentTime;
+  closeupEl.play().catch(() => {});
+  closeupMesh.visible = true;
+}
+
+// Selecciona el close-up del músico enfocado (mirada × zoom) o lo oculta. No
+// actúa en AR (allí ya te acercas al objeto 3D real). Barato: solo conmuta.
+function updateCloseupFocus() {
+  if (!closeupReady || arSession) return;
+  showCloseup(engine ? engine.getFocusedStem(0.3) : -1);
 }
 
 // ══════════════════════════════════════════════════════
@@ -1021,6 +1189,8 @@ async function checkWebXR() {
     document.getElementById('xr-btn').disabled = false;
     document.getElementById('xr-badge').style.display = 'inline';
   }
+  const arOk = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+  if (arOk) document.getElementById('ar-btn').disabled = false;
 }
 
 async function enterXR() {
@@ -1059,6 +1229,7 @@ async function enterXR() {
       if (videoEl && videoEl.readyState >= 2) {
         if (videoTexture) videoTexture.needsUpdate = true;
       }
+      if (closeupReady && closeupMesh.visible && closeupTexture) closeupTexture.needsUpdate = true;
 
       let hasPose = false;
       let yawDeg = 0;
@@ -1100,6 +1271,13 @@ async function enterXR() {
                   xrZoomDist = Math.max(0, Math.min(80, xrZoomDist - jy * 1.2));
               }
             }
+
+            // El zoom de VR (joystick) alimenta el spotlight de stems: en
+            // escritorio lo hace el FOV vía setZoomByFactor, pero en VR no hay
+            // FOV controlable, así que mapeamos xrZoomDist → zoom normalizado.
+            // Boost completo a media carrera (≈40) para que responda pronto.
+            engine?.setZoomNormalized(xrZoomDist / 40);
+            updateCloseupFocus();   // close-up del músico enfocado (joystick zoom)
 
             // Centrar la esfera en la cabeza y desplazarla EN CONTRA de la vista
             // para "acercar" lo que miras (xrZoomDist = 0 → solo centrada).
@@ -1152,6 +1330,140 @@ async function enterXR() {
   } catch(e) {
     toast('Error WebXR: ' + e.message);
     console.error(e);
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// WebXR AR — objetos 3D como fuentes de audio (passthrough)
+// ══════════════════════════════════════════════════════
+// Cada stem (músico) se ancla como un objeto 3D en la sala real (passthrough);
+// su canal de audio se espacializa en esa posición con el PannerNode HRTF del
+// motor (bindStemToObject + update). La cabeza se mueve por el espacio y el
+// sonido viene de cada objeto, con atenuación natural por distancia.
+const AR_RADIUS = 1.6;    // distancia de colocación inicial (m)
+const AR_HEIGHT = 1.3;    // altura base de los objetos (m)
+
+// Etiqueta de texto como sprite (nombre del músico, sobre el objeto).
+function makeLabelSprite(text) {
+  const font = 48, pad = 24;
+  const c = document.createElement('canvas');
+  let cx = c.getContext('2d');
+  cx.font = `bold ${font}px sans-serif`;
+  c.width = Math.ceil(cx.measureText(text || '').width) + pad * 2;
+  c.height = font + pad * 2;
+  cx = c.getContext('2d');                       // el resize limpia el contexto
+  cx.font = `bold ${font}px sans-serif`;
+  cx.fillStyle = 'rgba(0,0,0,0.55)';
+  cx.fillRect(0, 0, c.width, c.height);
+  cx.fillStyle = '#00d4ff';
+  cx.textBaseline = 'middle';
+  cx.fillText(text || '', pad, c.height / 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  sp.scale.set((c.width / c.height) * 0.16, 0.16, 1);   // ~16 cm de alto
+  sp.position.set(0, 0.2, 0);
+  return sp;
+}
+
+// Marcador de fuente: esfera de alambre emisiva + etiqueta con el nombre.
+function makeSourceMarker(name) {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(
+    new THREE.IcosahedronGeometry(0.08, 1),
+    new THREE.MeshBasicMaterial({ color: 0x00d4ff, wireframe: true })));
+  g.add(makeLabelSprite(name));
+  return g;
+}
+
+// Coloca un objeto por stem alrededor del usuario (usando su az/el) y lo vincula
+// al motor: a partir de aquí el panner de ese stem sigue la posición del objeto.
+function buildARSources() {
+  clearARSources();
+  if (!engine || !stemDefs.length) return;
+  const D2R = Math.PI / 180;
+  stemDefs.forEach((s, i) => {
+    const az = (s.azimuthDeg || 0) * D2R, el = (s.elevationDeg || 0) * D2R;
+    const ce = Math.cos(el), se = Math.sin(el);
+    // misma convención que el motor: frente = −Z, izquierda = −X, arriba = +Y.
+    const dir = [-ce * Math.sin(az), se, -ce * Math.cos(az)];
+    const m = makeSourceMarker(s.name);
+    m.position.set(dir[0] * AR_RADIUS, AR_HEIGHT + dir[1] * AR_RADIUS, dir[2] * AR_RADIUS);
+    scene.add(m);
+    m.updateMatrixWorld(true);          // matrixWorld válido antes de leerla en bind
+    engine.bindStemToObject(i, m);
+    arSources.push(m);
+  });
+}
+
+function clearARSources() {
+  for (const m of arSources) scene.remove(m);
+  arSources = [];
+  // soltar las vinculaciones del motor (conserva la última posición)
+  if (engine) for (let i = 0; i < engine.stemCount; i++) engine.unbindStem(i);
+}
+
+async function enterAR() {
+  if (!navigator.xr) return toast('WebXR AR no disponible');
+  try {
+    if (arSession) { await arSession.end(); return; }
+
+    arSession = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['hand-tracking'],
+    });
+    renderer.xr.setReferenceSpaceType('local-floor');
+    await renderer.xr.setSession(arSession);
+    renderer.setClearAlpha(0);                    // deja ver el passthrough
+    document.getElementById('ar-btn').textContent = 'EXIT AR';
+
+    if (sphere) sphere.visible = false;           // el mundo real sustituye al 360
+    if (closeupMesh) { closeupMesh.visible = false; closeupStem = -1; }   // sin close-ups en AR
+
+    // En AR cada fuente debe oírse desde su sitio (no solo al "mirar + zoom"):
+    // subimos restGain a tope y anulamos el boost por zoom; la espacialización y
+    // la distancia las modela el PannerNode HRTF.
+    if (engine) {
+      arPrevSpot = engine.getSpotlightParams();
+      engine.setZoomNormalized(0);
+      engine.setSpotlightParams({ restGain: 1 });
+    }
+    buildARSources();
+
+    arSession.addEventListener('end', () => {
+      clearARSources();
+      renderer.setClearAlpha(1);
+      if (sphere) sphere.visible = true;
+      if (engine && arPrevSpot) engine.setSpotlightParams(arPrevSpot);
+      arSession = null;
+      document.getElementById('ar-btn').textContent = 'AR';
+      renderer.setAnimationLoop(null);
+      requestAnimationFrame(renderLoop);
+    });
+
+    renderer.setAnimationLoop((time, frame) => {
+      if (videoEl && videoEl.readyState >= 2 && videoTexture) videoTexture.needsUpdate = true;
+      if (frame) {
+        const refSpace = renderer.xr.getReferenceSpace();
+        const pose = refSpace && frame.getViewerPose(refSpace);
+        if (pose) {
+          engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
+          engine?.update();                                       // panners siguen a los objetos anclados
+        }
+      }
+      updateAmbiViz();
+      renderer.render(scene, camera);
+    });
+
+    if (videoEl) videoEl.play();
+    if (audioEl) audioEl.play().catch(() => {});
+    if (audioCtx) audioCtx.resume();
+    toast(`AR · ${arSources.length} fuentes ancladas`);
+
+  } catch (e) {
+    toast('Error WebXR AR: ' + e.message);
+    console.error(e);
+    arSession = null;
   }
 }
 
@@ -1212,7 +1524,7 @@ document.addEventListener('click', () => {
 // ══════════════════════════════════════════════════════
 Object.assign(window, {
   loadFromURL, loadFile, seekTo, togglePlay, skipBack, skipFwd,
-  toggleMute, setVolume, resetView, toggleFS, enterXR,
+  toggleMute, setVolume, resetView, toggleFS, enterXR, enterAR,
 });
 
 // ══════════════════════════════════════════════════════
