@@ -210,8 +210,13 @@ src/audio/              Reusable immersive-audio engine (ESM)
   OmnitoneFOADecoder.js     Binaural FOA decode (HRTF) via Omnitone
   HOAST*.js / *.js          Cardioid fallback, matrices, axes
 media/                  360 video, FOA bed and stems (Git LFS)
+docs/architecture.md    Dev guide: how the pieces fit + how to extend
 docs/core-api.md        Engine API + AR mode + close-up multi-track reference
+docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 ```
+
+> **Contributing / building on top of this?** Start with
+> [`docs/architecture.md`](docs/architecture.md).
 
 ### Backend API (`/api/*`)
 
