@@ -10,6 +10,12 @@
     "restGain": 0,
     "zoomMax": 3.6
   },
+  "telemetry": {
+    "enabled": false,
+    "url": "wss://your-relay.example/ingest",
+    "rateHz": 20,
+    "flushMs": 100
+  },
   "encode": {
     "codec": "h264_nvenc",
     "scale": "2880x1440",

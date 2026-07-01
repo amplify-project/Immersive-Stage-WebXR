@@ -395,6 +395,7 @@
 
 <script type="module">
 import { ImmersiveAudioEngine } from './src/audio/ImmersiveAudioEngine.js';
+import { Telemetry } from './src/telemetry/Telemetry.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 //  El motor de audio inmersivo (clases HOAST*, matriz de zoom) vive ahora en
@@ -433,6 +434,8 @@ let deviceOrientation = {alpha:0, beta:90, gamma:0};
 let ambiAnalyser = null, ambiTimeDomain = null;
 let syncInterval = null;
 let xrZoomDist = 0;   // acercamiento en VR (joystick derecho), 0 = sin zoom
+let telemetry    = null;             // Telemetry: pose de cabeza → relay externo (opt-in)
+let telemetryCfg = null;             // bloque telemetry de scene.json
 // Diagnóstico: ?audiotest=spin → el campo sonoro gira solo (ignora la cabeza).
 const AUDIO_SPIN_TEST = new URLSearchParams(location.search).get('audiotest') === 'spin';
 
@@ -797,6 +800,7 @@ async function setupFOA() {
             azimuthDeg: +s.azimuthDeg || 0, elevationDeg: +s.elevationDeg || 0,
             name: s.name, closeup: s.closeup || null }));
         if (_sc.spotlight) _spot = _sc.spotlight;
+        if (_sc.telemetry) telemetryCfg = _sc.telemetry;
       }
     } catch (_) { /* sin escena → DEFAULT_STEMS */ }
 
@@ -817,6 +821,27 @@ async function setupFOA() {
     audioEl.muted = false;
     await engine.attach(audioEl);
     window.engine = engine;   // tuning en vivo desde consola (restGain, posiciones…)
+
+    // ── Telemetría de pose (opt-in) ───────────────────────────────────
+    // Alimenta un relay externo con giro/posición de cabeza (la mirada la deriva
+    // el relay a partir del cuaternión). Config en scene.json:
+    //   "telemetry": { "enabled": true, "url": "wss://host/ingest", "rateHz": 20 }
+    // Overrides por URL:  ?telemetry=wss://host/ingest   ?player=NOMBRE
+    {
+      const _tq = new URLSearchParams(location.search);
+      const _turl = _tq.get('telemetry') || (telemetryCfg && telemetryCfg.enabled && telemetryCfg.url) || null;
+      if (_turl) {
+        telemetry = new Telemetry({
+          url: _turl,
+          playerId: _tq.get('player') || (telemetryCfg && telemetryCfg.playerId) || undefined,
+          rateHz:  (telemetryCfg && telemetryCfg.rateHz)  || 20,
+          flushMs: (telemetryCfg && telemetryCfg.flushMs != null) ? telemetryCfg.flushMs : 100,
+          meta: { ua: navigator.userAgent },
+        });
+        window.telemetry = telemetry;   // inspección desde consola
+        toast('Telemetría lista → ' + _turl);
+      }
+    }
     if (_stems.length) {
       // zoomMin = vista actual (sin zoom) → en reposo los stems quedan en
       // silencio y crecen solo al acercar mirando al músico. Vale para PC y VR
@@ -1209,10 +1234,13 @@ async function enterXR() {
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(xrSession);
 
+    if (telemetry) { telemetry.meta.mode = 'vr'; telemetry.start(); }
+
     document.getElementById('xr-btn').textContent = 'EXIT VR';
 
     xrSession.addEventListener('end', () => {
       xrSession = null;
+      telemetry?.stop();
       if (debugMesh) debugMesh.visible = false;
       document.getElementById('xr-btn').textContent = 'VR';
       renderer.setAnimationLoop(null);
@@ -1278,6 +1306,10 @@ async function enterXR() {
             // Boost completo a media carrera (≈40) para que responda pronto.
             engine?.setZoomNormalized(xrZoomDist / 40);
             updateCloseupFocus();   // close-up del músico enfocado (joystick zoom)
+
+            // Telemetría: pose de cabeza + zoom/foco (decimado a rateHz en la clase).
+            // pos/q son referencias de la pose ya leída → sin coste por frame.
+            telemetry?.sample(pos, q, xrZoomDist, closeupStem, videoEl?.currentTime || 0);
 
             // Centrar la esfera en la cabeza y desplazarla EN CONTRA de la vista
             // para "acercar" lo que miras (xrZoomDist = 0 → solo centrada).
@@ -1414,6 +1446,7 @@ async function enterAR() {
     });
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(arSession);
+    if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.start(); }
     renderer.setClearAlpha(0);                    // deja ver el passthrough
     document.getElementById('ar-btn').textContent = 'EXIT AR';
 
@@ -1431,6 +1464,7 @@ async function enterAR() {
     buildARSources();
 
     arSession.addEventListener('end', () => {
+      telemetry?.stop();
       clearARSources();
       renderer.setClearAlpha(1);
       if (sphere) sphere.visible = true;
@@ -1449,6 +1483,10 @@ async function enterAR() {
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
           engine?.update();                                       // panners siguen a los objetos anclados
+
+          // Telemetría: pose de cabeza en AR passthrough (sin zoom/foco).
+          telemetry?.sample(pose.transform.position, pose.transform.orientation,
+                            0, -1, videoEl?.currentTime || 0);
         }
       }
       updateAmbiViz();
