@@ -1,0 +1,18 @@
+{
+  "name": "telemetry-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "In-memory WebSocket pose-telemetry relay for the Livestreamed Immersive Player",
+  "type": "commonjs",
+  "main": "relay.js",
+  "scripts": {
+    "start": "node relay.js",
+    "sim": "node simulator.js",
+    "demo:producer": "node producer-demo.js",
+    "demo:consumer": "node consumer-demo.js",
+    "test": "node smoke-test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
