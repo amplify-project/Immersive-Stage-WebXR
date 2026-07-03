@@ -53,6 +53,10 @@ function pushLog(line) {
 
 function startJob(mode, cmd, args, env) {
   if (job && job.proc) throw new Error('Ya hay un proceso en marcha (' + job.mode + ')');
+  // Libera la cámara/ALSA que puedan tener abiertos los monitores, el snapshot o
+  // la medición: v4l2loopback es de un solo lector, así que si algo sigue leyendo
+  // el device, stream.sh lo ve "ocupado". Los paramos antes de arrancar.
+  stopMeasure(); stopSnapshot();
   const proc = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env }, detached: true });
   job = { proc, mode, log: [], speed: '', frame: 0, startedAt: Date.now(), exit: null, cmd: [cmd, ...args].join(' ') };
   const onData = b => b.toString().split(/\r|\n/).forEach(pushLog);
@@ -118,88 +122,17 @@ function stopBridge() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  Monitor de sync A/V: ffmpeg ligero que muxa vídeo (v4l2) + audio (ALSA, estéreo)
-//  en fragmented-MP4 a stdout y se stream-ea al navegador vía MSE. Aplica el delay
-//  para poder ajustarlo a ojo/oído. Cliente único: una nueva conexión reemplaza la
-//  anterior. NOTA: el audio ALSA es exclusivo → no correr a la vez que el live.
+//  Medición de sync (measure_sync.sh) y snapshot de cámara: abren el device de
+//  vídeo/ALSA. Los trackeamos para poder liberarlos antes de un encode.
+//  NOTA: el audio ALSA es exclusivo → no correr a la vez que el live.
 // ════════════════════════════════════════════════════════════════════════════
-let monitor = null;   // { proc }
-const MONITOR_PID = path.join(ROOT, '.monitor.pid');
-
-// Mata el proceso (y su grupo) cuyo PID quedó en un fichero, aunque ya no lo
-// tengamos en memoria: huérfano tras refresco del navegador o reinicio del server.
-function killPidFile(file) {
-  let pid;
-  try { pid = parseInt(fs.readFileSync(file, 'utf8'), 10); } catch (_) { return; }
-  if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch (_) {} try { process.kill(pid, 'SIGKILL'); } catch (_) {} }
-  try { fs.unlinkSync(file); } catch (_) {}
+let measureProc = null;
+function stopMeasure() {
+  if (measureProc) { try { process.kill(-measureProc.pid, 'SIGKILL'); } catch (_) {} measureProc = null; }
 }
-
-function stopMonitor() {
-  if (monitor && monitor.proc) { try { process.kill(-monitor.proc.pid, 'SIGKILL'); } catch (_) {} }
-  killPidFile(MONITOR_PID);   // remata cualquier huérfano sin trackear
-  monitor = null;
-}
-
-// Monitor fiel con ffplay (monitor_sync.sh): ventana local en la máquina de
-// producción. Comparte vídeo+audio con el monitor MSE → no coexisten.
-let ffplayMon = null;   // { proc }
-function stopFfplayMon() {
-  if (ffplayMon && ffplayMon.proc) { try { process.kill(-ffplayMon.proc.pid, 'SIGKILL'); } catch (_) {} }
-  ffplayMon = null;
-}
-
-function buildMonitorArgs(scene, delayMs) {
-  const L = scene.live || {}, V = L.video || {}, A = L.audio || {};
-  const args = ['-hide_banner', '-loglevel', 'error', '-fflags', 'nobuffer', '-flags', 'low_delay'];
-
-  // Canales = lo configurado en el editor (campo "Total ch."). 1-2 canales =
-  // prueba → se monitoriza tal cual; muchos (X32) → se aísla el canal W del FOA.
-  const ch = Number(A.channels) || 2;
-  const testMode = ch <= 2;
-
-  // — Vídeo — (-use_wallclock_as_timestamps: timestamp por reloj de pared para que
-  //   el offset A/V sea estable/repetible entre arranques, no según orden de llegada)
-  if ((V.src || 'usb') === 'udp' && V.url) {
-    args.push('-use_wallclock_as_timestamps', '1', '-i', V.url);
-  } else {
-    args.push('-f', 'v4l2', '-framerate', String(V.fr || 24), '-use_wallclock_as_timestamps', '1', '-i', V.device || '/dev/video10');
-  }
-
-  // — Audio — El delay NO va con -itsoffset en el input: obliga a bufferizar un
-  //   stream entero para intercalar y, con captura en vivo + nobuffer, desborda
-  //   el ring de ALSA → xrun/broken pipe con delays grandes (800ms casca, 80 cuela).
-  //   Se aplica con el filtro adelay (silencio al principio): ambos streams en
-  //   PTS 0, sin skew en el muxer, ALSA se vacía normal.
-  const dms = Math.round(Number(delayMs) || 0);
-  if ((A.src || 'usb') === 'udp' && A.url) {
-    args.push('-use_wallclock_as_timestamps', '1', '-i', A.url);
-  } else {
-    args.push('-thread_queue_size', '1024', '-f', 'alsa', '-channels', String(ch), '-use_wallclock_as_timestamps', '1', '-i', A.device || 'default');
-  }
-
-  // Canal a monitorizar. En prueba (1-2 ch) reproducimos los canales reales del
-  // device tal cual. En multicanal aislamos el W del FOA (omni): -ac 2 no sabe
-  // bajar un device de N canales discretos (silencio) → pan a un canal concreto.
-  let wch = (A.foa && Array.isArray(A.foa.ch) && A.foa.ch.length ? A.foa.ch[0] : 0);
-  if (wch >= ch) wch = 0;            // el canal pedido no existe en este device
-  let af = testMode
-    ? (ch >= 2 ? 'pan=stereo|c0=c0|c1=c1' : 'pan=stereo|c0=c0|c1=c0')
-    : `pan=stereo|c0=c${wch}|c1=c${wch}`;
-  if (dms > 0) af += `,adelay=${dms}|${dms}`;
-
-  // — Encode ligero (x264 zerolatency, 960px) + AAC estéreo → fragmented MP4 a stdout —
-  args.push(
-    '-map', '0:v:0', '-map', '1:a:0',
-    '-vf', 'scale=960:-2,format=yuv420p',
-    '-af', af,
-    '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-    '-profile:v', 'high', '-level', '4.0', '-g', '30', '-b:v', '2500k',
-    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000',
-    '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
-    '-frag_duration', '200000', '-f', 'mp4', '-',
-  );
-  return args;
+let snapProc = null;
+function stopSnapshot() {
+  if (snapProc) { try { process.kill(-snapProc.pid, 'SIGKILL'); } catch (_) {} snapProc = null; }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -437,68 +370,79 @@ async function handleAPI(req, res, pathname) {
       } : { running: false, log: [] });
     }
 
-    // ── Monitor de sync A/V (stream fragmented-MP4 para MSE) ─────────────────
-    if (pathname === '/api/monitor' && req.method === 'GET') {
-      // El monitor usa los mismos dispositivos que el directo (vídeo v4l2 + audio
-      // ALSA exclusivo): no pueden coexistir. Rechazamos con mensaje claro.
-      if (job && job.proc) {
-        return sendJSON(res, 409, { error: 'Hay un encode en marcha (' + job.mode + '). Párelo antes de usar el monitor (el audio ALSA es exclusivo).' });
-      }
-      const delay = new URL(req.url, 'http://localhost').searchParams.get('delay');
-      let scene = {};
-      try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); } catch (_) {}
-      stopMonitor();   // cliente único: mata el monitor anterior (trackeado o huérfano)
-      const margs = buildMonitorArgs(scene, delay);
-      console.log('[monitor] ffmpeg ' + margs.join(' '));
-      const proc = spawn('ffmpeg', margs, { cwd: ROOT, detached: true });
-      monitor = { proc };
-      try { fs.writeFileSync(MONITOR_PID, String(proc.pid)); } catch (_) {}
-      let errBuf = '';
-      proc.stderr.on('data', d => { errBuf = (errBuf + d).slice(-500); });
-      res.writeHead(200, { 'Content-Type': 'video/mp4', 'Cache-Control': 'no-cache', 'Connection': 'close' });
-      proc.stdout.pipe(res);
-      const cleanup = () => {
-        try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) {}
-        try { if (parseInt(fs.readFileSync(MONITOR_PID, 'utf8'), 10) === proc.pid) fs.unlinkSync(MONITOR_PID); } catch (_) {}
-        if (monitor && monitor.proc === proc) monitor = null;
-      };
-      req.on('close', cleanup);     // refresco/cierre del navegador
-      res.on('close', cleanup);     // refuerzo
-      proc.on('error', e => { console.warn('monitor ffmpeg error:', e.message); cleanup(); try { res.end(); } catch (_) {} });
-      proc.on('exit', code => { if (code) console.warn('monitor ffmpeg exit', code, errBuf.trim()); cleanup(); try { res.end(); } catch (_) {} });
+    // ── Snapshot de la cámara (un frame JPEG) para elegir el ROI ────────────
+    //  Solo vídeo (no toca ALSA). v4l2loopback no admite dos lectores, así que
+    //  liberamos monitores antes; si hay un encode, el device está ocupado.
+    if (pathname === '/api/snapshot' && req.method === 'GET') {
+      if (job && job.proc) return sendJSON(res, 409, { error: 'Hay un encode en marcha (' + job.mode + '). Párelo antes (la cámara está en uso).' });
+      let scene = {}; try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); } catch (_) {}
+      const V = (scene.live && scene.live.video) || {};
+      const dev = V.device || '/dev/video10';
+      stopMeasure(); stopSnapshot();   // libera el device
+      // Descarta los primeros frames (auto-exposición) y quédate con uno.
+      // detached → grupo propio para poder matarlo; timeout de seguridad para que
+      // no se quede colgado con la cámara abierta si el device no entrega frames.
+      const proc = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error',
+        '-f', 'v4l2', '-i', dev, '-vf', "select=gte(n\\,4)", '-frames:v', '1', '-q:v', '3', '-f', 'mjpeg', '-'],
+        { cwd: ROOT, detached: true });
+      snapProc = proc;
+      const chunks = []; let errBuf = '', sent = false;
+      const done = () => { clearTimeout(killT); if (snapProc === proc) snapProc = null; };
+      const fail = msg => { if (sent) return; sent = true; sendJSON(res, 500, { error: msg }); };
+      const killT = setTimeout(() => { try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) {} }, 6000);
+      proc.stdout.on('data', d => chunks.push(d));
+      proc.stderr.on('data', d => { errBuf = (errBuf + d).slice(-300); });
+      proc.on('error', e => { done(); fail('ffmpeg: ' + e.message); });
+      proc.on('exit', code => {
+        done();
+        if (sent) return;
+        const buf = Buffer.concat(chunks);
+        if (code === 0 && buf.length) {
+          sent = true;
+          res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+          res.end(buf);
+        } else {
+          fail('No se pudo capturar de ' + dev + (errBuf.trim() ? ' · ' + errBuf.trim() : ''));
+        }
+      });
       return;
     }
-    if (pathname === '/api/monitor/stop' && req.method === 'POST') {
-      stopMonitor();
-      return sendJSON(res, 200, { ok: true });
-    }
 
-    // ── Monitor fiel con ffplay (ventana local en la máquina de producción) ──
-    if (pathname === '/api/monitor/ffplay' && req.method === 'POST') {
+    // ── Auto-medición del delay A/V (measure_sync.sh) ───────────────────────
+    //  Captura ~8s, detecta la palmada (audio) y su golpe visual (vídeo) y
+    //  devuelve el desfase en ms. No abre ventana → no necesita DISPLAY.
+    //  Respuesta diferida: el server contesta cuando el script termina (~DUR s).
+    //  body.roi opcional: "w:h:x:y" en fracciones 0..1 (recorte de detección).
+    if (pathname === '/api/monitor/measure' && req.method === 'POST') {
       if (job && job.proc) return sendJSON(res, 409, { error: 'Hay un encode en marcha (' + job.mode + '). Párelo antes (audio ALSA exclusivo).' });
-      if (!process.env.DISPLAY) return sendJSON(res, 409, { error: 'El servidor no tiene DISPLAY: arráncalo desde la sesión gráfica de la máquina de producción para abrir la ventana de ffplay.' });
       const body = await readBody(req);
       let scene = {}; try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); } catch (_) {}
       const A = (scene.live && scene.live.audio) || {}, V = (scene.live && scene.live.video) || {};
-      // Canales = lo configurado en el editor. WCH = canal a monitorizar (W del
-      // FOA en multicanal; 0 en prueba 1-2 ch), clamp si no cabe en el device.
       const fCh = Number(A.channels) || 32;
       let fWch = (A.foa && Array.isArray(A.foa.ch) && A.foa.ch.length ? A.foa.ch[0] : 0);
       if (fCh <= 2 || fWch >= fCh) fWch = 0;
-      const fArgs = [String(body.delay || 0), A.device || 'hw:1,0', V.device || '/dev/video10'];
-      console.log('[ffplay] CH=' + fCh + ' WCH=' + fWch + ' bash monitor_sync.sh ' + fArgs.join(' '));
-      stopMonitor(); stopFfplayMon();   // libera vídeo+audio (compartidos)
-      const proc = spawn('bash', [path.join(ROOT, 'monitor_sync.sh'), ...fArgs],
-        { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch) }, stdio: ['ignore', 'ignore', 'pipe'] });
-      ffplayMon = { proc };
-      let errBuf = '';
-      proc.stderr.on('data', d => { errBuf = (errBuf + d).slice(-500); });
-      proc.on('exit', code => { if (code) console.warn('ffplay monitor exit', code, errBuf.trim()); if (ffplayMon && ffplayMon.proc === proc) ffplayMon = null; });
-      return sendJSON(res, 200, { ok: true });
-    }
-    if (pathname === '/api/monitor/ffplay/stop' && req.method === 'POST') {
-      stopFfplayMon();
-      return sendJSON(res, 200, { ok: true });
+      const dur = 8;
+      // ROI de detección (fracciones). Validado: 4 números 0..1 separados por ':'.
+      const roiRel = (typeof body.roi === 'string' && /^(0(\.\d+)?|1(\.0+)?)(:(0(\.\d+)?|1(\.0+)?)){3}$/.test(body.roi)) ? body.roi : '';
+      const mArgs = [A.device || 'hw:1,0', V.device || '/dev/video10'];
+      console.log('[measure] CH=' + fCh + ' WCH=' + fWch + ' DUR=' + dur + (roiRel ? ' ROI_REL=' + roiRel : '') + ' bash measure_sync.sh ' + mArgs.join(' '));
+      stopSnapshot();   // libera vídeo+audio (compartidos)
+      const proc = spawn('bash', [path.join(ROOT, 'measure_sync.sh'), ...mArgs],
+        { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur), ...(roiRel ? { ROI_REL: roiRel } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+      measureProc = proc;
+      let out = '', err = '', sent = false;
+      const reply = (code, obj) => { if (sent) return; sent = true; sendJSON(res, code, obj); };
+      proc.stdout.on('data', d => { out += d; });
+      proc.stderr.on('data', d => { err = (err + d).slice(-500); });
+      proc.on('error', e => { if (measureProc === proc) measureProc = null; reply(500, { error: e.message }); });
+      proc.on('exit', () => {
+        if (measureProc === proc) measureProc = null;
+        const m = out.match(/A\/V delay\s*=\s*(-?\d+)\s*ms/i);
+        if (m) return reply(200, { ok: true, delay: parseInt(m[1], 10), out: out.trim().slice(-400) });
+        // Sin match: adjuntamos la cola del log (trae 'TA=… TV=…' de qué faltó).
+        reply(422, { error: 'No se pudo medir · ' + (out.trim().slice(-240) || err.trim() || 'sin salida') });
+      });
+      return;   // respuesta diferida al exit del proceso (~DUR s)
     }
 
     return sendJSON(res, 404, { error: 'API no encontrada: ' + pathname });
@@ -574,8 +518,6 @@ if (fs.existsSync(KEY) && fs.existsSync(CRT)) {
   server = http.createServer(handler);
   scheme = 'http';
 }
-
-killPidFile(MONITOR_PID);   // limpia un monitor huérfano de un arranque anterior
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on ${scheme}://0.0.0.0:${PORT}  (root: ${ROOT})`);

@@ -72,6 +72,7 @@ export class ImmersiveAudioEngine {
     this._zoomIndex = -1;
     this._lastVolume = 1;
     this._attached = false;
+    this._outDelaySec = 0;     // retardo de salida A/V (compensa audio adelantado)
     this._viewR3 = null;       // rotación de cabeza (3x3 ambisónico) para DoA
 
     // ── Stems / fuentes espaciales (spotlight posicional) ────────────────────
@@ -173,8 +174,14 @@ export class ImmersiveAudioEngine {
     // Reaplica una alineación fijada antes de attach (si la hubo).
     if (this._alignment) this.setAlignment(this._alignment);
 
-    this.gain.connect(this.ctx.destination);
-    this.gain.connect(this.analyser);   // rama de análisis (no llega a destino)
+    // DelayNode de salida: compensa el desfase A/V residual cuando el audio va
+    // ADELANTADO respecto al vídeo (típico si el stitching del 360 retrasa el
+    // vídeo y el adelay de captura se quedó corto). Solo puede RETRASAR audio.
+    this._outDelay = this.ctx.createDelay(2.0);            // hasta 2 s
+    this._outDelay.delayTime.value = this._outDelaySec;
+    this.gain.connect(this._outDelay);
+    this._outDelay.connect(this.ctx.destination);
+    this.gain.connect(this.analyser);   // análisis PRE-delay (no llega a destino)
 
     this._setupDoA();   // estimador de dirección de llegada (tap del source)
 
@@ -544,6 +551,15 @@ export class ImmersiveAudioEngine {
     this.gain.gain.value = muted ? this._lastVolume : 0;
     return !muted;
   }
+
+  // Retardo de salida en ms (compensación A/V). Solo retrasa audio; 0..2000.
+  //   window.engine.setOutputDelay(900)   // ajústalo en vivo desde consola
+  setOutputDelay(ms) {
+    this._outDelaySec = Math.max(0, Math.min(2, (+ms || 0) / 1000));
+    if (this._outDelay) this._outDelay.delayTime.value = this._outDelaySec;
+    return this._outDelaySec * 1000;
+  }
+  get outputDelayMs() { return (this._outDelaySec || 0) * 1000; }
 
   // ── Acceso para visualización ────────────────────────────────────────────
 

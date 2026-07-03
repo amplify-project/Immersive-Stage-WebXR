@@ -104,11 +104,11 @@
     </div>
 
     <div class="row" id="bridgeBox" style="align-items:center;gap:10px;margin-top:8px">
-      <button class="go"     id="btnBridgeStart" style="flex:0 0 auto" onclick="startBridge()">Inicializar cámara Insta360</button>
-      <button class="danger" id="btnBridgeStop"  style="flex:0 0 auto" onclick="stopBridge()" disabled>Parar</button>
-      <span class="small" id="bridgeStatus" style="opacity:.8">puente detenido</span>
+      <button class="go"     id="btnBridgeStart" style="flex:0 0 auto" onclick="startBridge()">Initialize Insta360 camera</button>
+      <button class="danger" id="btnBridgeStop"  style="flex:0 0 auto" onclick="stopBridge()" disabled>Stop</button>
+      <span class="small" id="bridgeStatus" style="opacity:.8">bridge stopped</span>
     </div>
-    <p class="hint">Crea la cámara virtual <code>/dev/video10</code> (Insta360 Virtual) y la alimenta vía SDK. Tras inicializar, selecciónala arriba como fuente USB.</p>
+    <p class="hint">Creates the virtual camera <code>/dev/video10</code> (Insta360 Virtual) and feeds it via the SDK. After initializing, select it above as the USB source.</p>
 
     <label style="margin-top:14px">Multichannel audio (X32 / mixer)</label>
     <div class="row">
@@ -120,16 +120,19 @@
       <div style="flex:0 0 110px"><label style="margin:0 0 4px">Total ch.</label><input type="number" id="laChannels" value="32" min="4" max="64"></div>
       <div style="flex:0 0 130px"><label style="margin:0 0 4px">A/V delay (ms)</label><input type="number" id="laDelay" value="0" min="-2000" max="2000" step="10"></div>
     </div>
-    <p class="hint">Si el stitching de la Insta360 retrasa el vídeo, el audio entra adelantado. Sube el delay (ms) hasta que casen; valor negativo adelanta el audio.</p>
+    <p class="hint">If the Insta360 stitching delays the video, the audio arrives early. Raise the delay (ms) until they line up; a negative value advances the audio.</p>
 
     <div class="row" id="monBox" style="align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap">
-      <button class="go"    id="btnFfplay"   style="flex:0 0 auto" onclick="openFfplay()">🎯 Medir sync (ffplay)</button>
-      <button class="alt"   id="btnMonStart" style="flex:0 0 auto" onclick="startMonitor()">▶ Vista navegador</button>
-      <button class="danger" id="btnMonStop" style="flex:0 0 auto" onclick="stopAllMonitors()" disabled>Parar</button>
-      <span class="small" id="monStatus" style="opacity:.8">monitor parado</span>
+      <button class="go"    id="btnMeasure"  style="flex:0 0 auto" onclick="autoMeasure()">📐 Auto-measure delay</button>
+      <button class="ghost" id="btnRoi"      style="flex:0 0 auto" onclick="pickRoi()">📷 ROI</button>
+      <span class="small" id="monStatus" style="opacity:.8">monitor stopped</span>
     </div>
-    <p class="hint"><b>🎯 Medir sync (ffplay):</b> abre una ventana fiel (&lt;300 ms) en la máquina de producción con el delay actual aplicado — mira un transitorio (palmada/golpe), ajusta el delay y vuelve a medir. Requiere el server con <code>DISPLAY</code> (sesión gráfica). <b>▶ Vista navegador</b> es solo aproximada (MSE añade latencia y sesga el vídeo). ⚠ usan el audio ALSA en exclusiva → párelos antes del directo. Equivale a <code>./monitor_sync.sh &lt;ms&gt;</code>.</p>
-    <video id="monPreview" playsinline controls style="display:none;width:100%;max-width:640px;border-radius:8px;margin-top:6px;background:#000"></video>
+    <p class="hint"><b>📐 Auto-measure delay:</b> measures the offset automatically — it captures ~8 s while you give a <b>sharp clap</b> in front of the camera (a single action: the hit is heard and seen at once; a clapperboard works too), and fills the field with the ms (as an absolute value: the video always arrives late). No <code>DISPLAY</code> needed. Equivalent to <code>./measure_sync.sh</code>. <b>📷 ROI:</b> narrows the region of the frame where you'll clap to sharpen detection. ⚠ it uses the ALSA audio exclusively → stop it before going live.</p>
+    <div id="roiWrap" style="display:none;position:relative;width:100%;max-width:640px;margin-top:8px;line-height:0">
+      <img id="roiImg" style="display:block;width:100%;border-radius:8px;background:#000">
+      <canvas id="roiCanvas" style="position:absolute;inset:0;cursor:crosshair"></canvas>
+    </div>
+    <p class="hint" id="roiStatus" style="display:none">no ROI · detected across the whole frame</p>
 
     <label style="margin-top:14px">Ambisonic FOA (NT-SF1) · channels W,X,Y,Z</label>
     <div class="row">
@@ -255,7 +258,7 @@ let mode = 'vod';
 const $ = id => document.getElementById(id);
 function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2600); }
 
-// ── Carga inicial ───────────────────────────────────────────────────────────
+// ── Initial load ─────────────────────────────────────────────────────────────
 async function init() {
   let apiOk = true;
   const [mRes, sRes, dRes] = await Promise.all([
@@ -291,7 +294,7 @@ async function init() {
   setInterval(()=>{ if($('liveSources').style.display!=='none') pollBridge(); }, 3000);
 }
 
-// ── Modo VOD / LIVE ───────────────────────────────────────────────────────────
+// ── VOD / LIVE mode ───────────────────────────────────────────────────────────
 function setMode(m) {
   mode = m; scene.mode = m;
   $('vodSources').style.display  = m==='vod'  ? '' : 'none';
@@ -318,20 +321,20 @@ function buildSelectors() {
   $('addStem').innerHTML = '<option value="">+ add stem…</option>' + auds.map(m=>opt(m)).join('');
   $('proxySrc').innerHTML = vids.map(m=>opt(m)).join('');
   if (scene.video) $('video').value = scene.video; else scene.video = $('video').value;
-  // bed por defecto: el primer audio de 4 canales
+  // default bed: the first 4-channel audio
   if (scene.bed) $('bed').value = scene.bed;
   else { const foa = auds.find(m=>m.channels===4); scene.bed = foa ? foa.file : ($('bed').value||''); $('bed').value = scene.bed; }
   $('bedFormat').value = scene.bedFormat || 'fuma';
   $('proxySrc').value = scene.video || ($('proxySrc').value||'');
 }
 
-// ── Selectores de dispositivos en directo ─────────────────────────────────────
+// ── Live device selectors ─────────────────────────────────────────────────────
 function buildLiveSelectors() {
   const L = scene.live, V = L.video, A = L.audio;
   const optDev = d => `<option value="${d.device}">${d.label} · ${d.device}</option>`;
   $('lvDevice').innerHTML = devices.video.map(optDev).join('') || '<option value="">— no v4l2 cameras —</option>';
   $('laDevice').innerHTML = devices.audio.map(optDev).join('') || '<option value="">— no ALSA devices —</option>';
-  // vídeo
+  // video
   $('lvSrc').value = V.src || 'usb';
   if (V.device) $('lvDevice').value = V.device; else V.device = $('lvDevice').value;
   $('lvUrl').value = V.url || ''; $('lvSize').value = V.size || '';
@@ -369,8 +372,7 @@ function bindLiveControls() {
   $('laDevice').onchange = e => A.device = e.target.value;
   $('laUrl').oninput = e => A.url = e.target.value.trim();
   $('laChannels').oninput = e => A.channels = +e.target.value || 32;
-  $('laDelay').oninput = e => { A.delay = +e.target.value || 0;
-    if (_mon) { clearTimeout(window._monT); window._monT = setTimeout(startMonitor, 500); } };  // reinicia el monitor con el nuevo delay
+  $('laDelay').oninput = e => { A.delay = +e.target.value || 0; };
   for (let i=0;i<4;i++) $('foa'+i).oninput = e => A.foa.ch[i] = +e.target.value || 0;
   $('foaFormat').onchange = e => A.foa.format = e.target.value;
   $('foaAformat').onchange = e => A.foa.aformat = e.target.checked;
@@ -390,9 +392,9 @@ function bindControls() {
   $('codec').value = scene.encode.codec; $('seg').value = scene.encode.seg;
   $('scale').value = scene.encode.scale||''; $('vbitrate').value = scene.encode.vbitrate||'';
   $('s3Bucket').value = scene.encode.s3Bucket||''; $('s3Region').value = scene.encode.s3Region||'';
-  // Vídeo y audio van en adaptation sets separados con contenedores mezclados
-  // (H.264→mp4 + Opus→webm), así que H.264 es compatible con la Quest. El audio
-  // multicanal siempre sale en WebM. Solo avisamos del coste de VP9 software.
+  // Video and audio go in separate adaptation sets with mixed containers
+  // (H.264→mp4 + Opus→webm), so H.264 is compatible with the Quest. Multichannel
+  // audio always comes out in WebM. We only warn about the cost of software VP9.
   const codecWarn = () => $('codecWarn').innerHTML = scene.encode.codec==='vp9'
     ? '<span class="badge b-warn">warning</span> VP9 is software (CPU) and won\'t reach 4K in real time. For live use H.264 NVENC (GPU).'
     : scene.encode.codec==='h264_nvenc'
@@ -416,7 +418,7 @@ function addSelectedStem() {
   const file = $('addStem').value; if (!file) return;
   const m = media.find(x=>x.file===file);
   const name = (m?m.name:'stem').replace(/\.[^.]+$/,'').split(/[\s_-]/)[0].toUpperCase();
-  // azimut por defecto: reparte por el frente
+  // default azimuth: spread across the front
   const n = scene.stems.length;
   const az = Math.round(-50 + (n*20));
   scene.stems.push({ file, name, azimuthDeg: Math.max(-160,Math.min(160,az)), elevationDeg: 0 });
@@ -427,7 +429,7 @@ function addSelectedStem() {
 function removeStem(i){ scene.stems.splice(i,1); if(selected>=scene.stems.length) selected=-1; renderStems(); drawRadar(); syncSelPanel(); }
 function selectStem(i){ selected=i; renderStems(); drawRadar(); syncSelPanel(); }
 
-// LIVE: añade un músico mapeado al siguiente canal libre tras el FOA.
+// LIVE: adds a musician mapped to the next free channel after the FOA.
 function addLiveStem() {
   const foaMax = Math.max(...(scene.live.audio.foa.ch||[0,1,2,3]));
   const used = scene.stems.map(s=>s.channel).filter(c=>c!=null);
@@ -439,7 +441,7 @@ function addLiveStem() {
   renderStems(); drawRadar(); syncSelPanel();
 }
 
-// Opciones <option> de vídeos de media/ para el selector de close-up.
+// <option> list of media/ videos for the close-up selector.
 function videoOptionsHTML(sel) {
   const vids = media.filter(m=>m.kind==='video');
   return '<option value="">— no close-up —</option>' +
@@ -456,7 +458,7 @@ function renderStems() {
       ${live ? `<span class="small" style="flex:none">ch</span>
       <input type="number" class="az" style="width:54px" min="0" value="${s.channel!=null?s.channel:''}"
              onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=+this.value">` : ''}
-      ${!live ? `<select title="Close-up video (Caso B)" style="flex:0 0 130px"
+      ${!live ? `<select title="Close-up video (Case B)" style="flex:0 0 130px"
              onclick="event.stopPropagation()"
              onchange="scene.stems[${i}].closeup=this.value||undefined">${videoOptionsHTML(s.closeup)}</select>` : ''}
       <span class="az">${Math.round(s.azimuthDeg)}°/${Math.round(s.elevationDeg||0)}°</span>
@@ -471,7 +473,7 @@ function syncSelPanel() {
   $('selName').value = s.name||''; $('selAz').value = Math.round(s.azimuthDeg); $('selEl').value = Math.round(s.elevationDeg||0);
 }
 
-// ── Radar (azimut por arrastre) ───────────────────────────────────────────────
+// ── Radar (azimuth by drag) ───────────────────────────────────────────────────
 const radar = $('radar'); const rctx = radar.getContext('2d');
 function azToXY(az){ const r=radar.width*0.40, cx=radar.width/2, cy=radar.height/2, a=az*Math.PI/180;
   return { x: cx - r*Math.sin(a), y: cy - r*Math.cos(a) }; }
@@ -480,17 +482,17 @@ function xyToAz(x,y){ const cx=radar.width/2, cy=radar.height/2; return Math.ata
 function drawRadar() {
   const w=radar.width, h=radar.height, cx=w/2, cy=h/2, R=w*0.40;
   rctx.clearRect(0,0,w,h);
-  // anillos
+  // rings
   rctx.strokeStyle='#ffffff14'; rctx.lineWidth=2;
   rctx.beginPath(); rctx.arc(cx,cy,R,0,7); rctx.stroke();
   rctx.beginPath(); rctx.arc(cx,cy,R*0.5,0,7); rctx.stroke();
-  // ejes + etiquetas
+  // axes + labels
   rctx.strokeStyle='#ffffff0c'; rctx.beginPath();
   rctx.moveTo(cx,cy-R); rctx.lineTo(cx,cy+R); rctx.moveTo(cx-R,cy); rctx.lineTo(cx+R,cy); rctx.stroke();
   rctx.fillStyle='#8b949e'; rctx.font='13px monospace'; rctx.textAlign='center';
   rctx.fillText('FRONT 0°',cx,cy-R-10); rctx.fillText('behind ±180°',cx,cy+R+18);
   rctx.fillText('+90°',cx-R-22,cy+4); rctx.fillText('−90°',cx+R+22,cy+4);
-  // oyente
+  // listener
   rctx.fillStyle='#ffffff55'; rctx.beginPath(); rctx.arc(cx,cy,5,0,7); rctx.fill();
   // stems
   scene.stems.forEach((s,i)=>{
@@ -515,7 +517,7 @@ function radarUp(){ dragging=-1; }
 radar.addEventListener('mousedown',radarDown); window.addEventListener('mousemove',radarMove); window.addEventListener('mouseup',radarUp);
 radar.addEventListener('touchstart',radarDown,{passive:false}); radar.addEventListener('touchmove',radarMove,{passive:false}); radar.addEventListener('touchend',radarUp);
 
-// ── Guardar / encode / proxy / estado ─────────────────────────────────────────
+// ── Save / encode / proxy / status ────────────────────────────────────────────
 async function saveScene(notify) {
   scene.video = $('video').value; scene.bed = $('bed').value;
   const r = await fetch('/api/scene', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(scene) });
@@ -531,108 +533,83 @@ async function encode(mode) {
 }
 async function stopEncode(){ const r=await fetch('/api/encode/stop',{method:'POST'}); toast(r.ok?'Stopped':'Nothing to stop'); }
 
-// ── Monitor de sync A/V (MSE, fragmented-MP4 desde /api/monitor) ───────────────
-let _mon = null;   // { ms, sb, reader, queue, appending }
-async function startMonitor(){
-  stopMonitorClient();
-  await saveScene(false);   // el server lee scene.json para device/canales de audio
-  const v = $('monPreview');
-  v.style.display = '';
-  const ms = new MediaSource();
-  const st = { ms, sb:null, reader:null, queue:[], appending:false };
-  _mon = st;
-  v.src = URL.createObjectURL(ms);
-  $('btnMonStart').disabled = true; $('btnMonStop').disabled = false;
-  $('monStatus').textContent = 'conectando…'; $('monStatus').style.color = '';
-  ms.addEventListener('sourceopen', async () => {
-    if (_mon !== st) return;
-    try {
-      st.sb = ms.addSourceBuffer('video/mp4; codecs="avc1.640028,mp4a.40.2"');
-      st.sb.mode = 'sequence';
-      st.sb.addEventListener('updateend', () => pumpMon(st));
-    } catch(e){ toast('MSE no soporta el codec'); return stopMonitorClient(); }
-    const delay = scene.live.audio.delay || 0;
-    let resp;
-    try { resp = await fetch('/api/monitor?delay='+encodeURIComponent(delay)); }
-    catch(_){ $('monStatus').textContent='error de conexión'; return; }
-    if (!resp.ok || !(resp.headers.get('content-type')||'').includes('mp4')) {
-      const j = await resp.json().catch(()=>({}));
-      toast(j.error || 'No se pudo abrir el monitor');
-      $('monStatus').textContent = j.error || 'error'; $('monStatus').style.color = 'var(--bad)';
-      return stopMonitorClient();
-    }
-    st.reader = resp.body.getReader();
-    $('monStatus').textContent = 'en directo · delay '+delay+' ms'; $('monStatus').style.color='var(--ok)';
-    v.play().catch(()=>{});
-    readMon(st);
-  }, { once:true });
-}
-async function readMon(st){
-  try {
-    while (_mon === st) {
-      const { done, value } = await st.reader.read();
-      if (done) break;
-      st.queue.push(value); pumpMon(st);
-    }
-  } catch(_){}
-}
-function pumpMon(st){
-  if (_mon !== st || !st.sb || st.sb.updating || !st.queue.length) return;
-  try { st.sb.appendBuffer(st.queue.shift()); } catch(e){
-    if (e.name === 'QuotaExceededError') {   // recorta lo viejo y reintenta
-      const v=$('monPreview');
-      try { if (v.buffered.length) st.sb.remove(0, Math.max(0, v.currentTime-1)); } catch(_){}
-    }
-    return;
-  }
-  // mantén la latencia baja: salta al borde en vivo si nos quedamos atrás
-  const v=$('monPreview');
-  if (v.buffered.length){ const end=v.buffered.end(v.buffered.length-1); if (end - v.currentTime > 1.2) v.currentTime = end - 0.2; }
-}
-function stopMonitorClient(){
-  const st=_mon; _mon=null;
-  if (st){ try{ st.reader && st.reader.cancel(); }catch(_){}
-           try{ if (st.ms && st.ms.readyState==='open') st.ms.endOfStream(); }catch(_){} }
-  const v=$('monPreview'); if (v){ v.pause(); v.removeAttribute('src'); v.load(); v.style.display='none'; }
-  $('btnMonStart').disabled=false; $('btnMonStop').disabled=true;
-  $('monStatus').textContent='monitor parado'; $('monStatus').style.color='';
-  fetch('/api/monitor/stop',{method:'POST'}).catch(()=>{});
-}
-
-// Monitor fiel: abre ffplay en la máquina de producción (lo lanza el server).
-async function openFfplay(){
-  stopMonitorClient();   // libera el dispositivo si estaba la vista navegador
-  await saveScene(false);
-  const delay = scene.live.audio.delay || 0;
+// A/V delay auto-measurement: the server runs measure_sync.sh (captures ~8s,
+// detects clap+flash) and returns the ms; we fill the field with the value.
+async function autoMeasure(){
+  await saveScene(false);         // the server reads CH/WCH/devices from scene.json
+  const b = $('btnMeasure'); b.disabled = true;
+  $('monStatus').textContent = 'capturing 8 s… give a sharp CLAP in front of the camera';
+  $('monStatus').style.color = 'var(--warn)';
   let r, j;
-  try { r = await fetch('/api/monitor/ffplay', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ delay }) }); j = await r.json(); }
-  catch(_){ toast('error de conexión'); return; }
-  if (r.ok){
-    toast('ffplay abierto en la máquina de producción');
-    $('btnMonStop').disabled=false;
-    $('monStatus').textContent='ffplay activo (ventana local) · delay '+delay+' ms'; $('monStatus').style.color='var(--ok)';
+  try { r = await fetch('/api/monitor/measure', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ roi: _roiRel }) }); j = await r.json(); }
+  catch(_){ toast('connection error'); $('monStatus').textContent='monitor stopped'; $('monStatus').style.color=''; b.disabled=false; return; }
+  b.disabled = false;
+  if (r.ok && j.ok){
+    const d = Math.abs(j.delay);   // the sign isn't reliable; the video always arrives late → delay ≥ 0
+    scene.live.audio.delay = d;
+    $('laDelay').value = d;
+    $('monStatus').textContent = 'measured · delay '+d+' ms (applied to the field)'; $('monStatus').style.color='var(--ok)';
+    toast('A/V delay measured: '+d+' ms');
   } else {
-    toast(j.error||'No se pudo abrir ffplay');
-    $('monStatus').textContent=j.error||'error'; $('monStatus').style.color='var(--bad)';
+    $('monStatus').textContent = j.error || 'measurement failed'; $('monStatus').style.color='var(--bad)';
+    toast(j.error || 'No clap detected');
   }
 }
-function stopAllMonitors(){
-  stopMonitorClient();
-  fetch('/api/monitor/ffplay/stop',{method:'POST'}).catch(()=>{});
-  $('btnMonStop').disabled=true;
-  $('monStatus').textContent='monitor parado'; $('monStatus').style.color='';
+
+// ── Detection ROI: camera snapshot + drawn rectangle ──────────────────────────
+//  _roiRel = "w:h:x:y" as fractions 0..1 (empty = full frame). Sent to
+//  /api/monitor/measure and converted to a crop with iw/ih (resolution-independent).
+let _roiRel = '';
+async function pickRoi(){
+  const st = $('roiStatus'); st.style.display=''; st.textContent='capturing frame…'; st.style.color='var(--warn)';
+  let blob;
+  try {
+    const r = await fetch('/api/snapshot');
+    if(!r.ok){ const j=await r.json().catch(()=>({})); throw new Error(j.error||('HTTP '+r.status)); }
+    blob = await r.blob();
+  } catch(e){ st.textContent='snapshot failed: '+e.message; st.style.color='var(--bad)'; return; }
+  const img = $('roiImg');
+  img.onload = () => setupRoiCanvas();
+  img.src = URL.createObjectURL(blob);
+  $('roiWrap').style.display='block';
+  st.textContent='drag to draw where you\'ll clap · right-click = whole frame'; st.style.color='';
+}
+function setupRoiCanvas(){
+  const img=$('roiImg'), cv=$('roiCanvas'), ctx=cv.getContext('2d');
+  cv.width=img.clientWidth; cv.height=img.clientHeight;
+  const pos = e => { const r=cv.getBoundingClientRect();
+    return { x:Math.max(0,Math.min(cv.width,e.clientX-r.left)), y:Math.max(0,Math.min(cv.height,e.clientY-r.top)) }; };
+  const box = (x,y,w,h) => { ctx.clearRect(0,0,cv.width,cv.height);
+    ctx.fillStyle='rgba(0,212,255,0.12)'; ctx.fillRect(x,y,w,h);
+    ctx.strokeStyle='#00d4ff'; ctx.lineWidth=2; ctx.setLineDash([6,4]); ctx.strokeRect(x,y,w,h); };
+  let drag=null;
+  cv.onmousedown = e => { drag=pos(e); };
+  cv.onmousemove = e => { if(!drag)return; const p=pos(e);
+    box(Math.min(drag.x,p.x),Math.min(drag.y,p.y),Math.abs(p.x-drag.x),Math.abs(p.y-drag.y)); };
+  cv.onmouseup = e => { if(!drag)return; const p=pos(e);
+    const x=Math.min(drag.x,p.x), y=Math.min(drag.y,p.y), w=Math.abs(p.x-drag.x), h=Math.abs(p.y-drag.y); drag=null;
+    if(w<8||h<8){ clearRoi(); return; }
+    _roiRel=[w/cv.width,h/cv.height,x/cv.width,y/cv.height].map(v=>v.toFixed(4)).join(':');
+    box(x,y,w,h);
+    const st=$('roiStatus'); st.textContent='ROI = '+_roiRel+' (w:h:x:y) · used when auto-measuring'; st.style.color='var(--ok)'; };
+  cv.oncontextmenu = e => { e.preventDefault(); clearRoi(); };
+}
+function clearRoi(){
+  _roiRel='';
+  const cv=$('roiCanvas'); if(cv){ const ctx=cv.getContext('2d'); ctx.clearRect(0,0,cv.width,cv.height); }
+  const st=$('roiStatus'); st.style.display=''; st.textContent='no ROI · detected across the whole frame'; st.style.color='';
 }
 
-// ── Puente Insta360 → cámara virtual v4l2 ─────────────────────────────────────
+// ── Insta360 bridge → v4l2 virtual camera ─────────────────────────────────────
 async function startBridge(){
   const r=await fetch('/api/bridge/start',{method:'POST'});
   const j=await r.json().catch(()=>({}));
-  toast(r.ok?'Puente iniciado':('Error: '+(j.error||r.status)));
+  toast(r.ok?'Bridge started':('Error: '+(j.error||r.status)));
   pollBridge();
 }
 async function stopBridge(){
   const r=await fetch('/api/bridge/stop',{method:'POST'});
-  toast(r.ok?'Puente detenido':'Nada que parar');
+  toast(r.ok?'Bridge stopped':'Nothing to stop');
   pollBridge();
 }
 async function pollBridge(){
@@ -642,7 +619,7 @@ async function pollBridge(){
   $('btnBridgeStop').disabled=!on;
   const last=(s.log&&s.log.length)?s.log[s.log.length-1]:'';
   const el=$('bridgeStatus');
-  el.textContent = on ? ('activo · /dev/video10'+(last?(' · '+last):'')) : (s.exit!=null?('detenido (code '+s.exit+')'):'puente detenido');
+  el.textContent = on ? ('active · /dev/video10'+(last?(' · '+last):'')) : (s.exit!=null?('stopped (code '+s.exit+')'):'bridge stopped');
   el.style.color = on ? 'var(--ok)' : '';
 }
 async function makeProxy(){

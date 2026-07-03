@@ -10,24 +10,18 @@
     "restGain": 0,
     "zoomMax": 3.6
   },
-  "telemetry": {
-    "enabled": false,
-    "url": "wss://your-relay.example/ingest",
-    "rateHz": 20,
-    "flushMs": 100
-  },
   "encode": {
     "codec": "h264_nvenc",
     "scale": "2880x1440",
     "vbitrate": "6000k",
     "seg": 6,
-    "s3Bucket": "",
-    "s3Region": ""
+    "s3Bucket": "s3://mi-360-streaming",
+    "s3Region": "eu-west-2"
   },
   "live": {
     "video": {
       "src": "usb",
-      "device": "/dev/video10",
+      "device": "/dev/video0",
       "url": "",
       "size": "2880x1440",
       "fr": 24,
@@ -38,7 +32,7 @@
       "device": "hw:1,0",
       "url": "",
       "channels": 1,
-      "delay": 700,
+      "delay": 403,
       "foa": {
         "ch": [
           0,
@@ -50,5 +44,11 @@
         "aformat": false
       }
     }
+  },
+  "telemetry": {
+    "enabled": false,
+    "url": "wss://your-relay.example/ingest",
+    "rateHz": 20,
+    "flushMs": 100
   }
 }
