@@ -54,11 +54,26 @@ upload_once() {
   sync_type "*.mp4"  "video/mp4"
   sync_type "*.webm" "video/webm"
   # Manifest al final, sin cache para que el player relea el timeline en vivo.
-  if [[ -f "$OUT/manifest.mpd" ]]; then
-    aws s3 cp "$OUT/manifest.mpd" "$DEST/manifest.mpd" \
-      --content-type "application/dash+xml" \
-      --cache-control "no-cache,no-store,must-revalidate" \
-      "${REGION_ARG[@]}" --only-show-errors
+  #
+  # ffmpeg reescribe manifest.mpd en vivo cada segmento; si `aws s3 cp` lo lee a
+  # medio escribir, sube un manifest TRUNCADO (torn read) y el player ve un
+  # timeline incompleto. Guard: snapshot local (ventana muy corta) y subir SOLO
+  # el snapshot y SOLO si está completo — un MPD válido termina en </MPD>. Si
+  # sale a medias, se omite esta pasada: la siguiente (~INTERVAL s) lo recoge ya
+  # cerrado. Se sube el snapshot validado, no el fichero vivo, así que no hay
+  # ventana entre comprobar y subir (sin TOCTOU).
+  local mpd="$OUT/manifest.mpd" snap="$OUT/.manifest.upload.mpd"
+  if [[ -f "$mpd" ]]; then
+    cp "$mpd" "$snap"
+    if tail -c 64 "$snap" | grep -q '</MPD>'; then
+      aws s3 cp "$snap" "$DEST/manifest.mpd" \
+        --content-type "application/dash+xml" \
+        --cache-control "no-cache,no-store,must-revalidate" \
+        "${REGION_ARG[@]}" --only-show-errors
+    else
+      echo "  ⚠ manifest incompleto (ffmpeg escribiendo) → subida omitida esta pasada"
+    fi
+    rm -f "$snap"
   fi
 }
 
