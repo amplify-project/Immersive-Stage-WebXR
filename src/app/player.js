@@ -1176,7 +1176,8 @@ function buildARSources() {
 function clearARSources() {
   for (const m of arSources) scene.remove(m);
   arSources = [];
-  // soltar las vinculaciones del motor (conserva la última posición)
+  // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,
+  // que es la geometría del 360 al que estamos regresando
   if (engine) for (let i = 0; i < engine.stemCount; i++) engine.unbindStem(i);
 }
 

@@ -76,19 +76,27 @@ export class ImmersiveAudioEngine {
     this._viewR3 = null;       // rotación de cabeza (3x3 ambisónico) para DoA
 
     // ── Stems / fuentes espaciales (spotlight posicional) ────────────────────
-    // Cada fuente arranca colocada por azimut/elevación sobre una esfera de
-    // radio _stemRadius (compat. con el comportamiento original), pero su
-    // posición puede pasar a ser dinámica: fijada con setStemPosition() o
-    // vinculada a un Object3D con bindStemToObject() (p.ej. un ancla AR). Así el
-    // mismo motor sirve para músicos colocados en el 360 y para objetos 3D que
-    // se mueven por la sala en AR.
+    // Hay DOS geometrías, y confundirlas rompe el spotlight:
+    //
+    //   · No anclada (360). Colocada por azimut/elevación sobre una esfera
+    //     SOLIDARIA A LA CABEZA, igual que la malla del vídeo 360, que el player
+    //     recentra en la cabeza cada frame. La dirección cabeza→fuente es su
+    //     `dir` tal cual, y su posición mundo se recalcula al moverse la cabeza.
+    //     Restarle la posición de la cabeza sería un error: en el Quest (marco
+    //     local-floor, cabeza a ~1.6 m) mandaría las fuentes bajo el suelo.
+    //
+    //   · Anclada (AR). Vive en coordenadas de sala, fijada con setStemPosition()
+    //     o vinculada a un Object3D con bindStemToObject(). Ahí sí: la dirección
+    //     y la distancia se miden restando la posición de la cabeza, que es lo
+    //     que permite acercarse andando a un músico.
     const D2R = Math.PI / 180;
     this._stems = (stems || []).map((s, i) => ({
       az:   (s.azimuthDeg   || 0) * D2R,
       el:   (s.elevationDeg || 0) * D2R,
       name: s.name || ('stem' + i),
       gain: null, panner: null, dir: null,
-      pos: null,          // posición mundo [x,y,z]; null → derivada de az/el
+      pos: null,          // posición mundo [x,y,z] (anclada) o derivada de dir
+      anchored: false,    // true → coordenadas de sala; false → esfera en la cabeza
       object3d: null,     // fuente vinculada (lee su matrixWorld) o null
     }));
     this._stemRadius  = 1;            // radio de la colocación estática por az/el
@@ -282,6 +290,7 @@ export class ImmersiveAudioEngine {
     } else if (L.setPosition) {
       L.setPosition(px, py, pz);
     }
+    this._reseatStaticStems();   // la esfera del 360 viaja con la cabeza
     this._updateSpotlight();
   }
 
@@ -348,8 +357,8 @@ export class ImmersiveAudioEngine {
       const dir = [-ce * Math.sin(s.az), se, -ce * Math.cos(s.az)];
       s.dir = dir;
       // Posición inicial: la fijada de antemano (setStemPosition/bind antes de
-      // attach) o la derivada del azimut/elevación sobre la esfera _stemRadius.
-      if (!s.pos) s.pos = [dir[0] * this._stemRadius, dir[1] * this._stemRadius, dir[2] * this._stemRadius];
+      // attach) si está anclada; si no, sobre la esfera centrada en la cabeza.
+      if (!s.anchored) s.pos = this._staticPos(s);
 
       const g = this.ctx.createGain();
       g.gain.value = this._restGain;
@@ -365,6 +374,23 @@ export class ImmersiveAudioEngine {
       s.gain = g; s.panner = p;
       this._setPannerPos(s, s.pos);          // coloca el panner en su posición
     });
+  }
+
+  // Posición mundo de una fuente NO anclada: su dirección az/el, a _stemRadius,
+  // desde donde esté la cabeza. Así el PannerNode la sitúa siempre a la misma
+  // distancia y en el mismo rumbo relativo, como la esfera del 360.
+  _staticPos(s) {
+    const lp = this._listenerPos, R = this._stemRadius;
+    return [lp[0] + s.dir[0] * R, lp[1] + s.dir[1] * R, lp[2] + s.dir[2] * R];
+  }
+
+  // Recoloca las no ancladas tras mover la cabeza (las ancladas no se tocan).
+  _reseatStaticStems() {
+    for (const s of this._stems) {
+      if (s.anchored || !s.panner || !s.dir) continue;
+      s.pos = this._staticPos(s);
+      this._setPannerPos(s, s.pos);
+    }
   }
 
   // ── Fuentes espaciales dinámicas (posición fija o ancla AR) ────────────────
@@ -415,6 +441,7 @@ export class ImmersiveAudioEngine {
     const pos = (typeof x === 'number') ? [x, y, z] : this._extractPos(x);
     if (!pos) return;
     s.object3d = null;        // posición explícita → desvincula del Object3D
+    s.anchored = true;        // coordenadas de sala: distancia y rumbo vs. cabeza
     s.pos = pos;
     this._setPannerPos(s, pos);
     this._updateSpotlight();
@@ -430,6 +457,7 @@ export class ImmersiveAudioEngine {
     const s = this._stems[this._stemIndex(ref)];
     if (!s) return;
     s.object3d = object3d || null;
+    s.anchored = !!s.object3d;
     if (s.object3d) {
       const pos = this._extractPos(s.object3d);
       if (pos) { s.pos = pos; this._setPannerPos(s, pos); }
@@ -437,9 +465,15 @@ export class ImmersiveAudioEngine {
   }
 
   /** Desvincula la fuente de su Object3D (conserva la última posición conocida). */
+  // Suelta el ancla: la fuente vuelve a la esfera solidaria a la cabeza (az/el),
+  // que es lo que procede al salir de AR y recuperar el 360.
   unbindStem(ref) {
     const s = this._stems[this._stemIndex(ref)];
-    if (s) s.object3d = null;
+    if (!s) return;
+    s.object3d = null;
+    s.anchored = false;
+    if (s.dir && s.panner) { s.pos = this._staticPos(s); this._setPannerPos(s, s.pos); }
+    this._updateSpotlight();
   }
 
   /** Radio de la colocación estática por azimut/elevación (por defecto 1). */
@@ -478,14 +512,21 @@ export class ImmersiveAudioEngine {
     const now = this.ctx.currentTime;
     for (const s of this._stems) {
       if (!s.gain) continue;
-      // Dirección actual cabeza→fuente (normalizada). Para fuentes estáticas en
-      // la esfera coincide con s.dir; para fuentes con posición/ancla dinámica
-      // se recalcula a partir de su posición mundo y la de la cabeza.
-      const p = s.pos || s.dir;
-      if (!p) continue;
-      let dx = p[0] - lp[0], dy = p[1] - lp[1], dz = p[2] - lp[2];
-      const len = Math.hypot(dx, dy, dz) || 1;
-      dx /= len; dy /= len; dz /= len;
+      // Dirección actual cabeza→fuente (normalizada). En las NO ancladas es su
+      // `dir`: la esfera va con la cabeza, así que restarle _listenerPos metería
+      // el error de la altura de ojos (en VR, ~1.6 m ⇒ el frente cae 58° bajo el
+      // horizonte y nada llega nunca al umbral de foco). Las ancladas sí se
+      // miden contra la cabeza, que es lo que da acercarse andando en AR.
+      let dx, dy, dz;
+      if (s.anchored) {
+        if (!s.pos) continue;
+        dx = s.pos[0] - lp[0]; dy = s.pos[1] - lp[1]; dz = s.pos[2] - lp[2];
+        const len = Math.hypot(dx, dy, dz) || 1;
+        dx /= len; dy /= len; dz /= len;
+      } else {
+        if (!s.dir) continue;
+        [dx, dy, dz] = s.dir;                         // ya unitario
+      }
       const dot = dx * f[0] + dy * f[1] + dz * f[2];
       const aim = Math.max(0, dot);                  // 1 = mirándola de frente
       const focus = Math.pow(aim, this._focusExp);
