@@ -292,6 +292,9 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
   // musician: louder, not more solo. 0 = off, 0.7 = bed drops to 30%.
   "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5,
                  "bedDuck": 0.7 },
+  // How far the ambisonic mic was turned from the camera when recording. Rotates
+  // the FOA bed only, never the stems. Override live with ?ayaw= / ?amirror=.
+  "alignment": { "yawOffsetDeg": 0, "mirror": false },
   // Distance attenuation per source, and smoothing for positions pushed in from
   // outside (AR tracking). Only audible in AR: in 360 the sources ride a sphere
   // fixed to your head, always at the same distance.

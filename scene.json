@@ -13,13 +13,31 @@
     {
       "file": "media/GT - stem - sync.mp3",
       "name": "GT",
-      "azimuthDeg": -90,
+      "azimuthDeg": 133,
       "elevationDeg": 0
     },
     {
       "file": "media/SAX - stem - sync.mp3",
       "name": "SAX",
-      "azimuthDeg": 89,
+      "azimuthDeg": -143,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/KEY - stem - sync.mp3",
+      "name": "KEY",
+      "azimuthDeg": -90,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/TPT - stem - sync.mp3",
+      "name": "TPT",
+      "azimuthDeg": 63,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/TBONE - stem - sync.mp3",
+      "name": "TBONE",
+      "azimuthDeg": -42,
       "elevationDeg": 0
     }
   ],
@@ -29,6 +47,10 @@
     "restGain": 0,
     "zoomMax": 3.6,
     "bedDuck": 0.7
+  },
+  "alignment": {
+    "yawOffsetDeg": -165,
+    "mirror": false
   },
   "encode": {
     "codec": "h264_nvenc",

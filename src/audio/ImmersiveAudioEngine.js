@@ -339,10 +339,13 @@ export class ImmersiveAudioEngine {
    * Alineación fija audio↔vídeo (independiente del giro de cabeza).
    *
    * Gira SOLO el campo sonoro ambisónico (el bed), no los stems: corrige que el
-   * micro no apuntase al mismo sitio que la cámara al grabar. Con la esfera ya
-   * alineada (el centro de la imagen cae en -Z), si micro y cámara miraban al
-   * frente lo correcto es 0; los múltiplos de 90 que antes hacían falta
-   * compensaban el desfase del mapeo UV, no el micro.
+   * micro no apuntase al mismo sitio que la cámara al grabar. Es una propiedad
+   * de la TOMA, no del player, así que vive en scene.json → `alignment`.
+   *
+   * Para medirlo sin oído: coge un instrumento con stem propio, estima su
+   * dirección de llegada en el bed (vector de intensidad I = <W·X, W·Y, W·Z> en
+   * los frames donde ese instrumento domina) y réstale el azimut al que se ve en
+   * la imagen. En la toma de ejemplo salen ~180° con dos instrumentos distintos.
    *
    * @param {object}  [opts]
    * @param {number}  [opts.yawOffsetDeg=0]  Giro del campo sonoro, en grados.

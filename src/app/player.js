@@ -522,7 +522,7 @@ async function setupFOA() {
       { azimuthDeg:  30, name: 'TBONE' },   // trombón
       { azimuthDeg:  50, name: 'TPT'   },   // trompeta
     ];
-    let _stems = null, _spot = null, _sources = null;
+    let _stems = null, _spot = null, _sources = null, _align = null;
     try {
       const _r = await fetch('/scene.json', { cache: 'no-store' });
       if (_r.ok) {
@@ -533,6 +533,7 @@ async function setupFOA() {
             name: s.name, closeup: s.closeup || null }));
         if (_sc.spotlight) _spot = _sc.spotlight;
         if (_sc.sources) _sources = _sc.sources;
+        if (_sc.alignment) _align = _sc.alignment;
         if (_sc.telemetry) telemetryCfg = _sc.telemetry;
       }
     } catch (_) { /* sin escena → DEFAULT_STEMS */ }
@@ -597,12 +598,17 @@ async function setupFOA() {
       toast(`${_stems.length} stems · spotlight en zoom`);
     }
 
-    // Alineación audio↔vídeo desde la URL (ajustable en el visor sin recompilar):
-    //   ?ayaw=90    → offset de azimut en grados (prueba 90 / 180 / -90 / 45…)
+    // Alineación audio↔vídeo: cuánto estaba girado el micro ambisónico respecto
+    // a la cámara al grabar. Es de la TOMA, así que su sitio es scene.json:
+    //   "alignment": { "yawOffsetDeg": 180, "mirror": false }
+    // Overrides por URL para tantear en el visor sin tocar la escena:
+    //   ?ayaw=180   → offset de azimut en grados
     //   ?amirror=1  → espejo izquierda/derecha
     const _p = new URLSearchParams(location.search);
-    const _ayaw = parseFloat(_p.get('ayaw') || '0') || 0;
-    const _amirror = _p.get('amirror') === '1';
+    const _ayaw = _p.has('ayaw') ? (parseFloat(_p.get('ayaw')) || 0)
+                                 : ((_align && +_align.yawOffsetDeg) || 0);
+    const _amirror = _p.has('amirror') ? (_p.get('amirror') === '1')
+                                       : !!(_align && _align.mirror);
     engine.setAlignment({ yawOffsetDeg: _ayaw, mirror: _amirror });
     if (_ayaw || _amirror) toast(`alineación audio · yaw ${_ayaw}° · mirror ${_amirror ? 'on' : 'off'}`);
 
