@@ -111,6 +111,8 @@ export class ImmersiveAudioEngine {
     this._focusExp  = 4;     // cuán cerrado es el cono de "mirar a" (mayor = más estrecho)
     this._zoomMin   = 1;     // factor de zoom a partir del cual empieza el spotlight
     this._zoomMax   = 2.5;   // factor de zoom que da el boost completo
+    this._bedDuck   = 0;     // cuánto se agacha el bed al enfocar (0 = nada, 1 = a cero)
+    this._bedGain   = null;  // GainNode del bed (creado en attach)
     // Atenuación por distancia de cada fuente (ajustable con setSourceParams).
     // Manda en AR, donde uno se acerca andando; en el 360 las fuentes están
     // siempre a _stemRadius de la cabeza y la curva es irrelevante.
@@ -166,21 +168,31 @@ export class ImmersiveAudioEngine {
     }
     this._activeRenderer = mode;
 
+    // Ganancia propia del bed (los 4 canales FOA), antes del maestro. Permite
+    // AGACHARLO al enfocar a un músico: el bed lleva la mezcla completa del
+    // concierto, con los músicos dentro, así que sin esto el spotlight solo
+    // puede sumar el stem encima de su propia copia — suena más fuerte, no más
+    // solo, y el total se acerca al recorte. Con el duck, acercarse a alguien
+    // aparta el fondo. Ver _updateSpotlight().
+    this._bedGain = this.ctx.createGain();
+    this._bedGain.gain.value = 1;
+    this._bedGain.connect(this.gain);
+
     if (mode === 'omnitone') {
-      // FOA → OmnitoneFOADecoder (binaural HRTF + rotación) → gain
+      // FOA → OmnitoneFOADecoder (binaural HRTF + rotación) → bedGain → gain
       this.decoder = new OmnitoneFOADecoder(this.ctx);
       await this.decoder.initialize();
       foaInput.connect(this.decoder.input);
-      this.decoder.output.connect(this.gain);
+      this.decoder.output.connect(this._bedGain);
     } else {
-      // FOA → rotator → multiplier(zoom) → HOASTBinDecoder → gain
+      // FOA → rotator → multiplier(zoom) → HOASTBinDecoder → bedGain → gain
       this.rotator    = new HOASTRotator(this.ctx, this.order);
       this.multiplier = new MatrixMultiplier(this.ctx, this.order);
       this.decoder    = new HOASTBinDecoder(this.ctx, this.order);
       foaInput.connect(this.rotator.in);
       this.rotator.out.connect(this.multiplier.in);
       this.multiplier.out.connect(this.decoder.in);
-      this.decoder.out.connect(this.gain);
+      this.decoder.out.connect(this._bedGain);
       if (this.irUrl) this.loadIRs(this.irUrl);
     }
 
@@ -241,6 +253,7 @@ export class ImmersiveAudioEngine {
 
   async dispose() {
     try { this.source && this.source.disconnect(); } catch (_) {}
+    try { this._bedGain && this._bedGain.disconnect(); } catch (_) {}
     try { this.gain && this.gain.disconnect(); } catch (_) {}
     if (this.ownsContext && this.ctx) {
       try { await this.ctx.close(); } catch (_) {}
@@ -577,6 +590,7 @@ export class ImmersiveAudioEngine {
     const lo = this._zoomMin, hi = this._zoomMax;
     const zN = Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)));
     const now = this.ctx.currentTime;
+    let maxW = 0;                       // peso del stem más enfocado → duck del bed
     for (const s of this._stems) {
       if (!s.gain) continue;
       // Dirección actual cabeza→fuente (normalizada). En las NO ancladas es su
@@ -598,9 +612,18 @@ export class ImmersiveAudioEngine {
       const aim = Math.max(0, dot);                  // 1 = mirándola de frente
       const focus = Math.pow(aim, this._focusExp);
       s._weight = focus * zN;                         // 0..1: cuán "enfocada" está
+      if (s._weight > maxW) maxW = s._weight;
       const target = this._restGain + s._weight * this._maxBoost;
       s.gain.gain.setTargetAtTime(target, now, 0.08);
     }
+
+    // Duck del bed, gobernado por el peso del stem MÁS enfocado, no por el zoom
+    // a secas: acercarse sin mirar a nadie no debe apartar el fondo. Misma rampa
+    // que los stems, así que fondo y solista se cruzan sin escalones. Se escribe
+    // siempre (con bedDuck=0 el objetivo es 1), o al desactivar el duck en
+    // caliente el bed se quedaría agachado para siempre.
+    if (this._bedGain)
+      this._bedGain.gain.setTargetAtTime(1 - this._bedDuck * maxW, now, 0.08);
   }
 
   /**
@@ -629,19 +652,21 @@ export class ImmersiveAudioEngine {
    * @param {number} [o.zoomMin]   Factor de zoom a partir del cual empieza el boost.
    * @param {number} [o.zoomMax]   Factor de zoom que da el boost completo.
    */
-  setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax } = {}) {
+  setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax, bedDuck } = {}) {
     if (restGain != null) this._restGain = restGain;
     if (maxBoost != null) this._maxBoost = maxBoost;
     if (focusExp != null) this._focusExp = focusExp;
     if (zoomMin  != null) this._zoomMin  = zoomMin;
     if (zoomMax  != null) this._zoomMax  = zoomMax;
+    if (bedDuck  != null) this._bedDuck  = Math.min(1, Math.max(0, bedDuck));
     this._updateSpotlight();
   }
 
   /** Parámetros actuales del spotlight (para guardar/restaurar, p.ej. al entrar/salir de AR). */
   getSpotlightParams() {
     return { restGain: this._restGain, maxBoost: this._maxBoost,
-             focusExp: this._focusExp, zoomMin: this._zoomMin, zoomMax: this._zoomMax };
+             focusExp: this._focusExp, zoomMin: this._zoomMin, zoomMax: this._zoomMax,
+             bedDuck: this._bedDuck };
   }
 
   // ── Volumen ──────────────────────────────────────────────────────────────

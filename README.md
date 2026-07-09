@@ -277,7 +277,11 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
     // "closeup" is optional (Caso B): a per-musician close-up video track
     { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0, "closeup": "media/dr_cu.mp4" }
   ],
-  "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5 },
+  // `bedDuck` pulls the FOA bed down as you focus a musician. Without it the
+  // spotlight can only add a stem on top of the bed's own copy of that same
+  // musician: louder, not more solo. 0 = off, 0.7 = bed drops to 30%.
+  "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5,
+                 "bedDuck": 0.7 },
   // Distance attenuation per source, and smoothing for positions pushed in from
   // outside (AR tracking). Only audible in AR: in 360 the sources ride a sphere
   // fixed to your head, always at the same distance.

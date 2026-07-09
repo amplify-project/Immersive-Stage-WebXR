@@ -112,7 +112,7 @@ bound to an `Object3D` (e.g. an AR anchor).
 
 | Method | Description |
 |--------|-------------|
-| `setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax })` | Tune the spotlight. `restGain` = stem level at rest (0 = only on zoom). `maxBoost` = extra gain when looked at with max zoom. `focusExp` = focus-cone tightness. `zoomMin/zoomMax` = zoom range that maps to the boost. |
+| `setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax, bedDuck })` | Tune the spotlight. `restGain` = stem level at rest (0 = only on zoom). `maxBoost` = extra gain when looked at with max zoom. `focusExp` = focus-cone tightness. `zoomMin/zoomMax` = zoom range that maps to the boost. `bedDuck` (0..1) = how far the FOA bed drops when a musician is focused; `0.7` leaves the bed at 30%. |
 | `getSpotlightParams()` → `object` | Current spotlight params (to save/restore, e.g. on entering/leaving AR). |
 | `setSourceParams({ distanceModel, refDistance, rolloffFactor, maxDistance, smoothSec })` | Distance-attenuation curve of every source, plus `smoothSec`, the time constant used when an *anchored* position is moved (0 = jump). Applies live to existing panners. In AR this curve, not the spotlight, decides how loud a musician is. |
 | `getSourceParams()` → `object` | Current source params. |

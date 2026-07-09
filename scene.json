@@ -27,7 +27,8 @@
     "maxBoost": 1.5,
     "focusExp": 4,
     "restGain": 0,
-    "zoomMax": 3.6
+    "zoomMax": 3.6,
+    "bedDuck": 0.7
   },
   "encode": {
     "codec": "h264_nvenc",
