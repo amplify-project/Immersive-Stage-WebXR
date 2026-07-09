@@ -30,7 +30,7 @@ import { HOASTBinDecoder }  from './HOASTBinDecoder.js';
 import { HOASTloader }      from './HOASTloader.js';
 import { MatrixMultiplier } from './MatrixMultiplier.js';
 import { OmnitoneFOADecoder } from './OmnitoneFOADecoder.js';
-import { zoomMtx, zoomFactorToIndex } from './zoom-matrix.js';
+import { zoomMtx, zoomFactorToIndex, ZOOM_MIN, ZOOM_MAX } from './zoom-matrix.js';
 import { threeMatrix4ToAmbiR3, quaternionToMatrix4, mat3MulVec3 } from './ambisonicAxes.js';
 import { resolveChannelMap } from './opusChannelMap.js';
 
@@ -617,7 +617,11 @@ export class ImmersiveAudioEngine {
     if (!this._stems.length || !this.ctx) return;
     const f = this._lookForward, lp = this._listenerPos;
     const lo = this._zoomMin, hi = this._zoomMax;
-    const zN = Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)));
+    // hi === lo (p.ej. ambos recortados a ZOOM_MAX) daría NaN y dejaría todos
+    // los stems mudos: en ese caso el spotlight es un interruptor.
+    const zN = hi - lo > 1e-6
+      ? Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)))
+      : (this._zoomFactor >= hi ? 1 : 0);
     const now = this.ctx.currentTime;
     let maxW = 0;                       // peso del stem más enfocado → duck del bed
     for (const s of this._stems) {
@@ -680,13 +684,24 @@ export class ImmersiveAudioEngine {
    * @param {number} [o.focusExp]  Cierre del cono de enfoque (mayor = más estrecho).
    * @param {number} [o.zoomMin]   Factor de zoom a partir del cual empieza el boost.
    * @param {number} [o.zoomMax]   Factor de zoom que da el boost completo.
+   *
+   * zoomMin/zoomMax van en la MISMA unidad que setZoomByFactor: el factor de
+   * zoom, que solo existe entre ZOOM_MIN y ZOOM_MAX (lo que cubre la tabla de
+   * matrices ambisónicas). Pedir un zoomMax de 3.6 no hace el boost más
+   * agresivo: lo hace inalcanzable, porque el zoom del escritorio llega a 2.5 y
+   * el spotlight se queda a medias para siempre. Se recorta y se avisa.
    */
   setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax, bedDuck } = {}) {
+    const clampZoom = (v, what) => {
+      const c = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v));
+      if (c !== v) console.warn(`[audio] spotlight.${what}=${v} fuera de [${ZOOM_MIN}, ${ZOOM_MAX}] → ${c}`);
+      return c;
+    };
     if (restGain != null) this._restGain = restGain;
     if (maxBoost != null) this._maxBoost = maxBoost;
     if (focusExp != null) this._focusExp = focusExp;
-    if (zoomMin  != null) this._zoomMin  = zoomMin;
-    if (zoomMax  != null) this._zoomMax  = zoomMax;
+    if (zoomMin  != null) this._zoomMin  = clampZoom(zoomMin, 'zoomMin');
+    if (zoomMax  != null) this._zoomMax  = clampZoom(zoomMax, 'zoomMax');
     if (bedDuck  != null) this._bedDuck  = Math.min(1, Math.max(0, bedDuck));
     this._updateSpotlight();
   }

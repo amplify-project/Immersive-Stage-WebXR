@@ -76,6 +76,12 @@ Open in the browser:
 
 1. **Sources**: pick the 360 video, the FOA bed (4 channels) and its format
    (*FuMa* or *AmbiX*).
+   The bed must have **exactly 4 channels**, and channel *i* must be ambisonic
+   component *i* — nothing downstream can tell otherwise. Video editors happily
+   export a B-format take as 7.1 with every channel duplicated. Check and extract
+   with `./make-bed.sh -l take.wav`, then
+   `./make-bed.sh take.wav media/bed.wav 0,2,4,6`. The encoder refuses any other
+   channel count rather than silently reading the wrong four.
 2. **Musicians**: add one stem per instrumentalist and **drag it on the top-down
    radar** to place it in azimuth (top = front of the video, left = +90°). Fine
    tune name/azimuth/elevation in the side panel.

@@ -55,6 +55,18 @@ function decode(file, ch, seconds, band) {
   });
 }
 
+/** Número de canales del primer stream de audio. */
+function channels(file) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
+      '-show_entries', 'stream=channels', '-of', 'csv=p=0', file]);
+    let out = '';
+    p.stdout.on('data', c => out += c);
+    p.on('error', reject);
+    p.on('close', () => resolve(parseInt(out.trim(), 10) || 0));
+  });
+}
+
 const rmsDb = (a) => {
   let s = 0;
   for (let i = 0; i < a.length; i++) s += a[i] * a[i];
@@ -92,6 +104,15 @@ async function analyze({ bed, bedFormat = 'fuma', stems = [], seconds = 120, res
 
   // ── 1. Niveles por canal: la Z debe ser la más floja de una toma horizontal ──
   const bedPath = resolve(bed);
+
+  // El análisis lee los canales 0..3 como W,X,Y,Z. Con más canales estaría
+  // midiendo cualquier cosa y devolvería un yawOffsetDeg con toda la seguridad
+  // del mundo. Mejor no dar número que dar uno inventado.
+  const nch = await channels(bedPath);
+  if (nch !== 4)
+    throw new Error(`El lecho tiene ${nch} canales; se esperan 4 (B-format FOA). ` +
+                    `Extrae los cuatro buenos con ./make-bed.sh -l "${bed}"`);
+
   const full = await Promise.all([0, 1, 2, 3].map(c => decode(bedPath, c, seconds, null)));
   const levels = full.map(rmsDb);
   const quietest = levels.indexOf(Math.min(...levels));
