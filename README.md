@@ -293,6 +293,8 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 }
 ```
 
-> Azimuth: `0°` = front of the video, `+` = left. The player sets `zoomMin`
-> automatically (current view) so that at rest the stems are silent, both on
-> desktop and in VR.
+> Azimuth: `0°` = front of the video (the **centre column** of the equirect
+> frame), `+` = left. To read a musician's azimuth straight off a frame, take
+> their horizontal position `u` (0 at the left edge, 1 at the right) and compute
+> `azimuthDeg = (0.5 - u) * 360`. The player sets `zoomMin` automatically
+> (current view) so that at rest the stems are silent, both on desktop and in VR.

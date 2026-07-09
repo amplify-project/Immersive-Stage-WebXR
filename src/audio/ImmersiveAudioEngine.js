@@ -317,9 +317,15 @@ export class ImmersiveAudioEngine {
 
   /**
    * Alineación fija audio↔vídeo (independiente del giro de cabeza).
+   *
+   * Gira SOLO el campo sonoro ambisónico (el bed), no los stems: corrige que el
+   * micro no apuntase al mismo sitio que la cámara al grabar. Con la esfera ya
+   * alineada (el centro de la imagen cae en -Z), si micro y cámara miraban al
+   * frente lo correcto es 0; los múltiplos de 90 que antes hacían falta
+   * compensaban el desfase del mapeo UV, no el micro.
+   *
    * @param {object}  [opts]
-   * @param {number}  [opts.yawOffsetDeg=0]  Gira el campo sonoro p/ alinear el
-   *        "frente" del micro con el centro de la imagen. Prueba 90 / 180 / -90.
+   * @param {number}  [opts.yawOffsetDeg=0]  Giro del campo sonoro, en grados.
    * @param {boolean} [opts.mirror=false]    Espejo izquierda/derecha.
    */
   setAlignment({ yawOffsetDeg = 0, mirror = false } = {}) {

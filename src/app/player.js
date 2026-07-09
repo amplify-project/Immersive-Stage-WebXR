@@ -63,6 +63,15 @@ function initThree() {
   // scale(-1,1,1) invierte las normales para ver desde dentro
   const geo = new THREE.SphereGeometry(100, 60, 40);
   geo.scale(-1, 1, 1);
+  // Alinear la imagen con el mundo. El mapeo UV de SphereGeometry (con el
+  // scale(-1,1,1)) deja el CENTRO del equirectangular (u=0.5) en -X, y en -Z
+  // —el frente: adonde mira la cámara con yaw=0, y adonde apunta un stem con
+  // azimuthDeg=0— cae u=0.75. Es decir, el frente del vídeo quedaba 90° a la
+  // izquierda del frente del audio: los músicos se oían donde no se veían.
+  // Girando -90° el centro de la imagen pasa a -Z y los tres convenios (editor,
+  // vídeo, audio) coinciden. Se hornea en la geometría porque en XR el bucle de
+  // render reposiciona la malla cada frame y podría pisar sphere.rotation.
+  geo.rotateY(-Math.PI / 2);
   sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x111111 }));
   sphere.position.set(0, 0, 0);  // centrada en el origen
   scene.add(sphere);
