@@ -1,9 +1,28 @@
 {
-  "mode": "live",
+  "mode": "vod",
   "video": "media/video.mp4",
   "bed": "media/ambisonic_bformat.wav",
   "bedFormat": "fuma",
-  "stems": [],
+  "stems": [
+    {
+      "file": "media/DR - stem - sync.mp3",
+      "name": "DR",
+      "azimuthDeg": 1,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/GT - stem - sync.mp3",
+      "name": "GT",
+      "azimuthDeg": -90,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/SAX - stem - sync.mp3",
+      "name": "SAX",
+      "azimuthDeg": 89,
+      "elevationDeg": 0
+    }
+  ],
   "spotlight": {
     "maxBoost": 1.5,
     "focusExp": 4,
@@ -46,7 +65,7 @@
     }
   },
   "telemetry": {
-    "enabled": false,
+    "enabled": true,
     "url": "",
     "rateHz": 20,
     "flushMs": 100

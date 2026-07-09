@@ -1039,12 +1039,22 @@ async function enterXR() {
             // escritorio lo hace el FOV vía setZoomByFactor, pero en VR no hay
             // FOV controlable, así que mapeamos xrZoomDist → zoom normalizado.
             // Boost completo a media carrera (≈40) para que responda pronto.
-            engine?.setZoomNormalized(xrZoomDist / 40);
+            const zoomN = xrZoomDist / 40;
+            engine?.setZoomNormalized(zoomN);
             updateCloseupFocus();   // close-up del músico enfocado (joystick zoom)
 
             // Telemetría: pose de cabeza + zoom/foco (decimado a rateHz en la clase).
             // pos/q son referencias de la pose ya leída → sin coste por frame.
-            telemetry?.sample(pos, q, xrZoomDist, closeupStem, videoEl?.currentTime || 0);
+            //
+            // El foco sale del motor, NO de closeupStem: éste solo cambia cuando la
+            // escena trae pistas de close-up, y sin ellas viajaría un -1 constante
+            // aunque sepamos perfectamente a qué músico mira. Y va el zoom
+            // normalizado (0..1), no xrZoomDist (0..80), para que el consumidor lea
+            // el mismo rango venga de VR, de escritorio o del simulador.
+            // setZoomNormalized() acaba de recalcular los pesos, así que el foco es
+            // el de este frame.
+            telemetry?.sample(pos, q, zoomN, engine?.getFocusedStem(0.3) ?? -1,
+                              videoEl?.currentTime || 0);
 
             // Centrar la esfera en la cabeza y desplazarla EN CONTRA de la vista
             // para "acercar" lo que miras (xrZoomDist = 0 → solo centrada).

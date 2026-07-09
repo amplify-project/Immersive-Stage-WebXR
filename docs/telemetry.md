@@ -92,9 +92,15 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 | `mt`  | media presentation time (s) — what they were seeing |
 | `p`   | head position `[x,y,z]`                             |
 | `q`   | head orientation quaternion `[x,y,z,w]`            |
-| `z`   | zoom / attention depth                              |
-| `f`   | focused source index (`-1` = none)                  |
+| `z`   | zoom / attention depth, normalized `0..1`            |
+| `f`   | focused musician: index into `scene.json` → `stems` (`-1` = none) |
 | `g`   | *optional* real eye-gaze `[x,y,z]` (else omitted)   |
+
+`f` is whichever musician the spotlight weighs most (`engine.getFocusedStem`), so
+it is reported whether or not the scene defines `closeup` tracks — a viewer can
+attend to a musician without a close-up video existing for them. It stays `-1`
+until `z` is high enough for one stem to dominate, and in AR (all sources audible
+at their own place) it is always `-1`.
 
 ### Relay → consumer (`/consume`)
 

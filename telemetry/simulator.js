@@ -71,9 +71,11 @@ class SimClient {
       round4(this.seat[2] + Math.cos(dt * 0.3 + this.phase) * sway),
     ];
     const q = eulerToQuat(yaw, pitch);
-    // occasional zoom + focus changes so the fields aren't static
-    const z = Math.max(0, Math.sin(dt * 0.2 + this.phase)) * 1.5;
-    const f = z > 0.9 ? Math.floor((dt * 0.25 + this.phase) % 6) : -1;
+    // occasional zoom + focus changes so the fields aren't static. `z` is the
+    // normalized zoom the player sends (0 = no zoom, 1 = full), and a musician
+    // only becomes focused once zoomed in past ~0.6, as it happens in VR.
+    const z = Math.max(0, Math.sin(dt * 0.2 + this.phase));
+    const f = z > 0.6 ? Math.floor((dt * 0.25 + this.phase) % 6) : -1;
 
     const s = { t: +(Date.now() - this.t0).toFixed(1), mt: round4(dt), p, q, z: round4(z), f };
     this.ws.send(JSON.stringify({ b: [s] }));
