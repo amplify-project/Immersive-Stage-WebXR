@@ -38,11 +38,12 @@
     aguanta la banda completa.
   </p>
   <p class="sub">
-    <b>¿El navegador reordena los canales?</b> Genera una pista de tonos, uno por canal, y mira si
-    cada CH marca la frecuencia que le toca. Si no, el decodificador está permutando y hay que
-    remapear en el motor. Con 7 canales:
-    <code>?src=/chtest/manifest.mpd&amp;ch=7</code> → CH0 200, CH1 300, CH2 400, CH3 500,
-    CH4 800, CH5 1200, CH6 1600 Hz.
+    <b>¿El navegador reordena los canales?</b> La pista de tonos lleva una frecuencia por canal del
+    fichero: <b>canal 0 → 200 Hz, 1 → 300, 2 → 400, 3 → 500, 4 → 800, 5 → 1200, 6 → 1600</b>.
+    Abre <code>?src=/chtest/manifest.mpd&amp;ch=7</code> y comprueba que <b>cada fila marca el tono
+    del canal fuente que dice llevar</b> — las filas ya vienen etiquetadas con el mapa aplicado.
+    Para ver las salidas crudas del splitter, sin interpretar, añade <code>&amp;chmap=identity</code>:
+    ahí es donde se aprecia la permutación.
   </p>
   <!--
     Regenerar la pista de tonos (mismo encoder que stream.sh: mapping_family 255):
@@ -92,7 +93,11 @@
   <audio id="aud" crossorigin="anonymous"></audio>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.6/shaka-player.compiled.js"></script>
-  <script>
+  <script type="module">
+    // La tabla la importamos del mismo módulo que usa el player, no una copia
+    // que se pueda quedar desfasada.
+    import { resolveChannelMap, invertMap } from './src/audio/opusChannelMap.js';
+
     // Por defecto: 10 canales (4 FOA + 6 stems) desde encoded10/, etiquetados con
     // los músicos del proyecto. Override opcional con ?ch= / ?src= / ?labels=.
     const _q = new URLSearchParams(location.search);
@@ -101,12 +106,37 @@
     const FOA = ['FOA W', 'FOA Y', 'FOA Z', 'FOA X'];
     const _stemLabels = (_q.get('labels') || 'DR,GT,KEY,SAX,TBONE,TPT')
       .split(',').map(s => s.trim()).filter(Boolean);
-    const LABELS = Array.from({ length: N }, (_, i) =>
-      i < 4 ? `CH${i} · ${FOA[i]}`
-            : `CH${i} · ${_stemLabels[i - 4] || ('Stem ' + (i - 4 + 1))}`);
+
+    // Una fila = una SALIDA del ChannelSplitter, que es lo único que medimos.
+    // Pero con 3..8 canales el decodificador de Chromium permuta, así que la
+    // salida i NO lleva el canal i del fichero. Etiquetamos cada fila con el
+    // canal FUENTE que de verdad transporta; si no, la herramienta miente
+    // exactamente igual que mentía el motor antes del remapeo.
+    // ?chmap=identity muestra las salidas crudas, sin interpretar (para MEDIR el
+    // reordenado); por defecto se aplica el mismo mapa que el player.
+    const srcToOut = resolveChannelMap(N, _q.get('chmap') || 'auto');
+    const outToSrc = invertMap(srcToOut);
+    const REMAPPED = outToSrc.some((src, out) => src !== out);
+
+    const srcName = s => (s < 4 ? FOA[s] : (_stemLabels[s - 4] || ('Stem ' + (s - 4 + 1))));
+    const LABELS = Array.from({ length: N }, (_, out) => {
+      const src = outToSrc[out];
+      return `CH${out} · ${srcName(src)}` + (src !== out ? ` (canal ${src} del fichero)` : '');
+    });
 
     const aud = document.getElementById('aud');
     const chBox = document.getElementById('channels');
+
+    if (REMAPPED) {
+      const warn = document.createElement('p');
+      warn.className = 'sub';
+      warn.innerHTML = `⚠️ Con <b>${N} canales</b> el decodificador reordena: la salida i del ` +
+        `<code>ChannelSplitter</code> NO es el canal i del fichero. Mapa aplicado a las etiquetas ` +
+        `(canal fuente → salida): <code>[${srcToOut}]</code>. El motor lo deshace; ` +
+        `<code>?chmap=identity</code> en el player lo desactiva.`;
+      chBox.parentNode.insertBefore(warn, chBox);
+    }
+
     const rows = [];
     for (let i = 0; i < N; i++) {
       const r = document.createElement('div');
