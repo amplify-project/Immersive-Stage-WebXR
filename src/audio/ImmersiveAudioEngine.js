@@ -726,6 +726,9 @@ export class ImmersiveAudioEngine {
       gazeAzimuthDeg: Math.atan2(-f[0], -f[2]) * D,
       gazeElevationDeg: Math.asin(Math.max(-1, Math.min(1, f[1]))) * D,
       bedGain: this._bedGain ? this._bedGain.gain.value : null,
+      // El ángulo total no dice DÓNDE fallas. Separado en azimut y elevación sí:
+      // 42° repartidos como (6°, 42°) es que estás mirando al suelo, no que el
+      // azimut del músico esté mal escrito.
       stems: this._stems.map(s => {
         let d = s.dir;
         if (s.anchored && s.pos) {
@@ -734,8 +737,15 @@ export class ImmersiveAudioEngine {
           d = v.map(x => x / n);
         }
         const dot = d ? d[0] * f[0] + d[1] * f[1] + d[2] * f[2] : 0;
+        const az = d ? Math.atan2(-d[0], -d[2]) * D : 0;
+        const el = d ? Math.asin(Math.max(-1, Math.min(1, d[1]))) * D : 0;
+        const gz = Math.atan2(-f[0], -f[2]) * D;
+        const ge = Math.asin(Math.max(-1, Math.min(1, f[1]))) * D;
+        let dAz = gz - az; while (dAz > 180) dAz -= 360; while (dAz <= -180) dAz += 360;
         return {
           name: s.name, anchored: !!s.anchored,
+          azimuthDeg: az, elevationDeg: el,
+          dAzDeg: dAz, dElDeg: ge - el,
           angleDeg: Math.acos(Math.max(-1, Math.min(1, dot))) * D,   // mirada ↔ músico
           weight: s._weight || 0,
           gain: s.gain ? s.gain.gain.value : null,
