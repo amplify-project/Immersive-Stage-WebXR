@@ -278,6 +278,11 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
     { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0, "closeup": "media/dr_cu.mp4" }
   ],
   "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5 },
+  // Distance attenuation per source, and smoothing for positions pushed in from
+  // outside (AR tracking). Only audible in AR: in 360 the sources ride a sphere
+  // fixed to your head, always at the same distance.
+  "sources":   { "distanceModel": "inverse", "refDistance": 1, "rolloffFactor": 1,
+                 "maxDistance": 10000, "smoothSec": 0.05 },
   "encode":    { "codec": "vp9", "scale": "1920:960", "vbitrate": "6000k", "seg": 2 },
   // Pose telemetry. Empty "url" = /ingest on the server hosting the player.
   "telemetry": { "enabled": false, "url": "", "rateHz": 20, "flushMs": 100 }

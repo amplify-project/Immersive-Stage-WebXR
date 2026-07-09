@@ -513,7 +513,7 @@ async function setupFOA() {
       { azimuthDeg:  30, name: 'TBONE' },   // trombón
       { azimuthDeg:  50, name: 'TPT'   },   // trompeta
     ];
-    let _stems = null, _spot = null;
+    let _stems = null, _spot = null, _sources = null;
     try {
       const _r = await fetch('/scene.json', { cache: 'no-store' });
       if (_r.ok) {
@@ -523,6 +523,7 @@ async function setupFOA() {
             azimuthDeg: +s.azimuthDeg || 0, elevationDeg: +s.elevationDeg || 0,
             name: s.name, closeup: s.closeup || null }));
         if (_sc.spotlight) _spot = _sc.spotlight;
+        if (_sc.sources) _sources = _sc.sources;
         if (_sc.telemetry) telemetryCfg = _sc.telemetry;
       }
     } catch (_) { /* sin escena → DEFAULT_STEMS */ }
@@ -577,6 +578,9 @@ async function setupFOA() {
       // (en VR el zoom normalizado mapea t=0 → factor=zoomMin → boost 0).
       engine.setSpotlightParams({ zoomMin: getZoomFactor() });
       if (_spot) engine.setSpotlightParams(_spot);   // maxBoost/focusExp/restGain/zoomMax
+      // Curva de atenuación por distancia + suavizado de posiciones externas.
+      // Solo se nota en AR: en 360 las fuentes están fijas a la esfera.
+      if (_sources) engine.setSourceParams(_sources);
       toast(`${_stems.length} stems · spotlight en zoom`);
     }
 

@@ -111,6 +111,14 @@ export class ImmersiveAudioEngine {
     this._focusExp  = 4;     // cuán cerrado es el cono de "mirar a" (mayor = más estrecho)
     this._zoomMin   = 1;     // factor de zoom a partir del cual empieza el spotlight
     this._zoomMax   = 2.5;   // factor de zoom que da el boost completo
+    // Atenuación por distancia de cada fuente (ajustable con setSourceParams).
+    // Manda en AR, donde uno se acerca andando; en el 360 las fuentes están
+    // siempre a _stemRadius de la cabeza y la curva es irrelevante.
+    this._distanceModel = 'inverse';
+    this._refDistance   = 1;
+    this._rolloffFactor = 1;
+    this._maxDistance   = 10000;
+    this._posSmoothSec  = 0.05;  // rampa al recolocar por red (0 = salto seco)
   }
 
   // ── Ciclo de vida ────────────────────────────────────────────────────────
@@ -365,8 +373,10 @@ export class ImmersiveAudioEngine {
 
       const p = this.ctx.createPanner();
       p.panningModel  = 'HRTF';
-      p.distanceModel = 'inverse';   // atenuación natural por distancia (útil en AR)
-      p.refDistance   = 1;
+      p.distanceModel = this._distanceModel;   // atenuación por distancia (manda en AR)
+      p.refDistance   = this._refDistance;
+      p.rolloffFactor = this._rolloffFactor;
+      p.maxDistance   = this._maxDistance;
 
       this._chSplitter.connect(g, ch, 0);   // canal 4+i (mono) → gain
       g.connect(p);
@@ -417,13 +427,67 @@ export class ImmersiveAudioEngine {
   }
 
   // Coloca el PannerNode de un stem en una posición mundo.
-  _setPannerPos(s, pos) {
+  /**
+   * Coloca el panner. `smoothSec > 0` interpola en vez de saltar.
+   *
+   * El salto instantáneo vale para lo que se recalcula cada frame (la esfera
+   * solidaria a la cabeza, un Object3D vinculado): ahí ya hay continuidad. Pero
+   * una posición que llega por red a 10–20 Hz sí salta, y un PannerNode movido a
+   * saltos produce zipper noise. Con `setTargetAtTime` la posición persigue el
+   * objetivo con una constante de tiempo del orden del intervalo de llegada.
+   */
+  _setPannerPos(s, pos, smoothSec = 0) {
     if (!s || !s.panner || !pos) return;
     const p = s.panner;
     if (p.positionX) {
-      p.positionX.value = pos[0]; p.positionY.value = pos[1]; p.positionZ.value = pos[2];
+      if (smoothSec > 0 && this.ctx && p.positionX.setTargetAtTime) {
+        const now = this.ctx.currentTime;
+        p.positionX.setTargetAtTime(pos[0], now, smoothSec);
+        p.positionY.setTargetAtTime(pos[1], now, smoothSec);
+        p.positionZ.setTargetAtTime(pos[2], now, smoothSec);
+      } else {
+        p.positionX.value = pos[0]; p.positionY.value = pos[1]; p.positionZ.value = pos[2];
+      }
     } else if (p.setPosition) {
-      p.setPosition(pos[0], pos[1], pos[2]);
+      p.setPosition(pos[0], pos[1], pos[2]);   // API heredada: sin rampa posible
+    }
+  }
+
+  /**
+   * Curva de atenuación por distancia de las fuentes y suavizado de sus saltos
+   * de posición. Relevante sobre todo en AR, donde el volumen de cada músico lo
+   * decide el acercarse andando y no el zoom.
+   *
+   * @param {object}  [o]
+   * @param {string}  [o.distanceModel]  'inverse' | 'linear' | 'exponential'
+   * @param {number}  [o.refDistance]    distancia a la que la fuente suena a 1
+   * @param {number}  [o.rolloffFactor]  cuán rápido cae al alejarse (1 = natural)
+   * @param {number}  [o.maxDistance]    distancia a partir de la cual no cae más
+   * @param {number}  [o.smoothSec]      constante de tiempo al recolocar (0 = salto)
+   */
+  setSourceParams({ distanceModel, refDistance, rolloffFactor, maxDistance, smoothSec } = {}) {
+    if (distanceModel  != null) this._distanceModel = distanceModel;
+    if (refDistance    != null) this._refDistance   = refDistance;
+    if (rolloffFactor  != null) this._rolloffFactor = rolloffFactor;
+    if (maxDistance    != null) this._maxDistance   = maxDistance;
+    if (smoothSec      != null) this._posSmoothSec  = Math.max(0, smoothSec);
+    this._applySourceParams();
+  }
+
+  getSourceParams() {
+    return { distanceModel: this._distanceModel, refDistance: this._refDistance,
+             rolloffFactor: this._rolloffFactor, maxDistance: this._maxDistance,
+             smoothSec: this._posSmoothSec };
+  }
+
+  // Vuelca la curva de atenuación sobre los panners ya creados.
+  _applySourceParams() {
+    for (const s of this._stems) {
+      if (!s.panner) continue;
+      s.panner.distanceModel  = this._distanceModel;
+      s.panner.refDistance    = this._refDistance;
+      s.panner.rolloffFactor  = this._rolloffFactor;
+      s.panner.maxDistance    = this._maxDistance;
     }
   }
 
@@ -443,7 +507,9 @@ export class ImmersiveAudioEngine {
     s.object3d = null;        // posición explícita → desvincula del Object3D
     s.anchored = true;        // coordenadas de sala: distancia y rumbo vs. cabeza
     s.pos = pos;
-    this._setPannerPos(s, pos);
+    // Punto de entrada de las posiciones externas (tracking por cámaras, etc.):
+    // llegan a decenas de Hz como mucho, así que se interpolan.
+    this._setPannerPos(s, pos, this._posSmoothSec);
     this._updateSpotlight();
   }
 
@@ -472,7 +538,8 @@ export class ImmersiveAudioEngine {
     if (!s) return;
     s.object3d = null;
     s.anchored = false;
-    if (s.dir && s.panner) { s.pos = this._staticPos(s); this._setPannerPos(s, s.pos); }
+    // Suavizado: el salto de la sala a la esfera de la cabeza puede sonar a clic.
+    if (s.dir && s.panner) { s.pos = this._staticPos(s); this._setPannerPos(s, s.pos, this._posSmoothSec); }
     this._updateSpotlight();
   }
 
