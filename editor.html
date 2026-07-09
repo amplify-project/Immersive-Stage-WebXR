@@ -451,8 +451,13 @@ function addLiveStem() {
 }
 
 // <option> list of media/ videos for the close-up selector.
+//
+// The 360 video itself is never offered. A close-up is a separate crop of one
+// musician; picking the equirect here makes ffmpeg open and decode the whole 360
+// once more per stem — three stems took 1000% CPU while NVENC sat mostly idle —
+// and the player would show the entire scene as a "close-up".
 function videoOptionsHTML(sel) {
-  const vids = media.filter(m=>m.kind==='video');
+  const vids = media.filter(m => m.kind === 'video' && m.file !== scene.video);
   return '<option value="">— no close-up —</option>' +
     vids.map(m=>`<option value="${m.file}" ${m.file===sel?'selected':''}>${m.name}</option>`).join('');
 }

@@ -316,8 +316,17 @@ async function handleAPI(req, res, pathname) {
           // Close-ups (Caso B): vídeo "de cerca" por músico → pistas extra en el
           // mismo manifest. Solo los stems que tienen uno, en orden (= Representation
           // 1..N en el MPD); el player reconstruye el mapa stem→pista igual.
-          CLOSEUPS: (scene.stems || []).filter(s => s.closeup).map(s => s.closeup).join(';'),
+          // Un close-up que apunta al PROPIO vídeo 360 no es un close-up: hace
+          // que ffmpeg abra y decodifique otra vez el equirect entero por cada
+          // stem (1000% de CPU con tres, y NVENC casi parado). Se descarta.
+          CLOSEUPS: (scene.stems || [])
+            .filter(s => s.closeup && s.closeup !== scene.video)
+            .map(s => s.closeup).join(';'),
         };
+        const bogus = (scene.stems || []).filter(s => s.closeup && s.closeup === scene.video);
+        if (bogus.length)
+          console.warn(`⚠  Ignorados ${bogus.length} close-up(s) que apuntaban al vídeo 360 ` +
+                       `(${bogus.map(s => s.name).join(', ')}). Un close-up es un recorte aparte.`);
         if (enc.closeupScale)    env.CLOSEUP_SCALE = enc.closeupScale;
         if (enc.closeupVbitrate) env.CLOSEUP_VBITRATE = enc.closeupVbitrate;
       }

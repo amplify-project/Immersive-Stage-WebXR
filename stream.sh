@@ -127,7 +127,15 @@ if [[ -n "$CLOSEUPS" ]]; then
   for c in "${_rawc[@]}"; do
     c="${c#"${c%%[![:space:]]*}"}"   # ltrim
     c="${c%"${c##*[![:space:]]}"}"   # rtrim
-    [[ -n "$c" ]] && CLOSE_ARR+=("$c")
+    [[ -z "$c" ]] && continue
+    # Un close-up NO puede ser el propio 360: ffmpeg abriría y decodificaría el
+    # equirect entero una vez más por cada stem (con tres: 1000% de CPU y NVENC
+    # ocioso), y el player mostraría la escena completa como "primer plano".
+    if [[ "$c" == "$VIDEO" ]]; then
+      echo "  WARNING: close-up '$c' es el propio vídeo 360 → ignorado."
+      continue
+    fi
+    CLOSE_ARR+=("$c")
   done
 fi
 NCLOSE=${#CLOSE_ARR[@]}
