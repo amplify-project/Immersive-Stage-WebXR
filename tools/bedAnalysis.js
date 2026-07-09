@@ -55,6 +55,30 @@ function decode(file, ch, seconds, band) {
   });
 }
 
+/**
+ * Loudness integrada (EBU R128), en LUFS. Es lo que hay que comparar entre
+ * stems: la energía RMS la falsean los silencios de quien toca menos, y la
+ * puntual la falsean los picos de la batería. Devuelve null si no hay medida.
+ */
+function loudness(file, seconds, ch = null) {
+  return new Promise((resolve) => {
+    // `-ac 1` antes del filtro: mezcla a mono sea cual sea el layout de entrada,
+    // así vale igual para un stem mono, uno estéreo o un canal suelto del bed.
+    const pre = ch == null ? ['-ac', '1', '-af', 'ebur128=framelog=quiet']
+                           : ['-filter_complex', `[0:a]pan=mono|c0=c${ch},ebur128=framelog=quiet`];
+    const p = spawn('ffmpeg', ['-hide_banner', '-nostats', '-t', String(seconds), '-i', file,
+      ...pre, '-f', 'null', '-']);
+    let err = '';
+    p.stderr.on('data', c => err += c);
+    p.on('error', () => resolve(null));
+    p.on('close', () => {
+      const m = /Integrated loudness[\s\S]*?I:\s+(-?[\d.]+)/.exec(err);
+      const v = m ? parseFloat(m[1]) : NaN;
+      resolve(Number.isFinite(v) && v > -70 ? v : null);   // -inf → silencio
+    });
+  });
+}
+
 /** Número de canales del primer stream de audio. */
 function channels(file) {
   return new Promise((resolve, reject) => {
@@ -134,10 +158,34 @@ async function analyze({ bed, bedFormat = 'fuma', stems = [], seconds = 120, res
     levelsDb: levels.map(v => +v.toFixed(1)),
   };
 
+  // ── 1b. Equilibrio de niveles entre stems ───────────────────────────────────
+  // El spotlight sube a todos con el mismo maxBoost, así que el que se grabó por
+  // debajo del bed no se despega de él ni mirándolo de frente. Se mide contra la
+  // omni del bed, que es la referencia de "lo que suena de fondo", y se propone
+  // el trim que deja a cada músico al mismo nivel que el más fuerte.
+  const bedLufs = await loudness(bedPath, seconds, L.W);
+  const levelsRaw = [];
+  for (const s of stems) {
+    let lufs = null;
+    try { lufs = await loudness(resolve(s.file), seconds); } catch (_) {}
+    levelsRaw.push({ name: s.name, loudnessLufs: lufs });
+  }
+  const loud = levelsRaw.filter(x => x.loudnessLufs != null).map(x => x.loudnessLufs);
+  const ref = loud.length ? Math.max(...loud) : null;
+  const balance = {
+    bedLoudnessLufs: bedLufs,
+    stems: levelsRaw.map(x => ({
+      ...x,
+      overBedDb: (x.loudnessLufs == null || bedLufs == null) ? null : +(x.loudnessLufs - bedLufs).toFixed(1),
+      suggestedGainDb: (x.loudnessLufs == null || ref == null) ? null : +(ref - x.loudnessLufs).toFixed(1),
+    })),
+  };
+
   // Sin componente vertical no hay campo ambisónico que analizar, y el ajuste
   // del giro devolvería un número con toda la confianza del mundo. Parar aquí.
+  // El equilibrio de niveles sí vale, y va incluido: no depende del bed.
   if (zCheck.flat)
-    return { bedFormat, secondsAnalyzed: seconds, zCheck, stems: [], alignment: null };
+    return { bedFormat, secondsAnalyzed: seconds, zCheck, balance, stems: [], alignment: null };
 
   // ── 2. Dirección de llegada de cada stem ────────────────────────────────────
   const bp = await Promise.all([0, 1, 2, 3].map(c => decode(bedPath, c, seconds, BAND)));
@@ -148,7 +196,7 @@ async function analyze({ bed, bedFormat = 'fuma', stems = [], seconds = 120, res
     try { sig.push({ s, a: await decode(resolve(s.file), 0, seconds, BAND) }); }
     catch (_) { /* stem ilegible: fuera */ }
   }
-  if (!sig.length) return { bedFormat, zCheck, stems: [], alignment: null };
+  if (!sig.length) return { bedFormat, zCheck, balance, stems: [], alignment: null };
 
   const len = Math.min(W.length, ...sig.map(x => x.a.length)) - 2000;
   const nF = Math.max(0, Math.floor((len - FR) / HOP));
@@ -243,7 +291,7 @@ async function analyze({ bed, bedFormat = 'fuma', stems = [], seconds = 120, res
     };
   }
 
-  return { bedFormat, secondsAnalyzed: seconds, zCheck, stems: results, alignment };
+  return { bedFormat, secondsAnalyzed: seconds, zCheck, balance, stems: results, alignment };
 }
 
 module.exports = { analyze, LAYOUT };

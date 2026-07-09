@@ -290,8 +290,15 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
   "bed":   "media/ambisonic_bformat.wav",
   "bedFormat": "fuma",                       // fuma | ambix
   "stems": [
-    // "closeup" is optional (Caso B): a per-musician close-up video track
-    { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0, "closeup": "media/dr_cu.mp4" }
+    // "closeup" is optional (Caso B): a per-musician close-up video track.
+    // "gainDb" is optional: a fixed trim for this take. The spotlight boosts
+    // every stem by the same maxBoost, so a musician recorded below the bed
+    // never lifts off it, however hard you look at him. "Analyse bed" measures
+    // the imbalance and fills these in.
+    // "elevationDeg" is not decoration: the focus cone is circular around your
+    // gaze, so a musician 40° below the camera is 40° off however well you aim.
+    { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0,
+      "gainDb": 0, "closeup": "media/dr_cu.mp4" }
   ],
   // `bedDuck` pulls the FOA bed down as you focus a musician. Without it the
   // spotlight can only add a stem on top of the bed's own copy of that same

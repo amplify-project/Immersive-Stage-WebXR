@@ -176,6 +176,9 @@
         <div><label>Name</label><input type="text" id="selName"></div>
         <div style="flex:0 0 110px"><label>Azimuth °</label><input type="number" id="selAz" step="1"></div>
         <div style="flex:0 0 110px"><label>Elevation °</label><input type="number" id="selEl" step="1"></div>
+        <!-- Trim de la toma: iguala micros y previos dispares. Sin él, el músico
+             grabado por debajo del bed nunca se despega de él bajo el spotlight. -->
+        <div style="flex:0 0 110px"><label>Gain dB</label><input type="number" id="selGain" step="0.5"></div>
       </div>
     </div>
     <p class="hint">Up = front of the video (0°). Left = +90°. Right = −90°.</p>
@@ -422,6 +425,7 @@ function bindControls() {
   $('selName').oninput = e => { if(selected>=0){ scene.stems[selected].name=e.target.value; renderStems(); } };
   $('selAz').oninput   = e => { if(selected>=0){ scene.stems[selected].azimuthDeg=+e.target.value; renderStems(); drawRadar(); } };
   $('selEl').oninput   = e => { if(selected>=0){ scene.stems[selected].elevationDeg=+e.target.value; } };
+  $('selGain').oninput = e => { if(selected>=0){ scene.stems[selected].gainDb=+e.target.value; } };
 }
 
 // ── Stems ───────────────────────────────────────────────────────────────────
@@ -487,6 +491,7 @@ function syncSelPanel() {
   p.style.display='block';
   const s = scene.stems[selected];
   $('selName').value = s.name||''; $('selAz').value = Math.round(s.azimuthDeg); $('selEl').value = Math.round(s.elevationDeg||0);
+  $('selGain').value = s.gainDb || 0;
 }
 
 // ── Radar (azimuth by drag) ───────────────────────────────────────────────────
@@ -561,6 +566,18 @@ async function analyseBed() {
     await saveScene(false);
     toast(`alignment → yaw ${scene.alignment.yawOffsetDeg}°`);
   };
+  const gains = $('bedGains');
+  if (gains) gains.onclick = async () => {
+    let n = 0;
+    for (const s of r.balance.stems) {
+      if (s.suggestedGainDb == null) continue;
+      const t = scene.stems.find(x => x.name === s.name);
+      if (t) { t.gainDb = s.suggestedGainDb; n++; }
+    }
+    await saveScene(false);
+    renderStems(); syncSelPanel();
+    toast(`gainDb set on ${n} stems`);
+  };
 }
 
 function renderBedReport(r) {
@@ -603,7 +620,28 @@ function renderBedReport(r) {
       `</p><button id="bedApply" type="button">Apply to scene.json</button>`;
   }
 
-  return `<p class="hint">${zLine}<br>Levels per channel: ${z.levelsDb.map((v,i)=>`c${i} ${v} dB`).join(' · ')}</p>` +
+  // Equilibrio de niveles. Un stem por debajo del bed no se despega de él bajo el
+  // spotlight, mírelo quien lo mire: el boost es el mismo para todos.
+  let bal = '';
+  if (r.balance) {
+    const brows = r.balance.stems.map(s => {
+      if (s.loudnessLufs == null) return `<tr><td>${s.name}</td><td colspan="3">unreadable</td></tr>`;
+      const warn = s.overBedDb != null && s.overBedDb < 3
+        ? `<span style="color:#fa4">buried in the bed</span>` : '';
+      return `<tr><td>${s.name}</td><td>${s.loudnessLufs} LUFS</td>` +
+        `<td>${s.overBedDb > 0 ? '+' : ''}${s.overBedDb} dB</td>` +
+        `<td>${s.suggestedGainDb > 0 ? '+' : ''}${s.suggestedGainDb} dB</td><td>${warn}</td></tr>`;
+    }).join('');
+    bal = `<p class="hint">Stem levels, against the bed's omni (${r.balance.bedLoudnessLufs} LUFS). ` +
+      `A stem that does not sit clearly above the bed cannot be spotlit — the bed already contains that ` +
+      `musician, so raising his stem only thickens him.</p>` +
+      `<table style="width:100%;font-size:12px;border-collapse:collapse">` +
+      `<tr style="text-align:left;opacity:.6"><th>stem</th><th>loudness</th><th>over bed</th>` +
+      `<th>suggested gain</th><th></th></tr>${brows}</table>` +
+      `<button id="bedGains" type="button">Apply suggested gains</button>`;
+  }
+
+  return `<p class="hint">${zLine}</p>` + bal +
     `<table style="width:100%;font-size:12px;border-collapse:collapse">` +
     `<tr style="text-align:left;opacity:.6"><th>stem</th><th>heard at</th><th>elev</th><th>scene</th><th></th></tr>${rows}</table>` +
     align;

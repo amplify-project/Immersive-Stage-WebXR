@@ -97,6 +97,12 @@ export class ImmersiveAudioEngine {
       az:   (s.azimuthDeg   || 0) * D2R,
       el:   (s.elevationDeg || 0) * D2R,
       name: s.name || ('stem' + i),
+      // Los stems no vienen igualados: cada músico se grabó con su micro y su
+      // preamplificador. Sin este trim, `maxBoost` sube a todos lo mismo y el
+      // que se grabó 6 dB por debajo nunca llega a despegarse del bed, por más
+      // que se le mire. Es una propiedad de la TOMA, así que vive en scene.json.
+      trimDb: s.gainDb || 0,
+      trim: null,
       gain: null, panner: null, dir: null,
       pos: null,          // posición mundo [x,y,z] (anclada) o derivada de dir
       anchored: false,    // true → coordenadas de sala; false → esfera en la cabeza
@@ -410,6 +416,11 @@ export class ImmersiveAudioEngine {
       // attach) si está anclada; si no, sobre la esfera centrada en la cabeza.
       if (!s.anchored) s.pos = this._staticPos(s);
 
+      // Trim fijo de la toma → gain del spotlight → panner. Separados a propósito:
+      // el spotlight escribe su gain sin saber nada del desequilibrio de niveles.
+      const t = this.ctx.createGain();
+      t.gain.value = Math.pow(10, s.trimDb / 20);
+
       const g = this.ctx.createGain();
       g.gain.value = this._restGain;
 
@@ -420,10 +431,11 @@ export class ImmersiveAudioEngine {
       p.rolloffFactor = this._rolloffFactor;
       p.maxDistance   = this._maxDistance;
 
-      this._chSplitter.connect(g, this._out(ch), 0);   // canal 4+i (mono) → gain
+      this._chSplitter.connect(t, this._out(ch), 0);   // canal 4+i (mono) → trim
+      t.connect(g);
       g.connect(p);
       p.connect(this._stemBus);
-      s.gain = g; s.panner = p;
+      s.trim = t; s.gain = g; s.panner = p;
       this._setPannerPos(s, s.pos);          // coloca el panner en su posición
     });
   }
@@ -707,6 +719,22 @@ export class ImmersiveAudioEngine {
   }
 
   /**
+   * Trim de un stem, en dB. Iguala niveles de grabación dispares: el spotlight
+   * sube a todos por igual, así que un músico grabado 6 dB por debajo del resto
+   * no se despega del bed por mucho que se le mire. Se ajusta en vivo desde la
+   * consola y su sitio definitivo es scene.json → `stems[i].gainDb`.
+   * @param {number|string} which  índice o nombre del stem
+   * @param {number} dB
+   */
+  setStemGainDb(which, dB) {
+    const i = typeof which === 'number' ? which : this._stems.findIndex(s => s.name === which);
+    const s = this._stems[i];
+    if (!s) throw new Error(`stem desconocido: ${which}`);
+    s.trimDb = dB;
+    if (s.trim) s.trim.gain.setTargetAtTime(Math.pow(10, dB / 20), this.ctx.currentTime, 0.05);
+  }
+
+  /**
    * Estado instantáneo del spotlight: qué zoom ve, qué peso tiene cada stem y
    * qué ganancia ha alcanzado de verdad el GainNode. Sirve para ver por qué un
    * stem no sube — si el peso es 0 el problema es la mirada o el zoom; si el
@@ -748,6 +776,7 @@ export class ImmersiveAudioEngine {
           dAzDeg: dAz, dElDeg: ge - el,
           angleDeg: Math.acos(Math.max(-1, Math.min(1, dot))) * D,   // mirada ↔ músico
           weight: s._weight || 0,
+          trimDb: s.trimDb,
           gain: s.gain ? s.gain.gain.value : null,
         };
       }),
