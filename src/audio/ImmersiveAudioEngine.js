@@ -717,14 +717,30 @@ export class ImmersiveAudioEngine {
     const zN = hi - lo > 1e-6
       ? Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)))
       : (this._zoomFactor >= hi ? 1 : 0);
+    const f = this._lookForward, lp = this._listenerPos;
+    // Azimut/elevación de la mirada en la misma convención que scene.json: apunta
+    // a un músico en la imagen y lee aquí el azimut que hay que escribirle.
+    const D = 180 / Math.PI;
     return {
       zoomFactor: this._zoomFactor, zoomMin: lo, zoomMax: hi, zN,
+      gazeAzimuthDeg: Math.atan2(-f[0], -f[2]) * D,
+      gazeElevationDeg: Math.asin(Math.max(-1, Math.min(1, f[1]))) * D,
       bedGain: this._bedGain ? this._bedGain.gain.value : null,
-      stems: this._stems.map(s => ({
-        name: s.name, anchored: !!s.anchored,
-        weight: s._weight || 0,
-        gain: s.gain ? s.gain.gain.value : null,
-      })),
+      stems: this._stems.map(s => {
+        let d = s.dir;
+        if (s.anchored && s.pos) {
+          const v = [s.pos[0] - lp[0], s.pos[1] - lp[1], s.pos[2] - lp[2]];
+          const n = Math.hypot(...v) || 1;
+          d = v.map(x => x / n);
+        }
+        const dot = d ? d[0] * f[0] + d[1] * f[1] + d[2] * f[2] : 0;
+        return {
+          name: s.name, anchored: !!s.anchored,
+          angleDeg: Math.acos(Math.max(-1, Math.min(1, dot))) * D,   // mirada ↔ músico
+          weight: s._weight || 0,
+          gain: s.gain ? s.gain.gain.value : null,
+        };
+      }),
     };
   }
 

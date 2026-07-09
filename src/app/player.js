@@ -141,9 +141,10 @@ function updateSpotLog() {
   spotLogEl.textContent =
     `FOV ${camera.fov.toFixed(0)}°  factor ${s.zoomFactor.toFixed(2)} ` +
     `[${s.zoomMin.toFixed(2)}…${s.zoomMax.toFixed(2)}]  zoom ${(s.zN * 100).toFixed(0)}%\n` +
+    `mirada az ${s.gazeAzimuthDeg.toFixed(0)}°  el ${s.gazeElevationDeg.toFixed(0)}°   ` +
     `bed ${(s.bedGain == null ? 1 : s.bedGain).toFixed(2)}\n` +
-    s.stems.map(t => `${t.name.padEnd(8)} peso ${t.weight.toFixed(2)}  ` +
-                     `ganancia ${(t.gain == null ? 0 : t.gain).toFixed(2)}`).join('\n');
+    s.stems.map(t => `${t.name.padEnd(8)} a ${t.angleDeg.toFixed(0).padStart(3)}°  ` +
+                     `peso ${t.weight.toFixed(2)}  ganancia ${(t.gain == null ? 0 : t.gain).toFixed(2)}`).join('\n');
 }
 
 function getZoomFactor() {
