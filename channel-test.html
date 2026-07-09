@@ -37,6 +37,31 @@
     <code>ChannelSplitter</code>. Mide cuántos canales llegan separados — si son 10, la Quest
     aguanta la banda completa.
   </p>
+  <p class="sub">
+    <b>¿El navegador reordena los canales?</b> Genera una pista de tonos, uno por canal, y mira si
+    cada CH marca la frecuencia que le toca. Si no, el decodificador está permutando y hay que
+    remapear en el motor. Con 7 canales:
+    <code>?src=/chtest/manifest.mpd&amp;ch=7</code> → CH0 200, CH1 300, CH2 400, CH3 500,
+    CH4 800, CH5 1200, CH6 1600 Hz.
+  </p>
+  <!--
+    Regenerar la pista de tonos (mismo encoder que stream.sh: mapping_family 255):
+      ffmpeg -f lavfi -i "sine=f=200:d=30" -f lavfi -i "sine=f=300:d=30" \
+             -f lavfi -i "sine=f=400:d=30" -f lavfi -i "sine=f=500:d=30" \
+             -f lavfi -i "sine=f=800:d=30" -f lavfi -i "sine=f=1200:d=30" \
+             -f lavfi -i "sine=f=1600:d=30" \
+             -filter_complex "[0:a][1:a][2:a][3:a][4:a][5:a][6:a]amerge=inputs=7[a]" \
+             -map "[a]" -c:a libopus -mapping_family 255 -b:a 448k -ar 48000 \
+             -f dash -dash_segment_type webm -seg_duration 6 \
+             -init_seg_name 'init_$RepresentationID$.webm' \
+             -media_seg_name 'chunk_$RepresentationID$_$Number%05d$.webm' \
+             chtest/manifest.mpd
+    Verificado: ffmpeg lo vuelve a leer en orden identidad, así que sirve de referencia.
+  -->
+  <p class="sub">
+    Ajusta también el número de canales con <code>?ch=N</code> y las etiquetas de los stems con
+    <code>?labels=DR,GT,SAX</code>.
+  </p>
 
   <button id="start">▶ START TEST</button>
 
