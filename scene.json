@@ -1,14 +1,56 @@
 {
-  "mode": "live",
+  "mode": "vod",
   "video": "media/video.mp4",
   "bed": "media/ambisonic_bformat.wav",
   "bedFormat": "fuma",
-  "stems": [],
+  "stems": [
+    {
+      "file": "media/DR - stem - sync.mp3",
+      "name": "DR",
+      "azimuthDeg": 1,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/GT - stem - sync.mp3",
+      "name": "GT",
+      "azimuthDeg": 133,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/SAX - stem - sync.mp3",
+      "name": "SAX",
+      "azimuthDeg": -143,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/KEY - stem - sync.mp3",
+      "name": "KEY",
+      "azimuthDeg": -90,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/TPT - stem - sync.mp3",
+      "name": "TPT",
+      "azimuthDeg": 63,
+      "elevationDeg": 0
+    },
+    {
+      "file": "media/TBONE - stem - sync.mp3",
+      "name": "TBONE",
+      "azimuthDeg": -42,
+      "elevationDeg": 0
+    }
+  ],
   "spotlight": {
     "maxBoost": 1.5,
     "focusExp": 4,
     "restGain": 0,
-    "zoomMax": 3.6
+    "zoomMax": 3.6,
+    "bedDuck": 0.7
+  },
+  "alignment": {
+    "yawOffsetDeg": -165,
+    "mirror": false
   },
   "encode": {
     "codec": "h264_nvenc",
@@ -46,8 +88,8 @@
     }
   },
   "telemetry": {
-    "enabled": false,
-    "url": "wss://your-relay.example/ingest",
+    "enabled": true,
+    "url": "",
     "rateHz": 20,
     "flushMs": 100
   }

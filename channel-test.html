@@ -37,6 +37,21 @@
     <code>ChannelSplitter</code>. Mide cuántos canales llegan separados — si son 10, la Quest
     aguanta la banda completa.
   </p>
+  <p class="sub">
+    <b>¿El navegador reordena los canales?</b> La pista de tonos lleva una frecuencia por canal del
+    fichero: <b>canal 0 → 200 Hz, 1 → 300, 2 → 400, 3 → 500, 4 → 800, 5 → 1200, 6 → 1600</b>.
+    Abre <code>?src=/chtest/manifest.mpd&amp;ch=7</code> y comprueba que <b>cada fila marca el tono
+    del canal fuente que dice llevar</b> — las filas ya vienen etiquetadas con el mapa aplicado.
+    Para ver las salidas crudas del splitter, sin interpretar, añade <code>&amp;chmap=identity</code>:
+    ahí es donde se aprecia la permutación.
+  </p>
+  <p class="sub">
+    Genera la pista con <code>./make-chtest.sh 7</code> (o cualquier N: crea <code>chtestN/</code>).
+    Ajusta los canales con <code>?ch=N</code>, las etiquetas de los stems con
+    <code>?labels=DR,GT,SAX</code> y los tonos esperados con <code>?tones=…</code>.
+    Solo la fila de <b>7 canales</b> del mapa está medida en un dispositivo real; las de 5, 6 y 8
+    salen de la tabla de Chromium y conviene verificarlas así antes de fiarse.
+  </p>
 
   <button id="start">▶ START TEST</button>
 
@@ -67,21 +82,74 @@
   <audio id="aud" crossorigin="anonymous"></audio>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.6/shaka-player.compiled.js"></script>
-  <script>
+  <script type="module">
+    // La tabla la importamos del mismo módulo que usa el player, no una copia
+    // que se pueda quedar desfasada.
+    import { resolveChannelMap, invertMap } from './src/audio/opusChannelMap.js';
+
     // Por defecto: 10 canales (4 FOA + 6 stems) desde encoded10/, etiquetados con
     // los músicos del proyecto. Override opcional con ?ch= / ?src= / ?labels=.
     const _q = new URLSearchParams(location.search);
     const N = parseInt(_q.get('ch') || '10', 10);
     const MANIFEST = _q.get('src') || (location.origin + '/encoded10/manifest.mpd');
     const FOA = ['FOA W', 'FOA Y', 'FOA Z', 'FOA X'];
-    const _stemLabels = (_q.get('labels') || 'DR,GT,KEY,SAX,TBONE,TPT')
-      .split(',').map(s => s.trim()).filter(Boolean);
-    const LABELS = Array.from({ length: N }, (_, i) =>
-      i < 4 ? `CH${i} · ${FOA[i]}`
-            : `CH${i} · ${_stemLabels[i - 4] || ('Stem ' + (i - 4 + 1))}`);
+    const NSTEMS = Math.max(0, N - 4);
+
+    // Las etiquetas por defecto son las de la banda de 6 stems. Aplicarlas a una
+    // pista de otro tamaño pone nombres ajenos sobre canales reales (con 3 stems,
+    // el canal 6 es SAX, no KEY). Solo se usan si el número cuadra.
+    const _labelsGiven = _q.get('labels');
+    const _defaults = NSTEMS === 6 ? 'DR,GT,KEY,SAX,TBONE,TPT' : '';
+    const _stemLabels = (_labelsGiven || _defaults).split(',').map(s => s.trim()).filter(Boolean);
+    const LABELS_BAD = !!_labelsGiven && _stemLabels.length !== NSTEMS;
+
+    // Tonos esperados por canal FUENTE, para autocomprobar el mapa. Automático con
+    // la pista chtest/; overridable con ?tones=200,300,…
+    const _tonesParam = _q.get('tones') || (/\/chtest\//.test(MANIFEST) ? '200,300,400,500,800,1200,1600' : '');
+    const TONES = _tonesParam ? _tonesParam.split(',').map(Number) : null;
+
+    // Una fila = una SALIDA del ChannelSplitter, que es lo único que medimos.
+    // Pero con 3..8 canales el decodificador de Chromium permuta, así que la
+    // salida i NO lleva el canal i del fichero. Etiquetamos cada fila con el
+    // canal FUENTE que de verdad transporta; si no, la herramienta miente
+    // exactamente igual que mentía el motor antes del remapeo.
+    // ?chmap=identity muestra las salidas crudas, sin interpretar (para MEDIR el
+    // reordenado); por defecto se aplica el mismo mapa que el player.
+    const srcToOut = resolveChannelMap(N, _q.get('chmap') || 'auto');
+    const outToSrc = invertMap(srcToOut);
+    const REMAPPED = outToSrc.some((src, out) => src !== out);
+
+    const srcName = s => (s < 4 ? (FOA[s] || ('CH' + s))
+                                : (_stemLabels[s - 4] || ('Stem ' + (s - 4 + 1))));
+    const LABELS = Array.from({ length: N }, (_, out) => {
+      const src = outToSrc[out];
+      return `CH${out} · ${srcName(src)}` + (src !== out ? ` (canal ${src} del fichero)` : '');
+    });
 
     const aud = document.getElementById('aud');
     const chBox = document.getElementById('channels');
+
+    const note = (html) => {
+      const p = document.createElement('p');
+      p.className = 'sub';
+      p.innerHTML = html;
+      chBox.parentNode.insertBefore(p, chBox);
+    };
+
+    if (REMAPPED)
+      note(`⚠️ Con <b>${N} canales</b> el decodificador reordena: la salida i del ` +
+        `<code>ChannelSplitter</code> NO es el canal i del fichero. Mapa aplicado a las etiquetas ` +
+        `(canal fuente → salida): <code>[${srcToOut}]</code>. El motor lo deshace; ` +
+        `<code>?chmap=identity</code> en el player lo desactiva.`);
+
+    if (LABELS_BAD)
+      note(`⚠️ <code>?labels=</code> trae ${_stemLabels.length} nombres y la pista tiene ` +
+        `${NSTEMS} stems. Los nombres sobrantes o que falten dejan filas mal etiquetadas.`);
+
+    if (TONES)
+      note(`Autocomprobación: cada fila debe marcar el tono de su canal fuente ` +
+        `(<code>${TONES.join(', ')} Hz</code> para los canales 0..${TONES.length - 1}).`);
+
     const rows = [];
     for (let i = 0; i < N; i++) {
       const r = document.createElement('div');
@@ -172,7 +240,18 @@
         const live = rms > 1e-4;
         if (live) active++;
         rows[i].meta.className = 'meta ' + (live ? 'live' : 'dead');
-        rows[i].metaB.textContent = live ? (hz + ' Hz') : 'silencio';
+
+        // Con pista de tonos: ¿el tono coincide con el del canal FUENTE que esta
+        // fila dice llevar? Tolerancia = 2 bins de la FFT (a 48 kHz/2048 ≈ 23 Hz).
+        let verdict = '';
+        if (TONES && live) {
+          const expected = TONES[outToSrc[i]];
+          if (expected != null) {
+            const tol = 2 * ctx.sampleRate / a.fftSize;
+            verdict = Math.abs(hz - expected) <= tol ? ` ✓ (${expected})` : ` ✗ esperaba ${expected}`;
+          }
+        }
+        rows[i].metaB.textContent = live ? (hz + ' Hz' + verdict) : 'silencio';
       }
       const c = $('count');
       c.textContent = active;

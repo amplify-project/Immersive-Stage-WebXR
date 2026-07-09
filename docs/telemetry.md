@@ -51,11 +51,16 @@ verbatim instead of deriving. No consumer change needed.
 ```json
 "telemetry": {
   "enabled": true,
-  "url": "wss://your-relay.example/ingest",
+  "url": "",
   "rateHz": 20,
   "flushMs": 100
 }
 ```
+
+An empty `url` means `/ingest` on the origin serving the player, which `server.js`
+proxies to the relay (see below) — the usual setup, and the one that avoids a
+second certificate prompt on the headset. Set `url` only when the relay lives on
+another machine.
 
 URL overrides (handy for testing without editing the scene):
 
@@ -87,9 +92,15 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 | `mt`  | media presentation time (s) — what they were seeing |
 | `p`   | head position `[x,y,z]`                             |
 | `q`   | head orientation quaternion `[x,y,z,w]`            |
-| `z`   | zoom / attention depth                              |
-| `f`   | focused source index (`-1` = none)                  |
+| `z`   | zoom / attention depth, normalized `0..1`            |
+| `f`   | focused musician: index into `scene.json` → `stems` (`-1` = none) |
 | `g`   | *optional* real eye-gaze `[x,y,z]` (else omitted)   |
+
+`f` is whichever musician the spotlight weighs most (`engine.getFocusedStem`), so
+it is reported whether or not the scene defines `closeup` tracks — a viewer can
+attend to a musician without a close-up video existing for them. It stays `-1`
+until `z` is high enough for one stem to dominate, and in AR (all sources audible
+at their own place) it is always `-1`.
 
 ### Relay → consumer (`/consume`)
 
@@ -109,11 +120,39 @@ receive order, not client `t` (headset clocks are unsynced).
 
 ## Running the relay
 
+Nothing to run: `server.js` hosts the relay on its own port. Install the one
+dependency once and start the player server as usual.
+
 ```bash
-cd telemetry
-npm install
-npm start                 # listens on :8090  (PORT, TTL_MS, SWEEP_MS env vars)
+cd telemetry && npm install     # `ws`, the project's only npm dependency
+cd .. && node server.js         # player + editor + relay, one process, one port
 ```
+
+`GET /telemetry/health` reports how many headsets and consumers are attached —
+the quickest way to confirm from the Quest itself that telemetry is arriving.
+Set `RELAY=off` to leave the relay out; if `ws` is not installed the server says
+so and serves the player anyway.
+
+### Why it is hosted, not a separate port
+
+WebXR only runs in a secure context, so the player is served over HTTPS — and a
+browser blocks a plain `ws://` socket opened from an `https://` page as mixed
+content. Giving the relay its own port would mean giving it its own certificate,
+and a **self-signed** certificate has to be trusted once per host *and port*: the
+headset would silently refuse the socket until you also visited the relay's port
+and accepted the warning there. Hosting `/ingest` and `/consume` on the player's
+server sidesteps that entirely — one origin, one port, one certificate, the one
+the headset already accepted to load the player.
+
+`createRelay({ server })` attaches to an existing server; called without it, the
+relay listens on its own port exactly as before (`node telemetry/relay.js`, or
+embedded by the simulator), so nothing about the wire protocol or deployment
+shape is locked in. In production, nginx terminates TLS with a real certificate
+and routes the same two paths to a standalone relay.
+
+**Exposing a standalone relay directly** to browsers is opt-in TLS: `TLS=on`
+reuses `../certs/{key,cert}.pem`, or name other paths with `TLS_KEY` / `TLS_CERT`.
+`PORT`, `TTL_MS` and `SWEEP_MS` tune it as usual.
 
 ## Simulator (test the Unity client without headsets)
 

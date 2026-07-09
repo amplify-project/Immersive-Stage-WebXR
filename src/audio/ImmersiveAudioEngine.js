@@ -32,6 +32,7 @@ import { MatrixMultiplier } from './MatrixMultiplier.js';
 import { OmnitoneFOADecoder } from './OmnitoneFOADecoder.js';
 import { zoomMtx, zoomFactorToIndex } from './zoom-matrix.js';
 import { threeMatrix4ToAmbiR3, quaternionToMatrix4, mat3MulVec3 } from './ambisonicAxes.js';
+import { resolveChannelMap } from './opusChannelMap.js';
 
 export class ImmersiveAudioEngine {
 
@@ -52,7 +53,9 @@ export class ImmersiveAudioEngine {
    *        idéntico al de 4 canales FOA de siempre.
    */
   constructor({ order = 1, sampleRate = 48000, audioContext = null,
-                renderer = 'omnitone', irUrl = null, stems = [] } = {}) {
+                renderer = 'omnitone', irUrl = null, stems = [], channelMap = 'auto' } = {}) {
+    this.channelMap = channelMap;   // 'auto' | 'identity' | array srcToOut explícito
+    this._chMap = null;             // resuelto en attach(), cuando se sabe el total
     this.order = order;
     this.sampleRate = sampleRate;
     this.irUrl = irUrl;
@@ -76,19 +79,27 @@ export class ImmersiveAudioEngine {
     this._viewR3 = null;       // rotación de cabeza (3x3 ambisónico) para DoA
 
     // ── Stems / fuentes espaciales (spotlight posicional) ────────────────────
-    // Cada fuente arranca colocada por azimut/elevación sobre una esfera de
-    // radio _stemRadius (compat. con el comportamiento original), pero su
-    // posición puede pasar a ser dinámica: fijada con setStemPosition() o
-    // vinculada a un Object3D con bindStemToObject() (p.ej. un ancla AR). Así el
-    // mismo motor sirve para músicos colocados en el 360 y para objetos 3D que
-    // se mueven por la sala en AR.
+    // Hay DOS geometrías, y confundirlas rompe el spotlight:
+    //
+    //   · No anclada (360). Colocada por azimut/elevación sobre una esfera
+    //     SOLIDARIA A LA CABEZA, igual que la malla del vídeo 360, que el player
+    //     recentra en la cabeza cada frame. La dirección cabeza→fuente es su
+    //     `dir` tal cual, y su posición mundo se recalcula al moverse la cabeza.
+    //     Restarle la posición de la cabeza sería un error: en el Quest (marco
+    //     local-floor, cabeza a ~1.6 m) mandaría las fuentes bajo el suelo.
+    //
+    //   · Anclada (AR). Vive en coordenadas de sala, fijada con setStemPosition()
+    //     o vinculada a un Object3D con bindStemToObject(). Ahí sí: la dirección
+    //     y la distancia se miden restando la posición de la cabeza, que es lo
+    //     que permite acercarse andando a un músico.
     const D2R = Math.PI / 180;
     this._stems = (stems || []).map((s, i) => ({
       az:   (s.azimuthDeg   || 0) * D2R,
       el:   (s.elevationDeg || 0) * D2R,
       name: s.name || ('stem' + i),
       gain: null, panner: null, dir: null,
-      pos: null,          // posición mundo [x,y,z]; null → derivada de az/el
+      pos: null,          // posición mundo [x,y,z] (anclada) o derivada de dir
+      anchored: false,    // true → coordenadas de sala; false → esfera en la cabeza
       object3d: null,     // fuente vinculada (lee su matrixWorld) o null
     }));
     this._stemRadius  = 1;            // radio de la colocación estática por az/el
@@ -103,6 +114,16 @@ export class ImmersiveAudioEngine {
     this._focusExp  = 4;     // cuán cerrado es el cono de "mirar a" (mayor = más estrecho)
     this._zoomMin   = 1;     // factor de zoom a partir del cual empieza el spotlight
     this._zoomMax   = 2.5;   // factor de zoom que da el boost completo
+    this._bedDuck   = 0;     // cuánto se agacha el bed al enfocar (0 = nada, 1 = a cero)
+    this._bedGain   = null;  // GainNode del bed (creado en attach)
+    // Atenuación por distancia de cada fuente (ajustable con setSourceParams).
+    // Manda en AR, donde uno se acerca andando; en el 360 las fuentes están
+    // siempre a _stemRadius de la cabeza y la curva es irrelevante.
+    this._distanceModel = 'inverse';
+    this._refDistance   = 1;
+    this._rolloffFactor = 1;
+    this._maxDistance   = 10000;
+    this._posSmoothSec  = 0.05;  // rampa al recolocar por red (0 = salto seco)
   }
 
   // ── Ciclo de vida ────────────────────────────────────────────────────────
@@ -133,12 +154,14 @@ export class ImmersiveAudioEngine {
     // para el decoder FOA y dejamos los canales 4..N para las cadenas de stem.
     // Sin stems, el source va directo al decoder (comportamiento de siempre).
     let foaInput = this.source;
+    this._chMap = this._resolveChannelMap(4 + this._stems.length);
     if (this._stems.length) {
       const total = 4 + this._stems.length;
       this._chSplitter = this.ctx.createChannelSplitter(total);
       this.source.connect(this._chSplitter);
       const foaMerger = this.ctx.createChannelMerger(4);
-      for (let i = 0; i < 4; i++) this._chSplitter.connect(foaMerger, i, i);
+      // El canal FOA i del fichero puede salir por otra salida del splitter.
+      for (let i = 0; i < 4; i++) this._chSplitter.connect(foaMerger, this._out(i), i);
       foaInput = foaMerger;
     }
 
@@ -150,21 +173,31 @@ export class ImmersiveAudioEngine {
     }
     this._activeRenderer = mode;
 
+    // Ganancia propia del bed (los 4 canales FOA), antes del maestro. Permite
+    // AGACHARLO al enfocar a un músico: el bed lleva la mezcla completa del
+    // concierto, con los músicos dentro, así que sin esto el spotlight solo
+    // puede sumar el stem encima de su propia copia — suena más fuerte, no más
+    // solo, y el total se acerca al recorte. Con el duck, acercarse a alguien
+    // aparta el fondo. Ver _updateSpotlight().
+    this._bedGain = this.ctx.createGain();
+    this._bedGain.gain.value = 1;
+    this._bedGain.connect(this.gain);
+
     if (mode === 'omnitone') {
-      // FOA → OmnitoneFOADecoder (binaural HRTF + rotación) → gain
+      // FOA → OmnitoneFOADecoder (binaural HRTF + rotación) → bedGain → gain
       this.decoder = new OmnitoneFOADecoder(this.ctx);
       await this.decoder.initialize();
       foaInput.connect(this.decoder.input);
-      this.decoder.output.connect(this.gain);
+      this.decoder.output.connect(this._bedGain);
     } else {
-      // FOA → rotator → multiplier(zoom) → HOASTBinDecoder → gain
+      // FOA → rotator → multiplier(zoom) → HOASTBinDecoder → bedGain → gain
       this.rotator    = new HOASTRotator(this.ctx, this.order);
       this.multiplier = new MatrixMultiplier(this.ctx, this.order);
       this.decoder    = new HOASTBinDecoder(this.ctx, this.order);
       foaInput.connect(this.rotator.in);
       this.rotator.out.connect(this.multiplier.in);
       this.multiplier.out.connect(this.decoder.in);
-      this.decoder.out.connect(this.gain);
+      this.decoder.out.connect(this._bedGain);
       if (this.irUrl) this.loadIRs(this.irUrl);
     }
 
@@ -191,14 +224,29 @@ export class ImmersiveAudioEngine {
   // Tap al SOURCE (campo en marco del micro) → 4 analizadores de dominio
   // temporal. La rotación de cabeza y la alineación se aplican luego en JS
   // (getDominantDirection), así funciona igual con cualquier renderer.
+  // Salida del ChannelSplitter que lleva el canal `src` del fichero.
+  _out(src) { return this._chMap ? this._chMap[src] : src; }
+
+  /** srcToOut para un total de canales dado (ver opusChannelMap.js). */
+  _resolveChannelMap(total) {
+    const map = resolveChannelMap(total, this.channelMap);
+    if (map.some((v, i) => v !== i))
+      console.info(`[engine] ${total} canales → remapeo Vorbis del decodificador: [${map}]`);
+    return map;
+  }
+
   _setupDoA() {
-    const splitter = this.ctx.createChannelSplitter(4);
+    // El splitter debe tener TODOS los canales: creado con 4 sobre una pista de
+    // 7, Web Audio descarta los sobrantes ANTES de partir, y los 4 primeros ya
+    // vienen permutados (con 7 canales, la salida 3 trae un stem, no la X).
+    const total = 4 + this._stems.length;
+    const splitter = this.ctx.createChannelSplitter(total);
     this.source.connect(splitter);
     const analysers = [], bufs = [];
     for (let i = 0; i < 4; i++) {
       const a = this.ctx.createAnalyser();
       a.fftSize = 2048;
-      splitter.connect(a, i);
+      splitter.connect(a, this._out(i));
       analysers.push(a);
       bufs.push(new Float32Array(a.fftSize));
     }
@@ -225,6 +273,7 @@ export class ImmersiveAudioEngine {
 
   async dispose() {
     try { this.source && this.source.disconnect(); } catch (_) {}
+    try { this._bedGain && this._bedGain.disconnect(); } catch (_) {}
     try { this.gain && this.gain.disconnect(); } catch (_) {}
     if (this.ownsContext && this.ctx) {
       try { await this.ctx.close(); } catch (_) {}
@@ -282,14 +331,24 @@ export class ImmersiveAudioEngine {
     } else if (L.setPosition) {
       L.setPosition(px, py, pz);
     }
+    this._reseatStaticStems();   // la esfera del 360 viaja con la cabeza
     this._updateSpotlight();
   }
 
   /**
    * Alineación fija audio↔vídeo (independiente del giro de cabeza).
+   *
+   * Gira SOLO el campo sonoro ambisónico (el bed), no los stems: corrige que el
+   * micro no apuntase al mismo sitio que la cámara al grabar. Es una propiedad
+   * de la TOMA, no del player, así que vive en scene.json → `alignment`.
+   *
+   * Para medirlo sin oído: coge un instrumento con stem propio, estima su
+   * dirección de llegada en el bed (vector de intensidad I = <W·X, W·Y, W·Z> en
+   * los frames donde ese instrumento domina) y réstale el azimut al que se ve en
+   * la imagen. En la toma de ejemplo salen ~180° con dos instrumentos distintos.
+   *
    * @param {object}  [opts]
-   * @param {number}  [opts.yawOffsetDeg=0]  Gira el campo sonoro p/ alinear el
-   *        "frente" del micro con el centro de la imagen. Prueba 90 / 180 / -90.
+   * @param {number}  [opts.yawOffsetDeg=0]  Giro del campo sonoro, en grados.
    * @param {boolean} [opts.mirror=false]    Espejo izquierda/derecha.
    */
   setAlignment({ yawOffsetDeg = 0, mirror = false } = {}) {
@@ -348,23 +407,42 @@ export class ImmersiveAudioEngine {
       const dir = [-ce * Math.sin(s.az), se, -ce * Math.cos(s.az)];
       s.dir = dir;
       // Posición inicial: la fijada de antemano (setStemPosition/bind antes de
-      // attach) o la derivada del azimut/elevación sobre la esfera _stemRadius.
-      if (!s.pos) s.pos = [dir[0] * this._stemRadius, dir[1] * this._stemRadius, dir[2] * this._stemRadius];
+      // attach) si está anclada; si no, sobre la esfera centrada en la cabeza.
+      if (!s.anchored) s.pos = this._staticPos(s);
 
       const g = this.ctx.createGain();
       g.gain.value = this._restGain;
 
       const p = this.ctx.createPanner();
       p.panningModel  = 'HRTF';
-      p.distanceModel = 'inverse';   // atenuación natural por distancia (útil en AR)
-      p.refDistance   = 1;
+      p.distanceModel = this._distanceModel;   // atenuación por distancia (manda en AR)
+      p.refDistance   = this._refDistance;
+      p.rolloffFactor = this._rolloffFactor;
+      p.maxDistance   = this._maxDistance;
 
-      this._chSplitter.connect(g, ch, 0);   // canal 4+i (mono) → gain
+      this._chSplitter.connect(g, this._out(ch), 0);   // canal 4+i (mono) → gain
       g.connect(p);
       p.connect(this._stemBus);
       s.gain = g; s.panner = p;
       this._setPannerPos(s, s.pos);          // coloca el panner en su posición
     });
+  }
+
+  // Posición mundo de una fuente NO anclada: su dirección az/el, a _stemRadius,
+  // desde donde esté la cabeza. Así el PannerNode la sitúa siempre a la misma
+  // distancia y en el mismo rumbo relativo, como la esfera del 360.
+  _staticPos(s) {
+    const lp = this._listenerPos, R = this._stemRadius;
+    return [lp[0] + s.dir[0] * R, lp[1] + s.dir[1] * R, lp[2] + s.dir[2] * R];
+  }
+
+  // Recoloca las no ancladas tras mover la cabeza (las ancladas no se tocan).
+  _reseatStaticStems() {
+    for (const s of this._stems) {
+      if (s.anchored || !s.panner || !s.dir) continue;
+      s.pos = this._staticPos(s);
+      this._setPannerPos(s, s.pos);
+    }
   }
 
   // ── Fuentes espaciales dinámicas (posición fija o ancla AR) ────────────────
@@ -391,13 +469,67 @@ export class ImmersiveAudioEngine {
   }
 
   // Coloca el PannerNode de un stem en una posición mundo.
-  _setPannerPos(s, pos) {
+  /**
+   * Coloca el panner. `smoothSec > 0` interpola en vez de saltar.
+   *
+   * El salto instantáneo vale para lo que se recalcula cada frame (la esfera
+   * solidaria a la cabeza, un Object3D vinculado): ahí ya hay continuidad. Pero
+   * una posición que llega por red a 10–20 Hz sí salta, y un PannerNode movido a
+   * saltos produce zipper noise. Con `setTargetAtTime` la posición persigue el
+   * objetivo con una constante de tiempo del orden del intervalo de llegada.
+   */
+  _setPannerPos(s, pos, smoothSec = 0) {
     if (!s || !s.panner || !pos) return;
     const p = s.panner;
     if (p.positionX) {
-      p.positionX.value = pos[0]; p.positionY.value = pos[1]; p.positionZ.value = pos[2];
+      if (smoothSec > 0 && this.ctx && p.positionX.setTargetAtTime) {
+        const now = this.ctx.currentTime;
+        p.positionX.setTargetAtTime(pos[0], now, smoothSec);
+        p.positionY.setTargetAtTime(pos[1], now, smoothSec);
+        p.positionZ.setTargetAtTime(pos[2], now, smoothSec);
+      } else {
+        p.positionX.value = pos[0]; p.positionY.value = pos[1]; p.positionZ.value = pos[2];
+      }
     } else if (p.setPosition) {
-      p.setPosition(pos[0], pos[1], pos[2]);
+      p.setPosition(pos[0], pos[1], pos[2]);   // API heredada: sin rampa posible
+    }
+  }
+
+  /**
+   * Curva de atenuación por distancia de las fuentes y suavizado de sus saltos
+   * de posición. Relevante sobre todo en AR, donde el volumen de cada músico lo
+   * decide el acercarse andando y no el zoom.
+   *
+   * @param {object}  [o]
+   * @param {string}  [o.distanceModel]  'inverse' | 'linear' | 'exponential'
+   * @param {number}  [o.refDistance]    distancia a la que la fuente suena a 1
+   * @param {number}  [o.rolloffFactor]  cuán rápido cae al alejarse (1 = natural)
+   * @param {number}  [o.maxDistance]    distancia a partir de la cual no cae más
+   * @param {number}  [o.smoothSec]      constante de tiempo al recolocar (0 = salto)
+   */
+  setSourceParams({ distanceModel, refDistance, rolloffFactor, maxDistance, smoothSec } = {}) {
+    if (distanceModel  != null) this._distanceModel = distanceModel;
+    if (refDistance    != null) this._refDistance   = refDistance;
+    if (rolloffFactor  != null) this._rolloffFactor = rolloffFactor;
+    if (maxDistance    != null) this._maxDistance   = maxDistance;
+    if (smoothSec      != null) this._posSmoothSec  = Math.max(0, smoothSec);
+    this._applySourceParams();
+  }
+
+  getSourceParams() {
+    return { distanceModel: this._distanceModel, refDistance: this._refDistance,
+             rolloffFactor: this._rolloffFactor, maxDistance: this._maxDistance,
+             smoothSec: this._posSmoothSec };
+  }
+
+  // Vuelca la curva de atenuación sobre los panners ya creados.
+  _applySourceParams() {
+    for (const s of this._stems) {
+      if (!s.panner) continue;
+      s.panner.distanceModel  = this._distanceModel;
+      s.panner.refDistance    = this._refDistance;
+      s.panner.rolloffFactor  = this._rolloffFactor;
+      s.panner.maxDistance    = this._maxDistance;
     }
   }
 
@@ -415,8 +547,11 @@ export class ImmersiveAudioEngine {
     const pos = (typeof x === 'number') ? [x, y, z] : this._extractPos(x);
     if (!pos) return;
     s.object3d = null;        // posición explícita → desvincula del Object3D
+    s.anchored = true;        // coordenadas de sala: distancia y rumbo vs. cabeza
     s.pos = pos;
-    this._setPannerPos(s, pos);
+    // Punto de entrada de las posiciones externas (tracking por cámaras, etc.):
+    // llegan a decenas de Hz como mucho, así que se interpolan.
+    this._setPannerPos(s, pos, this._posSmoothSec);
     this._updateSpotlight();
   }
 
@@ -430,6 +565,7 @@ export class ImmersiveAudioEngine {
     const s = this._stems[this._stemIndex(ref)];
     if (!s) return;
     s.object3d = object3d || null;
+    s.anchored = !!s.object3d;
     if (s.object3d) {
       const pos = this._extractPos(s.object3d);
       if (pos) { s.pos = pos; this._setPannerPos(s, pos); }
@@ -437,9 +573,16 @@ export class ImmersiveAudioEngine {
   }
 
   /** Desvincula la fuente de su Object3D (conserva la última posición conocida). */
+  // Suelta el ancla: la fuente vuelve a la esfera solidaria a la cabeza (az/el),
+  // que es lo que procede al salir de AR y recuperar el 360.
   unbindStem(ref) {
     const s = this._stems[this._stemIndex(ref)];
-    if (s) s.object3d = null;
+    if (!s) return;
+    s.object3d = null;
+    s.anchored = false;
+    // Suavizado: el salto de la sala a la esfera de la cabeza puede sonar a clic.
+    if (s.dir && s.panner) { s.pos = this._staticPos(s); this._setPannerPos(s, s.pos, this._posSmoothSec); }
+    this._updateSpotlight();
   }
 
   /** Radio de la colocación estática por azimut/elevación (por defecto 1). */
@@ -476,23 +619,40 @@ export class ImmersiveAudioEngine {
     const lo = this._zoomMin, hi = this._zoomMax;
     const zN = Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)));
     const now = this.ctx.currentTime;
+    let maxW = 0;                       // peso del stem más enfocado → duck del bed
     for (const s of this._stems) {
       if (!s.gain) continue;
-      // Dirección actual cabeza→fuente (normalizada). Para fuentes estáticas en
-      // la esfera coincide con s.dir; para fuentes con posición/ancla dinámica
-      // se recalcula a partir de su posición mundo y la de la cabeza.
-      const p = s.pos || s.dir;
-      if (!p) continue;
-      let dx = p[0] - lp[0], dy = p[1] - lp[1], dz = p[2] - lp[2];
-      const len = Math.hypot(dx, dy, dz) || 1;
-      dx /= len; dy /= len; dz /= len;
+      // Dirección actual cabeza→fuente (normalizada). En las NO ancladas es su
+      // `dir`: la esfera va con la cabeza, así que restarle _listenerPos metería
+      // el error de la altura de ojos (en VR, ~1.6 m ⇒ el frente cae 58° bajo el
+      // horizonte y nada llega nunca al umbral de foco). Las ancladas sí se
+      // miden contra la cabeza, que es lo que da acercarse andando en AR.
+      let dx, dy, dz;
+      if (s.anchored) {
+        if (!s.pos) continue;
+        dx = s.pos[0] - lp[0]; dy = s.pos[1] - lp[1]; dz = s.pos[2] - lp[2];
+        const len = Math.hypot(dx, dy, dz) || 1;
+        dx /= len; dy /= len; dz /= len;
+      } else {
+        if (!s.dir) continue;
+        [dx, dy, dz] = s.dir;                         // ya unitario
+      }
       const dot = dx * f[0] + dy * f[1] + dz * f[2];
       const aim = Math.max(0, dot);                  // 1 = mirándola de frente
       const focus = Math.pow(aim, this._focusExp);
       s._weight = focus * zN;                         // 0..1: cuán "enfocada" está
+      if (s._weight > maxW) maxW = s._weight;
       const target = this._restGain + s._weight * this._maxBoost;
       s.gain.gain.setTargetAtTime(target, now, 0.08);
     }
+
+    // Duck del bed, gobernado por el peso del stem MÁS enfocado, no por el zoom
+    // a secas: acercarse sin mirar a nadie no debe apartar el fondo. Misma rampa
+    // que los stems, así que fondo y solista se cruzan sin escalones. Se escribe
+    // siempre (con bedDuck=0 el objetivo es 1), o al desactivar el duck en
+    // caliente el bed se quedaría agachado para siempre.
+    if (this._bedGain)
+      this._bedGain.gain.setTargetAtTime(1 - this._bedDuck * maxW, now, 0.08);
   }
 
   /**
@@ -521,19 +681,21 @@ export class ImmersiveAudioEngine {
    * @param {number} [o.zoomMin]   Factor de zoom a partir del cual empieza el boost.
    * @param {number} [o.zoomMax]   Factor de zoom que da el boost completo.
    */
-  setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax } = {}) {
+  setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax, bedDuck } = {}) {
     if (restGain != null) this._restGain = restGain;
     if (maxBoost != null) this._maxBoost = maxBoost;
     if (focusExp != null) this._focusExp = focusExp;
     if (zoomMin  != null) this._zoomMin  = zoomMin;
     if (zoomMax  != null) this._zoomMax  = zoomMax;
+    if (bedDuck  != null) this._bedDuck  = Math.min(1, Math.max(0, bedDuck));
     this._updateSpotlight();
   }
 
   /** Parámetros actuales del spotlight (para guardar/restaurar, p.ej. al entrar/salir de AR). */
   getSpotlightParams() {
     return { restGain: this._restGain, maxBoost: this._maxBoost,
-             focusExp: this._focusExp, zoomMin: this._zoomMin, zoomMax: this._zoomMax };
+             focusExp: this._focusExp, zoomMin: this._zoomMin, zoomMax: this._zoomMax,
+             bedDuck: this._bedDuck };
   }
 
   // ── Volumen ──────────────────────────────────────────────────────────────

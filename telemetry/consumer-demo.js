@@ -17,7 +17,7 @@ ws.on('open', () => console.log(`[consumer] connected to ${URL}`));
 ws.on('message', (raw) => {
   const m = JSON.parse(raw);
   if (m.type === 'snapshot') console.log(`[snapshot] ${m.players.length} player(s):`, m.players.map(p => p.id));
-  else if (m.type === 'update') console.log(`[update] ${m.id}  p=${fmt(m.p)}  gaze=${fmt(m.gaze)}  f=${m.f}`);
+  else if (m.type === 'update') console.log(`[update] ${m.id}  p=${fmt(m.p)}  gaze=${fmt(m.gaze)}  zoom=${m.z}  focus=${m.f}`);
   else if (m.type === 'leave')  console.log(`[leave] ${m.id}`);
 });
 ws.on('close', () => console.log('[consumer] closed'));

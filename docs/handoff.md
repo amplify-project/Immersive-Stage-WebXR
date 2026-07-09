@@ -1,12 +1,13 @@
-# Partner handoff — two pending use cases
+# Partner handoff — three pending use cases
 
-This document hands two features off to partner teams, building on what already
-exists in `feat/spatial-core`. Both are **scaffolded and documented but not
+This document hands three features off to partner teams, building on what already
+exists in `feat/spatial-core`. All are **scaffolded and documented but not
 finished** (and not yet device-verified). For the engine API and the existing
 scaffolding see **[`core-api.md`](core-api.md)** (sections 7 and 8).
 
 - **Case A** — WebXR AR with 3D objects as audio sources (with real-world tracking).
 - **Case B** — Zoom that shows the 360 video at higher quality.
+- **Case C** — Interface contract for an external, camera-based tracking service.
 
 Each case below lists: what already works, what's missing, and the exact
 integration points in the code.
@@ -43,7 +44,8 @@ spatial audio comes for free.
 - **Anchoring to the real world.** Markers currently float at fixed positions
   *relative to the user*; they are not *tracked* to the room. Add WebXR
   **hit-test** + **anchors** (and/or **plane / mesh detection**) so each musician
-  sticks to a real surface and persists as the user moves.
+  sticks to a real surface and persists as the user moves. If instead the
+  positions come from an external camera rig, see **Case C**.
 - **Interactive placement.** Drag / position the markers (the code already notes
   "ready for draggable markers later"). `hand-tracking` is requested as an
   `optionalFeature` but is **not used** yet.
@@ -192,4 +194,107 @@ at a fraction of the effort.
 |-------|-------|
 | Encode | `stream.sh` — crop each ROI from the 8K master (`v360`/`crop` at the musician azimuth) into the existing `CLOSEUPS` tracks. |
 | Player | `getZoomFactor()` + `getFocusedStem()` drive the cross-fade; move the close-up from a floating plane to a sphere-aligned quad at the musician azimuth. |
+
+---
+
+## Case C — External tracking service (camera-based positions)
+
+A partner rig detects people and musicians with cameras and wants to drive the
+AR audio with those positions. The audio engine is ready for this: an *anchored*
+source is measured against the head, so walking closer makes it louder. What is
+missing is a **downlink** (telemetry is player→relay only today) and, above all,
+an agreed contract. This section is that contract.
+
+### Split the problem in two — only one half is ours to receive
+
+**Musician positions: yes, send them.** They are the audio sources. The player
+feeds them straight into `engine.setStemPosition()`.
+
+**Spectator head pose: no, do not send it.** The headset already localizes itself
+with inside-out tracking, to millimetres and a few milliseconds. Driving the head
+from cameras (tens of ms of latency, plus jitter) makes the sound field swim as
+the user turns. Head pose stays with WebXR. The cameras' view of the spectator is
+still useful — see the calibration trick below — but never as the listener pose.
+
+### The only hard problem: one common origin
+
+WebXR's `local-floor` origin is wherever that user started their session. It is
+arbitrary and different for every headset and every run. The cameras work in a
+fixed room frame. So each headset needs a rigid transform **T: room → that
+headset's XR frame**.
+
+`T` can be estimated from data we *already publish*. The cameras see the
+spectator's position in room coordinates; the headset publishes its own position
+`p` in XR coordinates over `/consume` (see [`telemetry.md`](telemetry.md)).
+Correlating the two trajectories for a few seconds solves `T`. Better still, both
+frames share the vertical — the headset's IMU aligns Y with gravity — so `T` has
+only **4 degrees of freedom** (yaw + translation), not 6. That is robust to solve
+and easy to sanity-check.
+
+**Therefore the natural division of labour:** the tracking service consumes
+`/consume`, matches each detected person to a `playerId`, estimates `T` per
+spectator, and sends musician positions **already expressed in that headset's XR
+frame**. The player then knows nothing about cameras or calibration — the numbers
+it receives are already its own.
+
+### Message contract (service → player)
+
+```jsonc
+{ "type": "sources", "playerId": "quest-1", "t": 1719480000123,   // ms, service clock
+  "sources": [
+    { "id": "violin",  "p": [1.2, 1.1, -2.3], "conf": 0.94, "track": 17 },
+    { "id": "cello",   "p": [-0.8, 1.0, -2.1], "conf": 0.41, "track": 22 }
+  ] }
+```
+
+- `id` matches `scene.json` → `stems[].name`, so the player resolves it by name:
+  `engine.setStemPosition(id, ...p)`.
+- `p` is in the **target headset's XR frame**, i.e. `T` already applied.
+- `conf` lets the player ignore or hold a source instead of teleporting it.
+- `track` is the tracker's identity, so an id swap is visible rather than silent.
+
+### Axes, units, and the bug that will bite you
+
+WebXR/Three.js is **right-handed, Y up, −Z forward, metres**. Unity is
+**left-handed, Z forward**. Converting between them means negating one axis
+(usually Z), and getting it wrong produces a mirrored scene with **no error
+message** — musicians appear and sound on the wrong side. State the convention on
+both ends, and test with one deliberately asymmetric source before trusting it.
+
+### Failure modes to design for
+
+| Risk | Consequence | Mitigation |
+|---|---|---|
+| Occlusion → identity swap | A musician teleports across the room | Send `track` + `conf`; the player holds the last good position below a confidence floor |
+| XR frame drifts or relocalizes | `T` silently goes stale | Re-estimate `T` continuously, not once at startup |
+| Network jitter at 10–20 Hz | Zipper noise on the `PannerNode` | Already handled: `sources.smoothSec` in `scene.json` ramps anchored moves |
+| Sending head pose from cameras | Sound field swims when turning | Don't. WebXR owns head pose |
+
+### Latency budget
+
+Source positions tolerate **~100 ms** end to end; musicians move slowly and
+`smoothSec` absorbs the rest. Head pose tolerates **none** — which is precisely
+why it never leaves the headset.
+
+### What we build on this side
+
+- A **downlink** on the relay: a `sources` frame addressed to a `playerId`,
+  delivered to that player over its existing socket (or a second one). The wire
+  protocol in [`telemetry.md`](telemetry.md) is unchanged for everything else.
+- A thin adapter in the player: on `sources`, call `engine.setStemPosition(id, p)`
+  per source. Nothing in the audio engine changes.
+
+### Engine hooks the partner's integration uses
+
+```js
+// One anchored source, moved from outside. Ramped by `sources.smoothSec`.
+engine.setStemPosition('violin', 1.2, 1.1, -2.3);
+
+// Attenuation curve for the room (scene.json → `sources`, or live):
+engine.setSourceParams({ distanceModel: 'inverse', refDistance: 1,
+                         rolloffFactor: 1, maxDistance: 12, smoothSec: 0.08 });
+
+// Releasing an anchor returns the source to the head-relative sphere:
+engine.unbindStem('violin');
+```
 | Player | `setupCloseups()` / `closeupRepByStem` and `shakaCloseup` are the multi-track + single-decoder pattern to build on. |

@@ -316,8 +316,17 @@ async function handleAPI(req, res, pathname) {
           // Close-ups (Caso B): vídeo "de cerca" por músico → pistas extra en el
           // mismo manifest. Solo los stems que tienen uno, en orden (= Representation
           // 1..N en el MPD); el player reconstruye el mapa stem→pista igual.
-          CLOSEUPS: (scene.stems || []).filter(s => s.closeup).map(s => s.closeup).join(';'),
+          // Un close-up que apunta al PROPIO vídeo 360 no es un close-up: hace
+          // que ffmpeg abra y decodifique otra vez el equirect entero por cada
+          // stem (1000% de CPU con tres, y NVENC casi parado). Se descarta.
+          CLOSEUPS: (scene.stems || [])
+            .filter(s => s.closeup && s.closeup !== scene.video)
+            .map(s => s.closeup).join(';'),
         };
+        const bogus = (scene.stems || []).filter(s => s.closeup && s.closeup === scene.video);
+        if (bogus.length)
+          console.warn(`⚠  Ignorados ${bogus.length} close-up(s) que apuntaban al vídeo 360 ` +
+                       `(${bogus.map(s => s.name).join(', ')}). Un close-up es un recorte aparte.`);
         if (enc.closeupScale)    env.CLOSEUP_SCALE = enc.closeupScale;
         if (enc.closeupVbitrate) env.CLOSEUP_VBITRATE = enc.closeupVbitrate;
       }
@@ -343,6 +352,35 @@ async function handleAPI(req, res, pathname) {
         startJob('proxy', 'ffmpeg', args, {});
         return sendJSON(res, 200, { ok: true, out: outFile, cmd: job.cmd });
       } catch (e) { return sendJSON(res, 409, { error: e.message }); }
+    }
+
+    // ── Análisis del bed ambisónico ─────────────────────────────────────────
+    // Comprueba el orden de canales declarado y mide cuánto estaba girado el
+    // micro respecto a la cámara. Ver tools/bedAnalysis.js.
+    if (pathname === '/api/bed/analyze' && req.method === 'POST') {
+      const body = await readBody(req);
+      let scene = {};
+      try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); } catch (_) {}
+      const bed = body.bed || scene.bed;
+      const bedFormat = body.bedFormat || scene.bedFormat || 'fuma';
+      const stems = body.stems || scene.stems || [];
+      if (!bed) return sendJSON(res, 400, { error: 'No hay bed en la escena' });
+
+      // Las rutas vienen del cliente: confinadas a media/, sin salirse con '..'
+      const safe = (rel) => {
+        const p = path.resolve(ROOT, rel);
+        if (!p.startsWith(MEDIA_DIR + path.sep)) throw new Error(`Ruta fuera de media/: ${rel}`);
+        return p;
+      };
+      try {
+        const { analyze } = require('./tools/bedAnalysis');
+        const out = await analyze({
+          bed, bedFormat, stems,
+          seconds: Math.min(600, Math.max(20, +body.seconds || 120)),
+          resolve: safe,
+        });
+        return sendJSON(res, 200, out);
+      } catch (e) { return sendJSON(res, 400, { error: e.message }); }
     }
 
     // ── Estado / parar ──────────────────────────────────────────────────────
@@ -461,6 +499,13 @@ const handler = (req, res) => {
   res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+  // Cuántos cascos y consumidores hay enganchados ahora mismo. Es la forma más
+  // rápida de comprobar desde el propio Quest que la telemetría está llegando.
+  if (req.url === '/telemetry/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(relay ? relay.health() : { ok: false, reason: 'relay disabled' }));
+  }
+
   let pathname;
   try { pathname = decodeURIComponent(req.url.split('?')[0]); }
   catch { pathname = req.url.split('?')[0]; }
@@ -519,10 +564,53 @@ if (fs.existsSync(KEY) && fs.existsSync(CRT)) {
   scheme = 'http';
 }
 
+// ── Relay de telemetría, colgado de ESTE servidor ──────────────────────
+// WebXR obliga a servir el player por HTTPS, y una página https:// no puede
+// abrir un ws:// en claro (contenido mixto). Montando /ingest y /consume en
+// este mismo servidor, el casco ve un único origen, puerto y certificado: el
+// que ya aceptó al cargar el player. Con el relay en su propio puerto habría
+// que aceptar el autofirmado por segunda vez, y el fallo es mudo (el socket
+// muere sin error visible en la página).
+//
+// El relay sigue siendo autónomo (`node telemetry/relay.js`, o embebido por el
+// simulador): aquí solo se engancha a un servidor que ya existe. En producción
+// ese papel lo hace nginx, terminando TLS con un certificado real y enrutando
+// las mismas dos rutas.
+//
+// `ws` es la ÚNICA dependencia npm del proyecto y vive en telemetry/. Si no se
+// ha hecho `npm install` ahí, el player debe seguir funcionando sin telemetría,
+// así que el require va protegido.
+let relay = null;
+if (!/^(0|off|false)$/i.test(process.env.RELAY || '')) {
+  try {
+    const { createRelay } = require('./telemetry/relay');
+    relay = createRelay({ server, log: false });
+  } catch (e) {
+    const why = e.code === 'MODULE_NOT_FOUND' ? 'falta `cd telemetry && npm install`' : e.message;
+    console.warn(`⚠  Telemetría desactivada (${why}). El player funciona igual.`);
+  }
+}
+
+// El relay escucha siempre (cuesta nada, y Unity conecta a /consume antes de que
+// entre ningún casco). `telemetry.enabled` de scene.json es cosa del PLAYER: si
+// está a false nadie enviará poses, así que lo decimos aquí en vez de anunciar
+// un endpoint que parece listo y nunca recibe nada.
+function sceneTelemetryEnabled() {
+  try { return !!JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')).telemetry?.enabled; }
+  catch (_) { return false; }
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on ${scheme}://0.0.0.0:${PORT}  (root: ${ROOT})`);
   console.log(`  player → ${scheme}://<host>:${PORT}/index.html`);
   console.log(`  editor → ${scheme}://<host>:${PORT}/editor.html`);
+  if (relay) {
+    const note = sceneTelemetryEnabled()
+      ? 'scene.json: enabled'
+      : 'scene.json: enabled=false → ningún player enviará (usa ?telemetry=… para probar)';
+    console.log(`  telemetry → ${relay.scheme}://<host>:${PORT}/ingest · consume=/consume · health=/telemetry/health`);
+    console.log(`              ${note}`);
+  }
   if (scheme === 'http') {
     console.warn('⚠  Sin certificados → HTTP. WebXR (VR) NO funciona por IP sin HTTPS.');
     console.warn('   Genera un certificado autofirmado:  ./gen-cert.sh   y reinicia.');

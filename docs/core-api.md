@@ -91,10 +91,16 @@ bound to an `Object3D` (e.g. an AR anchor).
 
 | Method | Description |
 |--------|-------------|
-| `setStemPosition(ref, x, y, z)` | Set a source's world position. `ref` = index or name; accepts `(ref, x, y, z)`, `(ref, [x,y,z])`, `(ref, {x,y,z})` or `(ref, object3D)`. Unbinds any bound object. |
-| `bindStemToObject(ref, object3d)` | Bind a source to an `Object3D` (reads its `matrixWorld`). After `update()` the panner follows it each frame. |
-| `unbindStem(ref)` | Unbind (keeps the last known position). |
+| `setStemPosition(ref, x, y, z)` | **Anchors** a source at a world position, so it is measured against the head (walk closer, hear it louder). `ref` = index or name; accepts `(ref, x, y, z)`, `(ref, [x,y,z])`, `(ref, {x,y,z})` or `(ref, object3D)`. Unbinds any bound object. Moves are smoothed by `smoothSec` — this is the entry point for externally tracked positions. |
+| `bindStemToObject(ref, object3d)` | Anchor a source to an `Object3D` (reads its `matrixWorld`). After `update()` the panner follows it each frame. |
+| `unbindStem(ref)` | Drop the anchor: the source returns to the head-relative sphere given by its azimuth/elevation (what you want on leaving AR). |
 | `update()` | Call **once per frame** in the render loop when using bound/AR sources. Refreshes positions and the spotlight. No-op if nothing is bound. |
+
+> **Two geometries.** A source is either *anchored* (room coordinates: direction
+> and distance measured from the head, so walking changes both) or *not* (it rides
+> a sphere fixed to the head, like the 360 mesh, always at `refDistance`). Sources
+> declared by `azimuthDeg`/`elevationDeg` start unanchored; `setStemPosition` and
+> `bindStemToObject` anchor them, `unbindStem` releases them.
 | `setStemRadius(r)` | Radius of the static azimuth/elevation placement (default `1`). |
 | `getFocusedStem(minWeight = 0.2)` → `number` | Index of the most-focused source (look × zoom) above the threshold, or `-1`. Reuses the spotlight weight — used to trigger the close-up of the musician you look at. |
 | `get stemCount` → `number` | Number of spatial sources. |
@@ -106,8 +112,10 @@ bound to an `Object3D` (e.g. an AR anchor).
 
 | Method | Description |
 |--------|-------------|
-| `setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax })` | Tune the spotlight. `restGain` = stem level at rest (0 = only on zoom). `maxBoost` = extra gain when looked at with max zoom. `focusExp` = focus-cone tightness. `zoomMin/zoomMax` = zoom range that maps to the boost. |
+| `setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax, bedDuck })` | Tune the spotlight. `restGain` = stem level at rest (0 = only on zoom). `maxBoost` = extra gain when looked at with max zoom. `focusExp` = focus-cone tightness. `zoomMin/zoomMax` = zoom range that maps to the boost. `bedDuck` (0..1) = how far the FOA bed drops when a musician is focused; `0.7` leaves the bed at 30%. |
 | `getSpotlightParams()` → `object` | Current spotlight params (to save/restore, e.g. on entering/leaving AR). |
+| `setSourceParams({ distanceModel, refDistance, rolloffFactor, maxDistance, smoothSec })` | Distance-attenuation curve of every source, plus `smoothSec`, the time constant used when an *anchored* position is moved (0 = jump). Applies live to existing panners. In AR this curve, not the spotlight, decides how loud a musician is. |
+| `getSourceParams()` → `object` | Current source params. |
 
 ---
 

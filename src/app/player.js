@@ -63,6 +63,15 @@ function initThree() {
   // scale(-1,1,1) invierte las normales para ver desde dentro
   const geo = new THREE.SphereGeometry(100, 60, 40);
   geo.scale(-1, 1, 1);
+  // Alinear la imagen con el mundo. El mapeo UV de SphereGeometry (con el
+  // scale(-1,1,1)) deja el CENTRO del equirectangular (u=0.5) en -X, y en -Z
+  // —el frente: adonde mira la cámara con yaw=0, y adonde apunta un stem con
+  // azimuthDeg=0— cae u=0.75. Es decir, el frente del vídeo quedaba 90° a la
+  // izquierda del frente del audio: los músicos se oían donde no se veían.
+  // Girando -90° el centro de la imagen pasa a -Z y los tres convenios (editor,
+  // vídeo, audio) coinciden. Se hornea en la geometría porque en XR el bucle de
+  // render reposiciona la malla cada frame y podría pisar sphere.rotation.
+  geo.rotateY(-Math.PI / 2);
   sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x111111 }));
   sphere.position.set(0, 0, 0);  // centrada en el origen
   scene.add(sphere);
@@ -513,7 +522,7 @@ async function setupFOA() {
       { azimuthDeg:  30, name: 'TBONE' },   // trombón
       { azimuthDeg:  50, name: 'TPT'   },   // trompeta
     ];
-    let _stems = null, _spot = null;
+    let _stems = null, _spot = null, _sources = null, _align = null;
     try {
       const _r = await fetch('/scene.json', { cache: 'no-store' });
       if (_r.ok) {
@@ -523,6 +532,8 @@ async function setupFOA() {
             azimuthDeg: +s.azimuthDeg || 0, elevationDeg: +s.elevationDeg || 0,
             name: s.name, closeup: s.closeup || null }));
         if (_sc.spotlight) _spot = _sc.spotlight;
+        if (_sc.sources) _sources = _sc.sources;
+        if (_sc.alignment) _align = _sc.alignment;
         if (_sc.telemetry) telemetryCfg = _sc.telemetry;
       }
     } catch (_) { /* sin escena → DEFAULT_STEMS */ }
@@ -537,7 +548,11 @@ async function setupFOA() {
     if (!_stems) _stems = DEFAULT_STEMS;
     stemDefs = _stems;   // el modo AR ancla un objeto 3D por stem con su az/el
 
-    engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer, stems: _stems });
+    // ?chmap=identity desactiva el remapeo de canales del decodificador Opus
+    // (ver VORBIS_SRC_TO_OUT). Útil si un navegador NO reordena: compruébalo con
+    // channel-test.html?src=/chtest/manifest.mpd&ch=7 antes de tocarlo.
+    const _chmap = new URLSearchParams(location.search).get('chmap') || 'auto';
+    engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer, stems: _stems, channelMap: _chmap });
     // El audio sale del <video> vía Web Audio: hay que desmutearlo (si no, el tap
     // recibe silencio). No hay doble salida: createMediaElementSource reencamina
     // el audio del elemento al grafo (no suena por la salida normal del <video>).
@@ -548,11 +563,17 @@ async function setupFOA() {
     // ── Telemetría de pose (opt-in) ───────────────────────────────────
     // Alimenta un relay externo con giro/posición de cabeza (la mirada la deriva
     // el relay a partir del cuaternión). Config en scene.json:
-    //   "telemetry": { "enabled": true, "url": "wss://host/ingest", "rateHz": 20 }
+    //   "telemetry": { "enabled": true, "rateHz": 20 }
+    // Sin "url" apunta a /ingest de este mismo origen, que server.js (o nginx)
+    // reenvía al relay: mismo host, puerto y certificado que el player, así que
+    // en el casco no hay que aceptar un segundo autofirmado. Pon "url" solo si
+    // el relay vive en otra máquina.
     // Overrides por URL:  ?telemetry=wss://host/ingest   ?player=NOMBRE
     {
       const _tq = new URLSearchParams(location.search);
-      const _turl = _tq.get('telemetry') || (telemetryCfg && telemetryCfg.enabled && telemetryCfg.url) || null;
+      const _sameOrigin = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ingest`;
+      const _tcfg = (telemetryCfg && telemetryCfg.enabled) ? (telemetryCfg.url || _sameOrigin) : null;
+      const _turl = _tq.get('telemetry') || _tcfg || null;
       if (_turl) {
         telemetry = new Telemetry({
           url: _turl,
@@ -571,15 +592,23 @@ async function setupFOA() {
       // (en VR el zoom normalizado mapea t=0 → factor=zoomMin → boost 0).
       engine.setSpotlightParams({ zoomMin: getZoomFactor() });
       if (_spot) engine.setSpotlightParams(_spot);   // maxBoost/focusExp/restGain/zoomMax
+      // Curva de atenuación por distancia + suavizado de posiciones externas.
+      // Solo se nota en AR: en 360 las fuentes están fijas a la esfera.
+      if (_sources) engine.setSourceParams(_sources);
       toast(`${_stems.length} stems · spotlight en zoom`);
     }
 
-    // Alineación audio↔vídeo desde la URL (ajustable en el visor sin recompilar):
-    //   ?ayaw=90    → offset de azimut en grados (prueba 90 / 180 / -90 / 45…)
+    // Alineación audio↔vídeo: cuánto estaba girado el micro ambisónico respecto
+    // a la cámara al grabar. Es de la TOMA, así que su sitio es scene.json:
+    //   "alignment": { "yawOffsetDeg": 180, "mirror": false }
+    // Overrides por URL para tantear en el visor sin tocar la escena:
+    //   ?ayaw=180   → offset de azimut en grados
     //   ?amirror=1  → espejo izquierda/derecha
     const _p = new URLSearchParams(location.search);
-    const _ayaw = parseFloat(_p.get('ayaw') || '0') || 0;
-    const _amirror = _p.get('amirror') === '1';
+    const _ayaw = _p.has('ayaw') ? (parseFloat(_p.get('ayaw')) || 0)
+                                 : ((_align && +_align.yawOffsetDeg) || 0);
+    const _amirror = _p.has('amirror') ? (_p.get('amirror') === '1')
+                                       : !!(_align && _align.mirror);
     engine.setAlignment({ yawOffsetDeg: _ayaw, mirror: _amirror });
     if (_ayaw || _amirror) toast(`alineación audio · yaw ${_ayaw}° · mirror ${_amirror ? 'on' : 'off'}`);
 
@@ -1033,12 +1062,22 @@ async function enterXR() {
             // escritorio lo hace el FOV vía setZoomByFactor, pero en VR no hay
             // FOV controlable, así que mapeamos xrZoomDist → zoom normalizado.
             // Boost completo a media carrera (≈40) para que responda pronto.
-            engine?.setZoomNormalized(xrZoomDist / 40);
+            const zoomN = xrZoomDist / 40;
+            engine?.setZoomNormalized(zoomN);
             updateCloseupFocus();   // close-up del músico enfocado (joystick zoom)
 
             // Telemetría: pose de cabeza + zoom/foco (decimado a rateHz en la clase).
             // pos/q son referencias de la pose ya leída → sin coste por frame.
-            telemetry?.sample(pos, q, xrZoomDist, closeupStem, videoEl?.currentTime || 0);
+            //
+            // El foco sale del motor, NO de closeupStem: éste solo cambia cuando la
+            // escena trae pistas de close-up, y sin ellas viajaría un -1 constante
+            // aunque sepamos perfectamente a qué músico mira. Y va el zoom
+            // normalizado (0..1), no xrZoomDist (0..80), para que el consumidor lea
+            // el mismo rango venga de VR, de escritorio o del simulador.
+            // setZoomNormalized() acaba de recalcular los pesos, así que el foco es
+            // el de este frame.
+            telemetry?.sample(pos, q, zoomN, engine?.getFocusedStem(0.3) ?? -1,
+                              videoEl?.currentTime || 0);
 
             // Centrar la esfera en la cabeza y desplazarla EN CONTRA de la vista
             // para "acercar" lo que miras (xrZoomDist = 0 → solo centrada).
@@ -1160,7 +1199,8 @@ function buildARSources() {
 function clearARSources() {
   for (const m of arSources) scene.remove(m);
   arSources = [];
-  // soltar las vinculaciones del motor (conserva la última posición)
+  // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,
+  // que es la geometría del 360 al que estamos regresando
   if (engine) for (let i = 0; i < engine.stemCount; i++) engine.unbindStem(i);
 }
 

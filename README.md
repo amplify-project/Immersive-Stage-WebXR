@@ -43,7 +43,9 @@ a stem's gain as a function of **where you look × how much you zoom**.
 
 ## Requirements
 
-- **Node.js** (no npm dependencies; uses only built-in modules).
+- **Node.js**. The player and editor use only built-in modules; the optional
+  pose telemetry needs `ws` (`cd telemetry && npm install`). Without it the
+  server warns once and runs with telemetry disabled.
 - **ffmpeg** and **ffprobe** on `PATH` (with `libvpx-vp9`, `libopus`, `libx264`).
 - **git-lfs** (media files `*.mp4 / *.wav / *.mp3` are stored via LFS).
 - WebXR/VR over IP needs **HTTPS** → generate a self-signed certificate with
@@ -56,6 +58,7 @@ a stem's gain as a function of **where you look × how much you zoom**.
 ```bash
 git lfs install && git lfs pull      # fetch the sample media
 ./gen-cert.sh                        # cert for HTTPS/WebXR (once)
+cd telemetry && npm install && cd ..  # `ws`, only needed for pose telemetry
 node server.js                       # start the server (https if certs exist)
 ```
 
@@ -114,7 +117,7 @@ same manifest with `CLOSEUPS` (`;`-separated, in stem order), `CLOSEUP_SCALE`
 (default `1280:720`) and `CLOSEUP_VBITRATE` (default `2500k`). See
 [`docs/core-api.md`](docs/core-api.md).
 
-### ⚠️ Two things that matter for the Quest
+### ⚠️ Three things that matter for the Quest
 
 1. **Use VP9 / WebM** (not H.264). H.264 puts Opus in **MP4**, and the Oculus
    browser **won't play multichannel Opus in MP4** → no video, no audio. WebM
@@ -126,6 +129,16 @@ same manifest with `CLOSEUPS` (`;`-separated, in stem order), `CLOSEUP_SCALE`
    ffmpeg -i media/video.mp4 -an -vf "scale=1920:960,format=yuv420p" \
      -c:v libx264 -profile:v high -preset veryfast -crf 20 media/video_1920.mp4
    ```
+3. **The browser reorders Opus channels when the track has 3–8 of them.**
+   Chromium maps multichannel Opus to Vorbis channel order even for
+   `mapping_family 255` (discrete channels, no layout), while ffmpeg does not —
+   so the file measures perfectly on disk and arrives shuffled in Web Audio. With
+   4 FOA + 3 stems (7 channels) the ambisonic X channel receives a musician's
+   stem and the stems play at each other's positions. The engine undoes this
+   (`VORBIS_SRC_TO_OUT`); `?chmap=identity` disables it. Channel counts of 4, or
+   of 9 and above, are passed through untouched, which is why the original
+   10-channel spike never showed the problem. Verify any layout with
+   `channel-test.html?src=/chtest/manifest.mpd&ch=7` — one tone per channel.
 
 ---
 
@@ -167,6 +180,40 @@ video.
 > can't run at once — stop the monitor before going live. The encode applies the
 > delay via `-itsoffset` on the raw audio input, before FOA/stems are split, so the
 > whole audio bed shifts together.
+
+---
+
+## Pose telemetry
+
+Head pose, zoom and focused musician stream out to an external render (e.g.
+Unity) over WebSocket. `server.js` hosts the relay on **its own port**, so the
+headset talks to `/ingest` on the same origin, port and certificate it already
+accepted to load the player — a relay on a separate port would need its own
+certificate, trusted separately, and the failure is silent.
+
+```bash
+cd telemetry && npm install      # once — `ws`
+node server.js                   # player, editor and relay in one process
+```
+
+Enable the client in `scene.json` (`"telemetry": { "enabled": true }`); leaving
+`url` empty points it at this server. Then:
+
+- **Consumer** (Unity) → `wss://<host>:60000/consume`
+- **Health** → `https://<host>:60000/telemetry/health` — how many headsets and
+  consumers are attached right now; open it from the Quest to confirm it landed.
+
+The relay listens regardless of `telemetry.enabled`, which only governs whether
+the *player* sends: consumers routinely connect before any headset does. Sampling
+starts on entering VR or AR and stops on exit, so nothing is sent from a desktop
+browser. Test without editing the scene with
+`?telemetry=wss://<host>:60000/ingest&player=NAME`.
+
+`RELAY=off` leaves the relay out. The relay also runs standalone
+(`node telemetry/relay.js`) for a separate machine or behind nginx, and ships a
+simulator that fakes N headsets so the Unity client can be built without one. See
+[`docs/telemetry.md`](docs/telemetry.md) for the wire protocol and
+[`telemetry/README.md`](telemetry/README.md) for the relay itself.
 
 ---
 
@@ -240,11 +287,27 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
     // "closeup" is optional (Caso B): a per-musician close-up video track
     { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0, "closeup": "media/dr_cu.mp4" }
   ],
-  "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5 },
-  "encode":    { "codec": "vp9", "scale": "1920:960", "vbitrate": "6000k", "seg": 2 }
+  // `bedDuck` pulls the FOA bed down as you focus a musician. Without it the
+  // spotlight can only add a stem on top of the bed's own copy of that same
+  // musician: louder, not more solo. 0 = off, 0.7 = bed drops to 30%.
+  "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5,
+                 "bedDuck": 0.7 },
+  // How far the ambisonic mic was turned from the camera when recording. Rotates
+  // the FOA bed only, never the stems. Override live with ?ayaw= / ?amirror=.
+  "alignment": { "yawOffsetDeg": 0, "mirror": false },
+  // Distance attenuation per source, and smoothing for positions pushed in from
+  // outside (AR tracking). Only audible in AR: in 360 the sources ride a sphere
+  // fixed to your head, always at the same distance.
+  "sources":   { "distanceModel": "inverse", "refDistance": 1, "rolloffFactor": 1,
+                 "maxDistance": 10000, "smoothSec": 0.05 },
+  "encode":    { "codec": "vp9", "scale": "1920:960", "vbitrate": "6000k", "seg": 2 },
+  // Pose telemetry. Empty "url" = /ingest on the server hosting the player.
+  "telemetry": { "enabled": false, "url": "", "rateHz": 20, "flushMs": 100 }
 }
 ```
 
-> Azimuth: `0°` = front of the video, `+` = left. The player sets `zoomMin`
-> automatically (current view) so that at rest the stems are silent, both on
-> desktop and in VR.
+> Azimuth: `0°` = front of the video (the **centre column** of the equirect
+> frame), `+` = left. To read a musician's azimuth straight off a frame, take
+> their horizontal position `u` (0 at the left edge, 1 at the right) and compute
+> `azimuthDeg = (0.5 - u) * 360`. The player sets `zoomMin` automatically
+> (current view) so that at rest the stems are silent, both on desktop and in VR.
