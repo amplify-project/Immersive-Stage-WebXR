@@ -706,6 +706,28 @@ export class ImmersiveAudioEngine {
     this._updateSpotlight();
   }
 
+  /**
+   * Estado instantáneo del spotlight: qué zoom ve, qué peso tiene cada stem y
+   * qué ganancia ha alcanzado de verdad el GainNode. Sirve para ver por qué un
+   * stem no sube — si el peso es 0 el problema es la mirada o el zoom; si el
+   * peso sube y la ganancia no, el problema está en la cadena de audio.
+   */
+  getSpotlightState() {
+    const lo = this._zoomMin, hi = this._zoomMax;
+    const zN = hi - lo > 1e-6
+      ? Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)))
+      : (this._zoomFactor >= hi ? 1 : 0);
+    return {
+      zoomFactor: this._zoomFactor, zoomMin: lo, zoomMax: hi, zN,
+      bedGain: this._bedGain ? this._bedGain.gain.value : null,
+      stems: this._stems.map(s => ({
+        name: s.name, anchored: !!s.anchored,
+        weight: s._weight || 0,
+        gain: s.gain ? s.gain.gain.value : null,
+      })),
+    };
+  }
+
   /** Parámetros actuales del spotlight (para guardar/restaurar, p.ej. al entrar/salir de AR). */
   getSpotlightParams() {
     return { restGain: this._restGain, maxBoost: this._maxBoost,

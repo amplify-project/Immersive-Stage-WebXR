@@ -565,9 +565,20 @@ async function analyseBed() {
 
 function renderBedReport(r) {
   const z = r.zCheck;
-  const zLine = z.ok
-    ? `<b style="color:#6c6">Channel order plausible.</b> Channel ${z.declaredZChannel} is both the declared Z and the quietest, as a horizontal take demands.`
-    : `<b style="color:#f66">Channel order looks wrong.</b> You declared Z on channel ${z.declaredZChannel}, but the quietest is channel ${z.quietestChannel}. In a horizontal take Z is far the weakest — check the format, or the order of the files you assembled.`;
+  const lv = z.levelsDb.map((v, i) => `c${i} ${v} dB`).join(' · ');
+  let zLine;
+  if (z.flat)
+    zLine = `<b style="color:#f66">This is not a B-format recording.</b> All four channels carry the same energy ` +
+      `(spread ${z.spreadDb} dB — ${lv}). A horizontal take puts Z 6–10 dB below the rest, whatever the channel ` +
+      `order is, so no reordering can fix this. Something flattened the channels — a video editor re-encoding the ` +
+      `file will do it. Go back to the original 4-channel take from the recorder.`;
+  else if (z.ok)
+    zLine = `<b style="color:#6c6">Channel order plausible.</b> Channel ${z.declaredZChannel} is the declared Z and ` +
+      `sits ${z.marginDb} dB below the others, as a horizontal take demands.`;
+  else
+    zLine = `<b style="color:#f66">Channel order looks wrong.</b> You declared Z on channel ${z.declaredZChannel}, ` +
+      `but the quietest is channel ${z.quietestChannel} (${lv}). In a horizontal take Z is far the weakest — check ` +
+      `the format, or the order of the channels you extracted.`;
 
   const rows = r.stems.map(s => {
     const az = s.micAzimuthDeg == null ? '—' : s.micAzimuthDeg + '°';

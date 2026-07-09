@@ -116,12 +116,28 @@ async function analyze({ bed, bedFormat = 'fuma', stems = [], seconds = 120, res
   const full = await Promise.all([0, 1, 2, 3].map(c => decode(bedPath, c, seconds, null)));
   const levels = full.map(rmsDb);
   const quietest = levels.indexOf(Math.min(...levels));
+
+  // No basta con que la Z sea la más floja: tiene que serlo por mucho. En una
+  // toma horizontal la Z anda 6-10 dB por debajo del resto. Cuatro canales con
+  // la misma energía no son un B-format —da igual en qué orden estén—, y ese es
+  // el aspecto que tiene un fichero que ha pasado por un editor de vídeo.
+  const others = levels.filter((_, i) => i !== L.Z);
+  const marginDb = Math.min(...others) - levels[L.Z];
+  const spreadDb = Math.max(...levels) - Math.min(...levels);
   const zCheck = {
     declaredZChannel: L.Z,
     quietestChannel: quietest,
-    ok: quietest === L.Z,
+    marginDb: +marginDb.toFixed(1),
+    spreadDb: +spreadDb.toFixed(1),
+    flat: spreadDb < 3,                        // ni Z ni nada: no es ambisónico
+    ok: quietest === L.Z && marginDb >= 4 && spreadDb >= 3,
     levelsDb: levels.map(v => +v.toFixed(1)),
   };
+
+  // Sin componente vertical no hay campo ambisónico que analizar, y el ajuste
+  // del giro devolvería un número con toda la confianza del mundo. Parar aquí.
+  if (zCheck.flat)
+    return { bedFormat, secondsAnalyzed: seconds, zCheck, stems: [], alignment: null };
 
   // ── 2. Dirección de llegada de cada stem ────────────────────────────────────
   const bp = await Promise.all([0, 1, 2, 3].map(c => decode(bedPath, c, seconds, BAND)));
