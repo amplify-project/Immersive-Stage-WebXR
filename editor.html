@@ -81,6 +81,13 @@
         </select>
       </div>
     </div>
+    <p class="hint">
+      Checks the declared channel order against the recording, and measures how far the ambisonic
+      mic was turned from the camera. Needs the stems placed below: it compares where each musician
+      <i>sounds</i> with where you say they <i>are</i>.
+    </p>
+    <button id="bedAnalyze" type="button">Analyse bed</button>
+    <div id="bedReport" style="display:none;margin-top:10px"></div>
   </div>
 
   <div class="card" id="liveSources" style="display:none">
@@ -244,6 +251,7 @@ let scene = {
   mode: 'vod',
   video: '', bed: '', bedFormat: 'fuma',
   stems: [],
+  alignment: { yawOffsetDeg: 0, mirror: false },
   spotlight: { maxBoost: 1.5, focusExp: 4, restGain: 0, zoomMax: 2.5 },
   encode: { codec: 'h264_nvenc', scale: '1920:960', vbitrate: '6000k', seg: 2, s3Bucket: '', s3Region: '' },
   live: {
@@ -382,6 +390,7 @@ function bindControls() {
   $('video').onchange   = e => scene.video = e.target.value;
   $('bed').onchange     = e => scene.bed = e.target.value;
   $('bedFormat').onchange = e => scene.bedFormat = e.target.value;
+  $('bedAnalyze').onclick = analyseBed;
   // spotlight
   for (const k of ['maxBoost','focusExp','restGain','zoomMax']) {
     const el = $(k); el.value = scene.spotlight[k];
@@ -518,6 +527,70 @@ radar.addEventListener('mousedown',radarDown); window.addEventListener('mousemov
 radar.addEventListener('touchstart',radarDown,{passive:false}); radar.addEventListener('touchmove',radarMove,{passive:false}); radar.addEventListener('touchend',radarUp);
 
 // ── Save / encode / proxy / status ────────────────────────────────────────────
+// ── Bed analysis ─────────────────────────────────────────────────────────────
+// Two questions the ear is bad at: is the declared channel order real, and how
+// far was the mic turned from the camera. See tools/bedAnalysis.js.
+async function analyseBed() {
+  const box = $('bedReport'), btn = $('bedAnalyze');
+  scene.bed = $('bed').value; scene.bedFormat = $('bedFormat').value;
+  if (!scene.bed) return toast('Pick a bed first');
+  btn.disabled = true; box.style.display = 'block';
+  box.innerHTML = '<p class="hint">Analysing… (decoding the bed and every stem)</p>';
+  let r;
+  try {
+    const res = await fetch('/api/bed/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bed: scene.bed, bedFormat: scene.bedFormat, stems: scene.stems, seconds: 120 }) });
+    r = await res.json();
+    if (!res.ok) throw new Error(r.error || 'HTTP ' + res.status);
+  } catch (e) {
+    box.innerHTML = `<p class="hint" style="color:#f66">Analysis failed: ${e.message}</p>`;
+    btn.disabled = false; return;
+  }
+  btn.disabled = false;
+  box.innerHTML = renderBedReport(r);
+  const apply = $('bedApply');
+  if (apply) apply.onclick = async () => {
+    scene.alignment = { yawOffsetDeg: r.alignment.yawOffsetDeg, mirror: r.alignment.mirror };
+    await saveScene(false);
+    toast(`alignment → yaw ${scene.alignment.yawOffsetDeg}°`);
+  };
+}
+
+function renderBedReport(r) {
+  const z = r.zCheck;
+  const zLine = z.ok
+    ? `<b style="color:#6c6">Channel order plausible.</b> Channel ${z.declaredZChannel} is both the declared Z and the quietest, as a horizontal take demands.`
+    : `<b style="color:#f66">Channel order looks wrong.</b> You declared Z on channel ${z.declaredZChannel}, but the quietest is channel ${z.quietestChannel}. In a horizontal take Z is far the weakest — check the format, or the order of the files you assembled.`;
+
+  const rows = r.stems.map(s => {
+    const az = s.micAzimuthDeg == null ? '—' : s.micAzimuthDeg + '°';
+    const el = s.elevationDeg == null ? '—' : s.elevationDeg + '°';
+    const note = s.reliable
+      ? (s.residualDeg != null && s.residualDeg > 30
+          ? `<span style="color:#fa4">off by ${s.residualDeg}° — wrong azimuth, or this stem is not that musician</span>` : '')
+      : `<span style="color:#888">excluded: ${s.excludedBecause}</span>`;
+    return `<tr><td>${s.name}</td><td>${az}</td><td>${el}</td><td>${s.sceneAzimuthDeg}°</td><td>${note}</td></tr>`;
+  }).join('');
+
+  let align = '<p class="hint">Not enough usable stems to measure the mic rotation (needs two that play alone at some point).</p>';
+  if (r.alignment) {
+    const a = r.alignment;
+    const conf = a.confident
+      ? `<b style="color:#6c6">mean residual ${a.meanResidualDeg}°</b>`
+      : `<b style="color:#fa4">mean residual ${a.meanResidualDeg}° — treat as a starting point and tune by ear with <code>?ayaw=</code></b>`;
+    align = `<p>Mic turned <b>${a.yawOffsetDeg}°</b> from the camera, mirror <b>${a.mirror ? 'on' : 'off'}</b> ` +
+      `(the mirrored fit is ${a.mirrorResidualDeg}° off, so it is ${a.mirror ? 'preferred' : 'ruled out'}). ${conf}.<br>` +
+      `Fitted on ${a.usedStems.join(', ')}` +
+      (a.suspectStems.length ? `; ignored ${a.suspectStems.join(', ')} as their scene azimuth disagrees with the recording.` : '.') +
+      `</p><button id="bedApply" type="button">Apply to scene.json</button>`;
+  }
+
+  return `<p class="hint">${zLine}<br>Levels per channel: ${z.levelsDb.map((v,i)=>`c${i} ${v} dB`).join(' · ')}</p>` +
+    `<table style="width:100%;font-size:12px;border-collapse:collapse">` +
+    `<tr style="text-align:left;opacity:.6"><th>stem</th><th>heard at</th><th>elev</th><th>scene</th><th></th></tr>${rows}</table>` +
+    align;
+}
+
 async function saveScene(notify) {
   scene.video = $('video').value; scene.bed = $('bed').value;
   const r = await fetch('/api/scene', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(scene) });

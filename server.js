@@ -345,6 +345,35 @@ async function handleAPI(req, res, pathname) {
       } catch (e) { return sendJSON(res, 409, { error: e.message }); }
     }
 
+    // ── Análisis del bed ambisónico ─────────────────────────────────────────
+    // Comprueba el orden de canales declarado y mide cuánto estaba girado el
+    // micro respecto a la cámara. Ver tools/bedAnalysis.js.
+    if (pathname === '/api/bed/analyze' && req.method === 'POST') {
+      const body = await readBody(req);
+      let scene = {};
+      try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); } catch (_) {}
+      const bed = body.bed || scene.bed;
+      const bedFormat = body.bedFormat || scene.bedFormat || 'fuma';
+      const stems = body.stems || scene.stems || [];
+      if (!bed) return sendJSON(res, 400, { error: 'No hay bed en la escena' });
+
+      // Las rutas vienen del cliente: confinadas a media/, sin salirse con '..'
+      const safe = (rel) => {
+        const p = path.resolve(ROOT, rel);
+        if (!p.startsWith(MEDIA_DIR + path.sep)) throw new Error(`Ruta fuera de media/: ${rel}`);
+        return p;
+      };
+      try {
+        const { analyze } = require('./tools/bedAnalysis');
+        const out = await analyze({
+          bed, bedFormat, stems,
+          seconds: Math.min(600, Math.max(20, +body.seconds || 120)),
+          resolve: safe,
+        });
+        return sendJSON(res, 200, out);
+      } catch (e) { return sendJSON(res, 400, { error: e.message }); }
+    }
+
     // ── Estado / parar ──────────────────────────────────────────────────────
     if (pathname === '/api/encode/status' && req.method === 'GET') {
       return sendJSON(res, 200, job ? {
