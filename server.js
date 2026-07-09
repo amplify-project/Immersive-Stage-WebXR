@@ -461,6 +461,13 @@ const handler = (req, res) => {
   res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+  // Cuántos cascos y consumidores hay enganchados ahora mismo. Es la forma más
+  // rápida de comprobar desde el propio Quest que la telemetría está llegando.
+  if (req.url === '/telemetry/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(relay ? relay.health() : { ok: false, reason: 'relay disabled' }));
+  }
+
   let pathname;
   try { pathname = decodeURIComponent(req.url.split('?')[0]); }
   catch { pathname = req.url.split('?')[0]; }
@@ -519,10 +526,53 @@ if (fs.existsSync(KEY) && fs.existsSync(CRT)) {
   scheme = 'http';
 }
 
+// ── Relay de telemetría, colgado de ESTE servidor ──────────────────────
+// WebXR obliga a servir el player por HTTPS, y una página https:// no puede
+// abrir un ws:// en claro (contenido mixto). Montando /ingest y /consume en
+// este mismo servidor, el casco ve un único origen, puerto y certificado: el
+// que ya aceptó al cargar el player. Con el relay en su propio puerto habría
+// que aceptar el autofirmado por segunda vez, y el fallo es mudo (el socket
+// muere sin error visible en la página).
+//
+// El relay sigue siendo autónomo (`node telemetry/relay.js`, o embebido por el
+// simulador): aquí solo se engancha a un servidor que ya existe. En producción
+// ese papel lo hace nginx, terminando TLS con un certificado real y enrutando
+// las mismas dos rutas.
+//
+// `ws` es la ÚNICA dependencia npm del proyecto y vive en telemetry/. Si no se
+// ha hecho `npm install` ahí, el player debe seguir funcionando sin telemetría,
+// así que el require va protegido.
+let relay = null;
+if (!/^(0|off|false)$/i.test(process.env.RELAY || '')) {
+  try {
+    const { createRelay } = require('./telemetry/relay');
+    relay = createRelay({ server, log: false });
+  } catch (e) {
+    const why = e.code === 'MODULE_NOT_FOUND' ? 'falta `cd telemetry && npm install`' : e.message;
+    console.warn(`⚠  Telemetría desactivada (${why}). El player funciona igual.`);
+  }
+}
+
+// El relay escucha siempre (cuesta nada, y Unity conecta a /consume antes de que
+// entre ningún casco). `telemetry.enabled` de scene.json es cosa del PLAYER: si
+// está a false nadie enviará poses, así que lo decimos aquí en vez de anunciar
+// un endpoint que parece listo y nunca recibe nada.
+function sceneTelemetryEnabled() {
+  try { return !!JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')).telemetry?.enabled; }
+  catch (_) { return false; }
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on ${scheme}://0.0.0.0:${PORT}  (root: ${ROOT})`);
   console.log(`  player → ${scheme}://<host>:${PORT}/index.html`);
   console.log(`  editor → ${scheme}://<host>:${PORT}/editor.html`);
+  if (relay) {
+    const note = sceneTelemetryEnabled()
+      ? 'scene.json: enabled'
+      : 'scene.json: enabled=false → ningún player enviará (usa ?telemetry=… para probar)';
+    console.log(`  telemetry → ${relay.scheme}://<host>:${PORT}/ingest · consume=/consume · health=/telemetry/health`);
+    console.log(`              ${note}`);
+  }
   if (scheme === 'http') {
     console.warn('⚠  Sin certificados → HTTP. WebXR (VR) NO funciona por IP sin HTTPS.');
     console.warn('   Genera un certificado autofirmado:  ./gen-cert.sh   y reinicia.');

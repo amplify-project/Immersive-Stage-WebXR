@@ -47,7 +47,7 @@
   },
   "telemetry": {
     "enabled": false,
-    "url": "wss://your-relay.example/ingest",
+    "url": "",
     "rateHz": 20,
     "flushMs": 100
   }

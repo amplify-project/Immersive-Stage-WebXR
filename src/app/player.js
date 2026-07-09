@@ -548,11 +548,17 @@ async function setupFOA() {
     // ── Telemetría de pose (opt-in) ───────────────────────────────────
     // Alimenta un relay externo con giro/posición de cabeza (la mirada la deriva
     // el relay a partir del cuaternión). Config en scene.json:
-    //   "telemetry": { "enabled": true, "url": "wss://host/ingest", "rateHz": 20 }
+    //   "telemetry": { "enabled": true, "rateHz": 20 }
+    // Sin "url" apunta a /ingest de este mismo origen, que server.js (o nginx)
+    // reenvía al relay: mismo host, puerto y certificado que el player, así que
+    // en el casco no hay que aceptar un segundo autofirmado. Pon "url" solo si
+    // el relay vive en otra máquina.
     // Overrides por URL:  ?telemetry=wss://host/ingest   ?player=NOMBRE
     {
       const _tq = new URLSearchParams(location.search);
-      const _turl = _tq.get('telemetry') || (telemetryCfg && telemetryCfg.enabled && telemetryCfg.url) || null;
+      const _sameOrigin = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ingest`;
+      const _tcfg = (telemetryCfg && telemetryCfg.enabled) ? (telemetryCfg.url || _sameOrigin) : null;
+      const _turl = _tq.get('telemetry') || _tcfg || null;
       if (_turl) {
         telemetry = new Telemetry({
           url: _turl,

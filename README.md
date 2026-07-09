@@ -43,7 +43,9 @@ a stem's gain as a function of **where you look × how much you zoom**.
 
 ## Requirements
 
-- **Node.js** (no npm dependencies; uses only built-in modules).
+- **Node.js**. The player and editor use only built-in modules; the optional
+  pose telemetry needs `ws` (`cd telemetry && npm install`). Without it the
+  server warns once and runs with telemetry disabled.
 - **ffmpeg** and **ffprobe** on `PATH` (with `libvpx-vp9`, `libopus`, `libx264`).
 - **git-lfs** (media files `*.mp4 / *.wav / *.mp3` are stored via LFS).
 - WebXR/VR over IP needs **HTTPS** → generate a self-signed certificate with
@@ -56,6 +58,7 @@ a stem's gain as a function of **where you look × how much you zoom**.
 ```bash
 git lfs install && git lfs pull      # fetch the sample media
 ./gen-cert.sh                        # cert for HTTPS/WebXR (once)
+cd telemetry && npm install && cd ..  # `ws`, only needed for pose telemetry
 node server.js                       # start the server (https if certs exist)
 ```
 
@@ -170,6 +173,40 @@ video.
 
 ---
 
+## Pose telemetry
+
+Head pose, zoom and focused musician stream out to an external render (e.g.
+Unity) over WebSocket. `server.js` hosts the relay on **its own port**, so the
+headset talks to `/ingest` on the same origin, port and certificate it already
+accepted to load the player — a relay on a separate port would need its own
+certificate, trusted separately, and the failure is silent.
+
+```bash
+cd telemetry && npm install      # once — `ws`
+node server.js                   # player, editor and relay in one process
+```
+
+Enable the client in `scene.json` (`"telemetry": { "enabled": true }`); leaving
+`url` empty points it at this server. Then:
+
+- **Consumer** (Unity) → `wss://<host>:60000/consume`
+- **Health** → `https://<host>:60000/telemetry/health` — how many headsets and
+  consumers are attached right now; open it from the Quest to confirm it landed.
+
+The relay listens regardless of `telemetry.enabled`, which only governs whether
+the *player* sends: consumers routinely connect before any headset does. Sampling
+starts on entering VR or AR and stops on exit, so nothing is sent from a desktop
+browser. Test without editing the scene with
+`?telemetry=wss://<host>:60000/ingest&player=NAME`.
+
+`RELAY=off` leaves the relay out. The relay also runs standalone
+(`node telemetry/relay.js`) for a separate machine or behind nginx, and ships a
+simulator that fakes N headsets so the Unity client can be built without one. See
+[`docs/telemetry.md`](docs/telemetry.md) for the wire protocol and
+[`telemetry/README.md`](telemetry/README.md) for the relay itself.
+
+---
+
 ## Player controls
 
 | Action | Desktop | WebXR (Quest) |
@@ -241,7 +278,9 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
     { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0, "closeup": "media/dr_cu.mp4" }
   ],
   "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5 },
-  "encode":    { "codec": "vp9", "scale": "1920:960", "vbitrate": "6000k", "seg": 2 }
+  "encode":    { "codec": "vp9", "scale": "1920:960", "vbitrate": "6000k", "seg": 2 },
+  // Pose telemetry. Empty "url" = /ingest on the server hosting the player.
+  "telemetry": { "enabled": false, "url": "", "rateHz": 20, "flushMs": 100 }
 }
 ```
 
