@@ -33,6 +33,27 @@ import { OmnitoneFOADecoder } from './OmnitoneFOADecoder.js';
 import { zoomMtx, zoomFactorToIndex } from './zoom-matrix.js';
 import { threeMatrix4ToAmbiR3, quaternionToMatrix4, mat3MulVec3 } from './ambisonicAxes.js';
 
+// ── Reordenado de canales del decodificador Opus ────────────────────────────
+// Chromium (y por tanto el navegador de la Quest) reordena el Opus multicanal a
+// ORDEN VORBIS cuando la pista tiene entre 3 y 8 canales, aunque se haya
+// encodeado con mapping_family 255 (canales discretos, sin layout). ffmpeg NO lo
+// hace: por eso el fichero se ve perfecto en local y sale barajado en el
+// navegador. Fuera de 3..8 no hay tabla y el orden es el de codificación — que es
+// justo por qué el spike de 10 canales (4 FOA + 6 stems) funcionó y nadie lo vio.
+//
+// srcToOut[s] = salida del ChannelSplitter donde aparece el canal FUENTE s.
+// La fila de 7 está verificada de forma empírica con chtest/ (un tono por canal)
+// en el navegador de la Quest; las demás son la tabla kOpusVorbisChannelMap de
+// Chromium. Verifica cualquier otra con channel-test.html antes de fiarte.
+const VORBIS_SRC_TO_OUT = {
+  3: [0, 2, 1],
+  4: [0, 1, 2, 3],                    // identidad
+  5: [0, 2, 1, 3, 4],
+  6: [0, 2, 1, 4, 5, 3],
+  7: [0, 2, 1, 5, 6, 4, 3],           // ✔ medida en Quest
+  8: [0, 2, 1, 6, 7, 4, 5, 3],
+};
+
 export class ImmersiveAudioEngine {
 
   /**
@@ -52,7 +73,9 @@ export class ImmersiveAudioEngine {
    *        idéntico al de 4 canales FOA de siempre.
    */
   constructor({ order = 1, sampleRate = 48000, audioContext = null,
-                renderer = 'omnitone', irUrl = null, stems = [] } = {}) {
+                renderer = 'omnitone', irUrl = null, stems = [], channelMap = 'auto' } = {}) {
+    this.channelMap = channelMap;   // 'auto' | 'identity' | array srcToOut explícito
+    this._chMap = null;             // resuelto en attach(), cuando se sabe el total
     this.order = order;
     this.sampleRate = sampleRate;
     this.irUrl = irUrl;
@@ -151,12 +174,14 @@ export class ImmersiveAudioEngine {
     // para el decoder FOA y dejamos los canales 4..N para las cadenas de stem.
     // Sin stems, el source va directo al decoder (comportamiento de siempre).
     let foaInput = this.source;
+    this._chMap = this._resolveChannelMap(4 + this._stems.length);
     if (this._stems.length) {
       const total = 4 + this._stems.length;
       this._chSplitter = this.ctx.createChannelSplitter(total);
       this.source.connect(this._chSplitter);
       const foaMerger = this.ctx.createChannelMerger(4);
-      for (let i = 0; i < 4; i++) this._chSplitter.connect(foaMerger, i, i);
+      // El canal FOA i del fichero puede salir por otra salida del splitter.
+      for (let i = 0; i < 4; i++) this._chSplitter.connect(foaMerger, this._out(i), i);
       foaInput = foaMerger;
     }
 
@@ -219,14 +244,35 @@ export class ImmersiveAudioEngine {
   // Tap al SOURCE (campo en marco del micro) → 4 analizadores de dominio
   // temporal. La rotación de cabeza y la alineación se aplican luego en JS
   // (getDominantDirection), así funciona igual con cualquier renderer.
+  // Salida del ChannelSplitter que lleva el canal `src` del fichero.
+  _out(src) { return this._chMap ? this._chMap[src] : src; }
+
+  /**
+   * Resuelve srcToOut para un total de canales dado. 'auto' aplica la tabla
+   * Vorbis en 3..8 (lo que hace Chromium) e identidad fuera de ese rango.
+   */
+  _resolveChannelMap(total) {
+    if (Array.isArray(this.channelMap)) return this.channelMap;
+    const identity = Array.from({ length: total }, (_, i) => i);
+    if (this.channelMap === 'identity') return identity;
+    const map = VORBIS_SRC_TO_OUT[total];
+    if (!map) return identity;
+    console.info(`[engine] ${total} canales → remapeo Vorbis del decodificador: [${map}]`);
+    return map;
+  }
+
   _setupDoA() {
-    const splitter = this.ctx.createChannelSplitter(4);
+    // El splitter debe tener TODOS los canales: creado con 4 sobre una pista de
+    // 7, Web Audio descarta los sobrantes ANTES de partir, y los 4 primeros ya
+    // vienen permutados (con 7 canales, la salida 3 trae un stem, no la X).
+    const total = 4 + this._stems.length;
+    const splitter = this.ctx.createChannelSplitter(total);
     this.source.connect(splitter);
     const analysers = [], bufs = [];
     for (let i = 0; i < 4; i++) {
       const a = this.ctx.createAnalyser();
       a.fftSize = 2048;
-      splitter.connect(a, i);
+      splitter.connect(a, this._out(i));
       analysers.push(a);
       bufs.push(new Float32Array(a.fftSize));
     }
@@ -397,7 +443,7 @@ export class ImmersiveAudioEngine {
       p.rolloffFactor = this._rolloffFactor;
       p.maxDistance   = this._maxDistance;
 
-      this._chSplitter.connect(g, ch, 0);   // canal 4+i (mono) → gain
+      this._chSplitter.connect(g, this._out(ch), 0);   // canal 4+i (mono) → gain
       g.connect(p);
       p.connect(this._stemBus);
       s.gain = g; s.panner = p;

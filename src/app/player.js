@@ -547,7 +547,11 @@ async function setupFOA() {
     if (!_stems) _stems = DEFAULT_STEMS;
     stemDefs = _stems;   // el modo AR ancla un objeto 3D por stem con su az/el
 
-    engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer, stems: _stems });
+    // ?chmap=identity desactiva el remapeo de canales del decodificador Opus
+    // (ver VORBIS_SRC_TO_OUT). Útil si un navegador NO reordena: compruébalo con
+    // channel-test.html?src=/chtest/manifest.mpd&ch=7 antes de tocarlo.
+    const _chmap = new URLSearchParams(location.search).get('chmap') || 'auto';
+    engine = new ImmersiveAudioEngine({ order: 1, renderer: _renderer, stems: _stems, channelMap: _chmap });
     // El audio sale del <video> vía Web Audio: hay que desmutearlo (si no, el tap
     // recibe silencio). No hay doble salida: createMediaElementSource reencamina
     // el audio del elemento al grafo (no suena por la salida normal del <video>).

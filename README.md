@@ -117,7 +117,7 @@ same manifest with `CLOSEUPS` (`;`-separated, in stem order), `CLOSEUP_SCALE`
 (default `1280:720`) and `CLOSEUP_VBITRATE` (default `2500k`). See
 [`docs/core-api.md`](docs/core-api.md).
 
-### ⚠️ Two things that matter for the Quest
+### ⚠️ Three things that matter for the Quest
 
 1. **Use VP9 / WebM** (not H.264). H.264 puts Opus in **MP4**, and the Oculus
    browser **won't play multichannel Opus in MP4** → no video, no audio. WebM
@@ -129,6 +129,16 @@ same manifest with `CLOSEUPS` (`;`-separated, in stem order), `CLOSEUP_SCALE`
    ffmpeg -i media/video.mp4 -an -vf "scale=1920:960,format=yuv420p" \
      -c:v libx264 -profile:v high -preset veryfast -crf 20 media/video_1920.mp4
    ```
+3. **The browser reorders Opus channels when the track has 3–8 of them.**
+   Chromium maps multichannel Opus to Vorbis channel order even for
+   `mapping_family 255` (discrete channels, no layout), while ffmpeg does not —
+   so the file measures perfectly on disk and arrives shuffled in Web Audio. With
+   4 FOA + 3 stems (7 channels) the ambisonic X channel receives a musician's
+   stem and the stems play at each other's positions. The engine undoes this
+   (`VORBIS_SRC_TO_OUT`); `?chmap=identity` disables it. Channel counts of 4, or
+   of 9 and above, are passed through untouched, which is why the original
+   10-channel spike never showed the problem. Verify any layout with
+   `channel-test.html?src=/chtest/manifest.mpd&ch=7` — one tone per channel.
 
 ---
 
