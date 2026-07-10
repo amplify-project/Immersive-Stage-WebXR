@@ -22,3 +22,7 @@ x4_bridge/insta360_v4l2_bridge
 # Editor swap / backup files
 *.sw[a-p]
 *~
+
+# Recorded telemetry sessions (telemetry/recorder.js)
+telemetry/*.csv
+session-*.csv
