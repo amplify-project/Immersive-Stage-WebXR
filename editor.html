@@ -88,6 +88,29 @@
     </p>
     <button id="bedAnalyze" type="button">Analyse bed</button>
     <div id="bedReport" style="display:none;margin-top:10px"></div>
+
+    <details id="bedBuild" style="margin-top:14px">
+      <summary style="cursor:pointer">Build a bed from separate W/X/Y/Z files</summary>
+      <p class="hint">
+        Pick the mono file for each ambisonic component. They are written in the order the
+        <b>Format</b> above expects — FuMa as W,X,Y,Z and AmbiX as W,Y,Z,X — so label them by
+        component, not by the position they had in the recorder. Channel order is not something
+        <i>Analyse bed</i> can fix afterwards: get it right here.
+      </p>
+      <div class="row">
+        <div><label>W (omni)</label><select id="bedW"></select></div>
+        <div><label>X (front)</label><select id="bedX"></select></div>
+      </div>
+      <div class="row">
+        <div><label>Y (left)</label><select id="bedY"></select></div>
+        <div><label>Z (up)</label><select id="bedZ"></select></div>
+      </div>
+      <label>Output file</label>
+      <input id="bedOut" type="text" value="media/bed.wav" spellcheck="false">
+      <p class="hint">Gains are left alone: FuMa components stay FuMa. Existing files are never overwritten.</p>
+      <button id="bedBuildGo" type="button">Build bed</button>
+      <div id="bedBuildReport" style="display:none;margin-top:10px"></div>
+    </details>
   </div>
 
   <div class="card" id="liveSources" style="display:none">
@@ -339,6 +362,17 @@ function buildSelectors() {
   else { const foa = auds.find(m=>m.channels===4); scene.bed = foa ? foa.file : ($('bed').value||''); $('bed').value = scene.bed; }
   $('bedFormat').value = scene.bedFormat || 'fuma';
   $('proxySrc').value = scene.video || ($('proxySrc').value||'');
+
+  // Las componentes sueltas son mono. Ofrecer los estéreo o el propio bed sólo
+  // invita a construir basura: make-bed.sh los rechaza, pero mejor no ofrecerlos.
+  const monos = auds.filter(m => m.channels === 1);
+  const monoOpts = monos.map(m => opt(m)).join('') || '<option value="">— no mono audio in media/ —</option>';
+  for (const id of ['bedW','bedX','bedY','bedZ']) $(id).innerHTML = monoOpts;
+  // Adivina por el nombre: w.wav / bed_X.wav / take-y.wav…
+  for (const [id, comp] of [['bedW','w'],['bedX','x'],['bedY','y'],['bedZ','z']]) {
+    const hit = monos.find(m => new RegExp(`(^|[^a-z])${comp}([^a-z]|$)`, 'i').test(m.name.replace(/\.[^.]+$/, '')));
+    if (hit) $(id).value = hit.file;
+  }
 }
 
 // ── Live device selectors ─────────────────────────────────────────────────────
@@ -396,6 +430,7 @@ function bindControls() {
   $('bed').onchange     = e => scene.bed = e.target.value;
   $('bedFormat').onchange = e => scene.bedFormat = e.target.value;
   $('bedAnalyze').onclick = analyseBed;
+  $('bedBuildGo').onclick = buildBed;
   // spotlight
   for (const k of ['maxBoost','focusExp','restGain','zoomMax']) {
     const el = $(k); el.value = scene.spotlight[k];
@@ -537,6 +572,45 @@ function radarMove(ev){ if(dragging<0) return; const {x,y}=radarPos(ev);
 function radarUp(){ dragging=-1; }
 radar.addEventListener('mousedown',radarDown); window.addEventListener('mousemove',radarMove); window.addEventListener('mouseup',radarUp);
 radar.addEventListener('touchstart',radarDown,{passive:false}); radar.addEventListener('touchmove',radarMove,{passive:false}); radar.addEventListener('touchend',radarUp);
+
+// ── Bed construction ─────────────────────────────────────────────────────────
+// Four mono components in, one 4-channel bed out. The server hands it to
+// make-bed.sh, the single place that decides channel order, and echoes back the
+// exact command so it can be repeated (or scripted) from a terminal.
+async function buildBed() {
+  const box = $('bedBuildReport'), btn = $('bedBuildGo');
+  const w = $('bedW').value, x = $('bedX').value, y = $('bedY').value, z = $('bedZ').value;
+  const out = $('bedOut').value.trim(), bedFormat = $('bedFormat').value;
+  if (!w || !x || !y || !z) return toast('Pick all four components');
+  if (!out) return toast('Name the output file');
+  // Cuatro selectores con el mismo fichero es un error de dedo, no una decisión.
+  if (new Set([w, x, y, z]).size !== 4) return toast('The four components must be different files');
+
+  btn.disabled = true; box.style.display = 'block';
+  box.innerHTML = '<p class="hint">Building… (merging four mono files)</p>';
+  let r;
+  try {
+    const res = await fetch('/api/bed/build', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ w, x, y, z, out, bedFormat }) });
+    r = await res.json();
+    if (!res.ok) throw new Error(r.error || 'HTTP ' + res.status);
+  } catch (e) {
+    box.innerHTML = `<p class="hint" style="color:#f66">Build failed: ${e.message}</p>`;
+    btn.disabled = false; return;
+  }
+  btn.disabled = false;
+  const order = bedFormat === 'ambix' ? 'W,Y,Z,X' : 'W,X,Y,Z';
+  box.innerHTML = `<p class="hint">Wrote <b>${r.out}</b> — 4 channels as ${order} (${bedFormat}).</p>` +
+    `<pre style="overflow-x:auto;font-size:12px">${r.cmd}</pre>` +
+    `<p class="hint">Now run <i>Analyse bed</i>: the alignment you have was measured on the old file.</p>`;
+
+  // Que aparezca en el selector y quede elegido, o el siguiente paso es buscarlo a mano.
+  const mRes = await fetch('/api/media').then(res => res.ok ? res.json() : { media: [] }).catch(() => ({ media: [] }));
+  media = mRes.media || [];
+  scene.bed = r.out; scene.bedFormat = r.bedFormat;
+  buildSelectors();
+  toast('bed → ' + r.out);
+}
 
 // ── Save / encode / proxy / status ────────────────────────────────────────────
 // ── Bed analysis ─────────────────────────────────────────────────────────────
