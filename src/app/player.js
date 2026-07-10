@@ -30,6 +30,11 @@ let xrSession  = null;
 let arSession  = null;               // sesión WebXR immersive-ar (passthrough)
 let arSources  = [];                 // Object3D por stem, anclados en la sala
 let arPrevSpot = null;               // spotlight previo (restaurar al salir de AR)
+let arPrevBed  = null;               // nivel de bed previo (idem)
+let arCfg      = {};                 // bloque `ar` de scene.json
+// Cuánto se deja el bed en passthrough. 0.35 ≈ −9 dB: se sigue oyendo el
+// concierto de fondo, pero los músicos anclados mandan. scene.json → ar.bedGain.
+const AR_BED_GAIN = 0.35;
 let stemDefs   = [];                 // definición de stems en uso (az/el/name)
 let isDragging = false, prevMouse = {x:0, y:0};
 let yaw = 0, pitch = 0;
@@ -149,9 +154,11 @@ function updateSpotLog() {
   }
   const s = engine.getSpotlightState();
   const sgn = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(0).padStart(3);
+  // duck × nivel: es lo que se oye. En AR el duck está a 1 y el nivel bajo.
+  const bed = (s.bedGain == null ? 1 : s.bedGain) * (s.bedLevel == null ? 1 : s.bedLevel);
   spotLogEl.textContent =
     `zoom ${(s.zN * 100).toFixed(0)}%   mirada  az ${s.gazeAzimuthDeg.toFixed(0)}°  ` +
-    `el ${s.gazeElevationDeg.toFixed(0)}°   bed ${(s.bedGain == null ? 1 : s.bedGain).toFixed(2)}\n` +
+    `el ${s.gazeElevationDeg.toFixed(0)}°   bed ${bed.toFixed(2)}\n` +
     `             te falta        peso  ganancia\n` +
     s.stems.map(t => `${t.name.padEnd(8)} az ${sgn(-t.dAzDeg)}° el ${sgn(-t.dElDeg)}°  ` +
                      `${t.weight.toFixed(2)}  ${(t.gain == null ? 0 : t.gain).toFixed(2)}`).join('\n');
@@ -573,6 +580,7 @@ async function setupFOA() {
         if (_sc.spotlight) _spot = _sc.spotlight;
         if (_sc.sources) _sources = _sc.sources;
         if (_sc.alignment) _align = _sc.alignment;
+        if (_sc.ar) arCfg = _sc.ar;
         if (_sc.telemetry) telemetryCfg = _sc.telemetry;
       }
     } catch (_) { /* sin escena → DEFAULT_STEMS */ }
@@ -1264,10 +1272,17 @@ async function enterAR() {
     // En AR cada fuente debe oírse desde su sitio (no solo al "mirar + zoom"):
     // subimos restGain a tope y anulamos el boost por zoom; la espacialización y
     // la distancia las modela el PannerNode HRTF.
+    //
+    // Y bajamos el bed: en 360 es el concierto entero, pero en passthrough
+    // compite con la sala real y tapa a los músicos anclados. No sirve el duck
+    // del spotlight (con zoom 0 el peso de todo stem es 0, así que nunca actúa):
+    // va por setBedLevel, que el bucle de render no reescribe.
     if (engine) {
       arPrevSpot = engine.getSpotlightParams();
+      arPrevBed  = engine.getBedLevel();
       engine.setZoomNormalized(0);
       engine.setSpotlightParams({ restGain: 1 });
+      engine.setBedLevel(arCfg.bedGain != null ? arCfg.bedGain : AR_BED_GAIN);
     }
     buildARSources();
 
@@ -1277,6 +1292,7 @@ async function enterAR() {
       renderer.setClearAlpha(1);
       if (sphere) sphere.visible = true;
       if (engine && arPrevSpot) engine.setSpotlightParams(arPrevSpot);
+      if (engine && arPrevBed != null) engine.setBedLevel(arPrevBed);
       arSession = null;
       document.getElementById('ar-btn').textContent = 'AR';
       renderer.setAnimationLoop(null);
