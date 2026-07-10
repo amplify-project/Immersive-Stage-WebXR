@@ -136,6 +136,16 @@ function updateSpotLog() {
       'padding:8px 10px;background:rgba(0,0,0,.72);color:#0f0;border-radius:6px;' +
       'font:12px/1.35 monospace;pointer-events:none';
     document.body.appendChild(spotLogEl);
+    // Retícula en el centro exacto de la vista. `mirada az/el` es la dirección
+    // que pasa por aquí, así que centrar un músico sobre la cruz y copiar esos
+    // dos números a su entrada de scene.json lo coloca donde se le ve. A ojo el
+    // centro se yerra en varios grados, que es lo que se está midiendo.
+    const cross = document.createElement('div');
+    cross.style.cssText = 'position:fixed;left:50%;top:50%;z-index:9999;' +
+      'width:21px;height:21px;margin:-11px 0 0 -11px;pointer-events:none;' +
+      'background:linear-gradient(#0f0,#0f0) center/1px 100% no-repeat,' +
+      'linear-gradient(#0f0,#0f0) center/100% 1px no-repeat;opacity:.85';
+    document.body.appendChild(cross);
   }
   const s = engine.getSpotlightState();
   const sgn = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(0).padStart(3);
