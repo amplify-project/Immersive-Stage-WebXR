@@ -290,6 +290,18 @@ assemble_venc() {
 #  amerge → 4+N canales discretos. Sin stems, -af sobre el FOA (camino de 4ch).
 build_inputs() {   # $1 = "live" | "vod"  → rellena IN_ARGS y A_ARGS globales
   local mode="$1"
+
+  # FOA_FILTER lee los canales 0..3 del lecho por índice. Con un fichero de más
+  # canales ffmpeg cogería los cuatro primeros sin protestar, y la escena sonaría
+  # girada o plana sin dar la cara. Que se note aquí y no en la Quest.
+  local bedch; bedch=$(ffprobe -v error -select_streams a:0 \
+                       -show_entries stream=channels -of csv=p=0 "$AUDIO" 2>/dev/null || echo '')
+  if [[ -n "$bedch" && "$bedch" != 4 ]]; then
+    echo "ERROR: el lecho '$AUDIO' tiene $bedch canales; se esperan 4 (B-format FOA)."
+    echo "       Extrae los 4 buenos:  ./make-bed.sh -l '$AUDIO'"
+    exit 1
+  fi
+
   IN_ARGS=()
   local loop=()
   [[ "$mode" == "live" ]] && loop=(-stream_loop -1 -re)

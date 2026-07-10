@@ -76,6 +76,12 @@ Open in the browser:
 
 1. **Sources**: pick the 360 video, the FOA bed (4 channels) and its format
    (*FuMa* or *AmbiX*).
+   The bed must have **exactly 4 channels**, and channel *i* must be ambisonic
+   component *i* — nothing downstream can tell otherwise. Video editors happily
+   export a B-format take as 7.1 with every channel duplicated. Check and extract
+   with `./make-bed.sh -l take.wav`, then
+   `./make-bed.sh take.wav media/bed.wav 0,2,4,6`. The encoder refuses any other
+   channel count rather than silently reading the wrong four.
 2. **Musicians**: add one stem per instrumentalist and **drag it on the top-down
    radar** to place it in azimuth (top = front of the video, left = +90°). Fine
    tune name/azimuth/elevation in the side panel.
@@ -284,8 +290,15 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
   "bed":   "media/ambisonic_bformat.wav",
   "bedFormat": "fuma",                       // fuma | ambix
   "stems": [
-    // "closeup" is optional (Caso B): a per-musician close-up video track
-    { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0, "closeup": "media/dr_cu.mp4" }
+    // "closeup" is optional (Caso B): a per-musician close-up video track.
+    // "gainDb" is optional: a fixed trim for this take. The spotlight boosts
+    // every stem by the same maxBoost, so a musician recorded below the bed
+    // never lifts off it, however hard you look at him. "Analyse bed" measures
+    // the imbalance and fills these in.
+    // "elevationDeg" is not decoration: the focus cone is circular around your
+    // gaze, so a musician 40° below the camera is 40° off however well you aim.
+    { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0,
+      "gainDb": 0, "closeup": "media/dr_cu.mp4" }
   ],
   // `bedDuck` pulls the FOA bed down as you focus a musician. Without it the
   // spotlight can only add a stem on top of the bed's own copy of that same

@@ -30,7 +30,7 @@ import { HOASTBinDecoder }  from './HOASTBinDecoder.js';
 import { HOASTloader }      from './HOASTloader.js';
 import { MatrixMultiplier } from './MatrixMultiplier.js';
 import { OmnitoneFOADecoder } from './OmnitoneFOADecoder.js';
-import { zoomMtx, zoomFactorToIndex } from './zoom-matrix.js';
+import { zoomMtx, zoomFactorToIndex, ZOOM_MIN, ZOOM_MAX } from './zoom-matrix.js';
 import { threeMatrix4ToAmbiR3, quaternionToMatrix4, mat3MulVec3 } from './ambisonicAxes.js';
 import { resolveChannelMap } from './opusChannelMap.js';
 
@@ -97,6 +97,12 @@ export class ImmersiveAudioEngine {
       az:   (s.azimuthDeg   || 0) * D2R,
       el:   (s.elevationDeg || 0) * D2R,
       name: s.name || ('stem' + i),
+      // Los stems no vienen igualados: cada músico se grabó con su micro y su
+      // preamplificador. Sin este trim, `maxBoost` sube a todos lo mismo y el
+      // que se grabó 6 dB por debajo nunca llega a despegarse del bed, por más
+      // que se le mire. Es una propiedad de la TOMA, así que vive en scene.json.
+      trimDb: s.gainDb || 0,
+      trim: null,
       gain: null, panner: null, dir: null,
       pos: null,          // posición mundo [x,y,z] (anclada) o derivada de dir
       anchored: false,    // true → coordenadas de sala; false → esfera en la cabeza
@@ -410,6 +416,11 @@ export class ImmersiveAudioEngine {
       // attach) si está anclada; si no, sobre la esfera centrada en la cabeza.
       if (!s.anchored) s.pos = this._staticPos(s);
 
+      // Trim fijo de la toma → gain del spotlight → panner. Separados a propósito:
+      // el spotlight escribe su gain sin saber nada del desequilibrio de niveles.
+      const t = this.ctx.createGain();
+      t.gain.value = Math.pow(10, s.trimDb / 20);
+
       const g = this.ctx.createGain();
       g.gain.value = this._restGain;
 
@@ -420,10 +431,11 @@ export class ImmersiveAudioEngine {
       p.rolloffFactor = this._rolloffFactor;
       p.maxDistance   = this._maxDistance;
 
-      this._chSplitter.connect(g, this._out(ch), 0);   // canal 4+i (mono) → gain
+      this._chSplitter.connect(t, this._out(ch), 0);   // canal 4+i (mono) → trim
+      t.connect(g);
       g.connect(p);
       p.connect(this._stemBus);
-      s.gain = g; s.panner = p;
+      s.trim = t; s.gain = g; s.panner = p;
       this._setPannerPos(s, s.pos);          // coloca el panner en su posición
     });
   }
@@ -617,7 +629,11 @@ export class ImmersiveAudioEngine {
     if (!this._stems.length || !this.ctx) return;
     const f = this._lookForward, lp = this._listenerPos;
     const lo = this._zoomMin, hi = this._zoomMax;
-    const zN = Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)));
+    // hi === lo (p.ej. ambos recortados a ZOOM_MAX) daría NaN y dejaría todos
+    // los stems mudos: en ese caso el spotlight es un interruptor.
+    const zN = hi - lo > 1e-6
+      ? Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)))
+      : (this._zoomFactor >= hi ? 1 : 0);
     const now = this.ctx.currentTime;
     let maxW = 0;                       // peso del stem más enfocado → duck del bed
     for (const s of this._stems) {
@@ -680,15 +696,91 @@ export class ImmersiveAudioEngine {
    * @param {number} [o.focusExp]  Cierre del cono de enfoque (mayor = más estrecho).
    * @param {number} [o.zoomMin]   Factor de zoom a partir del cual empieza el boost.
    * @param {number} [o.zoomMax]   Factor de zoom que da el boost completo.
+   *
+   * zoomMin/zoomMax van en la MISMA unidad que setZoomByFactor: el factor de
+   * zoom, que solo existe entre ZOOM_MIN y ZOOM_MAX (lo que cubre la tabla de
+   * matrices ambisónicas). Pedir un zoomMax de 3.6 no hace el boost más
+   * agresivo: lo hace inalcanzable, porque el zoom del escritorio llega a 2.5 y
+   * el spotlight se queda a medias para siempre. Se recorta y se avisa.
    */
   setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax, bedDuck } = {}) {
+    const clampZoom = (v, what) => {
+      const c = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v));
+      if (c !== v) console.warn(`[audio] spotlight.${what}=${v} fuera de [${ZOOM_MIN}, ${ZOOM_MAX}] → ${c}`);
+      return c;
+    };
     if (restGain != null) this._restGain = restGain;
     if (maxBoost != null) this._maxBoost = maxBoost;
     if (focusExp != null) this._focusExp = focusExp;
-    if (zoomMin  != null) this._zoomMin  = zoomMin;
-    if (zoomMax  != null) this._zoomMax  = zoomMax;
+    if (zoomMin  != null) this._zoomMin  = clampZoom(zoomMin, 'zoomMin');
+    if (zoomMax  != null) this._zoomMax  = clampZoom(zoomMax, 'zoomMax');
     if (bedDuck  != null) this._bedDuck  = Math.min(1, Math.max(0, bedDuck));
     this._updateSpotlight();
+  }
+
+  /**
+   * Trim de un stem, en dB. Iguala niveles de grabación dispares: el spotlight
+   * sube a todos por igual, así que un músico grabado 6 dB por debajo del resto
+   * no se despega del bed por mucho que se le mire. Se ajusta en vivo desde la
+   * consola y su sitio definitivo es scene.json → `stems[i].gainDb`.
+   * @param {number|string} which  índice o nombre del stem
+   * @param {number} dB
+   */
+  setStemGainDb(which, dB) {
+    const i = typeof which === 'number' ? which : this._stems.findIndex(s => s.name === which);
+    const s = this._stems[i];
+    if (!s) throw new Error(`stem desconocido: ${which}`);
+    s.trimDb = dB;
+    if (s.trim) s.trim.gain.setTargetAtTime(Math.pow(10, dB / 20), this.ctx.currentTime, 0.05);
+  }
+
+  /**
+   * Estado instantáneo del spotlight: qué zoom ve, qué peso tiene cada stem y
+   * qué ganancia ha alcanzado de verdad el GainNode. Sirve para ver por qué un
+   * stem no sube — si el peso es 0 el problema es la mirada o el zoom; si el
+   * peso sube y la ganancia no, el problema está en la cadena de audio.
+   */
+  getSpotlightState() {
+    const lo = this._zoomMin, hi = this._zoomMax;
+    const zN = hi - lo > 1e-6
+      ? Math.min(1, Math.max(0, (this._zoomFactor - lo) / (hi - lo)))
+      : (this._zoomFactor >= hi ? 1 : 0);
+    const f = this._lookForward, lp = this._listenerPos;
+    // Azimut/elevación de la mirada en la misma convención que scene.json: apunta
+    // a un músico en la imagen y lee aquí el azimut que hay que escribirle.
+    const D = 180 / Math.PI;
+    return {
+      zoomFactor: this._zoomFactor, zoomMin: lo, zoomMax: hi, zN,
+      gazeAzimuthDeg: Math.atan2(-f[0], -f[2]) * D,
+      gazeElevationDeg: Math.asin(Math.max(-1, Math.min(1, f[1]))) * D,
+      bedGain: this._bedGain ? this._bedGain.gain.value : null,
+      // El ángulo total no dice DÓNDE fallas. Separado en azimut y elevación sí:
+      // 42° repartidos como (6°, 42°) es que estás mirando al suelo, no que el
+      // azimut del músico esté mal escrito.
+      stems: this._stems.map(s => {
+        let d = s.dir;
+        if (s.anchored && s.pos) {
+          const v = [s.pos[0] - lp[0], s.pos[1] - lp[1], s.pos[2] - lp[2]];
+          const n = Math.hypot(...v) || 1;
+          d = v.map(x => x / n);
+        }
+        const dot = d ? d[0] * f[0] + d[1] * f[1] + d[2] * f[2] : 0;
+        const az = d ? Math.atan2(-d[0], -d[2]) * D : 0;
+        const el = d ? Math.asin(Math.max(-1, Math.min(1, d[1]))) * D : 0;
+        const gz = Math.atan2(-f[0], -f[2]) * D;
+        const ge = Math.asin(Math.max(-1, Math.min(1, f[1]))) * D;
+        let dAz = gz - az; while (dAz > 180) dAz -= 360; while (dAz <= -180) dAz += 360;
+        return {
+          name: s.name, anchored: !!s.anchored,
+          azimuthDeg: az, elevationDeg: el,
+          dAzDeg: dAz, dElDeg: ge - el,
+          angleDeg: Math.acos(Math.max(-1, Math.min(1, dot))) * D,   // mirada ↔ músico
+          weight: s._weight || 0,
+          trimDb: s.trimDb,
+          gain: s.gain ? s.gain.gain.value : null,
+        };
+      }),
+    };
   }
 
   /** Parámetros actuales del spotlight (para guardar/restaurar, p.ej. al entrar/salir de AR). */

@@ -115,7 +115,36 @@ function renderLoop() {
   }
   if (closeupReady && closeupMesh.visible && closeupTexture) closeupTexture.needsUpdate = true;
   updateAmbiViz();
+  updateSpotLog();
   renderer.render(scene, camera);
+}
+
+// ── HUD del spotlight (?spotlog=1) ─────────────────────────────────────────
+// Un stem que no sube al hacer zoom puede fallar en tres sitios: el zoom no
+// llega al motor (factor congelado), la mirada no lo enfoca (peso 0) o la
+// cadena de audio no obedece (peso alto, ganancia plana). Aquí se ven los tres.
+const SPOTLOG = new URLSearchParams(location.search).get('spotlog') === '1';
+let spotLogEl = null, spotLogNext = 0;
+function updateSpotLog() {
+  if (!SPOTLOG || !engine || !engine.getSpotlightState) return;
+  const now = performance.now();
+  if (now < spotLogNext) return;
+  spotLogNext = now + 100;                 // 10 Hz: legible y sin coste
+  if (!spotLogEl) {
+    spotLogEl = document.createElement('pre');
+    spotLogEl.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:9999;margin:0;' +
+      'padding:8px 10px;background:rgba(0,0,0,.72);color:#0f0;border-radius:6px;' +
+      'font:12px/1.35 monospace;pointer-events:none';
+    document.body.appendChild(spotLogEl);
+  }
+  const s = engine.getSpotlightState();
+  const sgn = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(0).padStart(3);
+  spotLogEl.textContent =
+    `zoom ${(s.zN * 100).toFixed(0)}%   mirada  az ${s.gazeAzimuthDeg.toFixed(0)}°  ` +
+    `el ${s.gazeElevationDeg.toFixed(0)}°   bed ${(s.bedGain == null ? 1 : s.bedGain).toFixed(2)}\n` +
+    `             te falta        peso  ganancia\n` +
+    s.stems.map(t => `${t.name.padEnd(8)} az ${sgn(-t.dAzDeg)}° el ${sgn(-t.dElDeg)}°  ` +
+                     `${t.weight.toFixed(2)}  ${(t.gain == null ? 0 : t.gain).toFixed(2)}`).join('\n');
 }
 
 function getZoomFactor() {

@@ -25,6 +25,15 @@ the wire protocol and the `TLS=on` / `TLS_KEY` / `TLS_CERT` options.
 brings up a relay and N simulated players (seated apart, heads moving). Flags:
 `--clients N --rate Hz --port P --url <ingest> --churn R --seconds S`.
 
+Nothing is persisted — the relay is in-memory by design. To keep a session,
+record it: `recorder.js` is one more `/consume` client writing a CSV row per
+sample, so it runs beside the Unity render without disturbing it, and from any
+machine. Ctrl-C (or `--seconds N`) closes the file and prints a summary.
+
+```bash
+node recorder.js --url wss://<PC-IP>:60000/consume --out session.csv
+```
+
 Full protocol, client config and a Unity/C# consumer: [`../docs/telemetry.md`](../docs/telemetry.md).
 
 The player client lives separately in `../src/telemetry/Telemetry.js` and is

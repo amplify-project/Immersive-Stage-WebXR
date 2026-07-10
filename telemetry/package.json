@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node relay.js",
     "sim": "node simulator.js",
+    "record": "node recorder.js",
     "demo:producer": "node producer-demo.js",
     "demo:consumer": "node consumer-demo.js",
     "test": "node smoke-test.js"
