@@ -34,6 +34,11 @@ no GPU for video, no A/V drift to manage.
   `engine.update()` per frame → the HRTF `PannerNode` follows the object, with
   natural distance attenuation.
 - Head moves through the room (`engine.setRotationFromMatrix4(pose.transform.matrix)`).
+- The FOA bed drops to `scene.json` → `ar.bedGain` (default `0.35`) via
+  `engine.setBedLevel()`, and back to its old level on exit. The bed is the whole
+  concert, musicians included: at full level it competes with the real room and
+  buries the anchored sources. Note this is *not* the spotlight's `bedDuck`, which
+  is driven by gaze × zoom and never fires in AR (zoom is 0 there).
 
 The audio engine is already generic: `bindStemToObject` / `update` follow **any**
 `Object3D`, so the partner only works in Three.js / WebXR placing objects — the
