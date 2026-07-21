@@ -29,6 +29,8 @@ let audioCtx   = null, gainNode = null;  // referencias derivadas del engine
 let xrSession  = null;
 let arSession  = null;               // sesión WebXR immersive-ar (passthrough)
 let arSources  = [];                 // Object3D por stem, anclados en la sala
+let roomGroup  = null;               // marco de sala: padre de las fuentes ancladas
+let arCalibrating = false;           // grip apretado: se está recolocando la sala
 let arPrevSpot = null;               // spotlight previo (restaurar al salir de AR)
 let arPrevBed  = null;               // nivel de bed previo (idem)
 let arCfg      = {};                 // bloque `ar` de scene.json
@@ -80,6 +82,12 @@ function initThree() {
   sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x111111 }));
   sphere.position.set(0, 0, 0);  // centrada en el origen
   scene.add(sphere);
+
+  // Marco de sala: de él cuelgan las fuentes ancladas en AR. Su transformada ES
+  // la calibración (ver applyARCalib), así que moverlo mueve a la vez los
+  // marcadores y sus panners, que siguen la matrixWorld.
+  roomGroup = new THREE.Group();
+  scene.add(roomGroup);
 
   // Close-up (Caso B): plano 16:9 ~2.5 m delante de la cámara. Como es hijo de
   // la cámara, queda siempre centrado en la vista (escritorio y XR). Oculto
@@ -1223,11 +1231,113 @@ function makeSourceMarker(name) {
   return g;
 }
 
+// ══════════════════════════════════════════════════════
+// CALIBRACIÓN MANUAL DE LA SALA (AR)
+// ══════════════════════════════════════════════════════
+// En AR el origen de `local-floor` cae donde cada usuario arrancó la sesión: es
+// arbitrario y distinto en cada gafa, así que un mismo músico acaba en un sitio
+// distinto para cada espectador. Lo que hace falta no es registrar la sala
+// físicamente, sino que todos compartan la misma disposición.
+//
+// La corrección tiene solo 4 grados de libertad —giro en yaw y desplazamiento en
+// XZ—, porque `local-floor` ya pone el suelo en y=0 y la IMU alinea la vertical.
+// Resolver 6 GdL inclinaría la sala unos grados y sonaría raro sin dar ningún
+// error. Esos tres números son la transformada de `roomGroup`.
+//
+// Aquí no se calcula nada: el usuario mueve la sala con los joysticks (con el
+// grip apretado) hasta que los marcadores se posan sobre los músicos reales. La
+// tolerancia es amplia —el oído resuelve ~5-10° fuera del eje, unos 40 cm a 3 m—,
+// así que ajustar a ojo sobra. Cuando el día de mañana lleguen las posiciones de
+// las cámaras, estos tres números los fijará el tracking en vez de la mano, y el
+// resto del camino (marcadores dentro de roomGroup) no cambia.
+
+const AR_CALIB_MOVE = 0.02;    // m por frame a fondo de joystick (~1.5 m/s)
+const AR_CALIB_TURN = 0.015;   // rad por frame a fondo (~60 °/s)
+const AR_CALIB_DEAD = 0.15;    // zona muerta, como el joystick de zoom
+
+// Una calibración por sala: la toma se cambia sin salir de la sala, y la sala no
+// se mueve entre tomas. `ar.venue` en scene.json separa sedes si hiciera falta.
+function arCalibKey() { return 'arCalib:' + (arCfg.venue || 'default'); }
+
+function loadARCalib() {
+  try {
+    const c = JSON.parse(localStorage.getItem(arCalibKey()));
+    if (c && isFinite(c.x) && isFinite(c.z) && isFinite(c.yaw)) return c;
+  } catch (_) { /* nada guardado o corrupto → sin calibrar */ }
+  return { x: 0, z: 0, yaw: 0 };
+}
+
+function saveARCalib() {
+  const c = { x: roomGroup.position.x, z: roomGroup.position.z, yaw: roomGroup.rotation.y };
+  try { localStorage.setItem(arCalibKey(), JSON.stringify(c)); } catch (_) { /* modo privado */ }
+}
+
+function applyARCalib({ x, z, yaw }) {
+  roomGroup.position.set(x, 0, z);
+  roomGroup.rotation.y = yaw;
+}
+
+// Gira la sala alrededor del usuario, no de su propio origen. Girándola sobre el
+// origen la escena ORBITA un punto arbitrario —se va de lado mientras gira— y
+// alinear se vuelve imposible; alrededor de la cabeza el mundo gira "en torno a
+// ti", que es lo que la mano espera.
+function rotateRoomAroundUser(dYaw, head) {
+  const c = Math.cos(dYaw), s = Math.sin(dYaw);
+  const dx = roomGroup.position.x - head.x;
+  const dz = roomGroup.position.z - head.z;
+  roomGroup.position.x = head.x + dx * c + dz * s;
+  roomGroup.position.z = head.z - dx * s + dz * c;
+  roomGroup.rotation.y += dYaw;
+}
+
+// Un frame de calibración. Solo con el grip apretado, para no descolocar la sala
+// sin querer con el joystick. Izquierdo desplaza, derecho gira, y pulsar el
+// joystick vuelve al punto de partida si uno se pierde.
+function updateARCalib(session, pose) {
+  const head = pose.transform.position;
+  const q = pose.transform.orientation;
+  // Yaw de la cabeza: el bucle de AR no mantiene la global `yaw` (esa es la del
+  // arrastre de escritorio), así que sale del cuaternión de la pose.
+  const hy = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
+  let active = false;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp || !gp.buttons[1] || !gp.buttons[1].pressed) continue;
+    if (gp.axes.length < 4) continue;
+    active = true;
+    if (gp.buttons[3] && gp.buttons[3].pressed) {   // joystick pulsado → reset
+      applyARCalib({ x: 0, z: 0, yaw: 0 });
+      continue;
+    }
+    const ax = Math.abs(gp.axes[2]) > AR_CALIB_DEAD ? gp.axes[2] : 0;
+    const ay = Math.abs(gp.axes[3]) > AR_CALIB_DEAD ? gp.axes[3] : 0;
+    if (src.handedness === 'right') {
+      if (ax) rotateRoomAroundUser(-ax * AR_CALIB_TURN, head);
+    } else {
+      // El desplazamiento va en el marco del usuario: "adelante" es hacia donde
+      // mira, no hacia -Z del origen de la sesión.
+      const fwd = -ay;                        // el eje Y del joystick da adelante = negativo
+      const c = Math.cos(hy), s = Math.sin(hy);
+      roomGroup.position.x += (-s * fwd + c * ax) * AR_CALIB_MOVE;
+      roomGroup.position.z += (-c * fwd - s * ax) * AR_CALIB_MOVE;
+    }
+  }
+  if (active) roomGroup.updateMatrixWorld(true);   // los panners la leen ya movida
+  // Al soltar el grip se da por buena la posición y se guarda.
+  if (arCalibrating && !active) { saveARCalib(); toast('Calibración guardada'); }
+  arCalibrating = active;
+}
+
 // Coloca un objeto por stem alrededor del usuario (usando su az/el) y lo vincula
 // al motor: a partir de aquí el panner de ese stem sigue la posición del objeto.
 function buildARSources() {
   clearARSources();
   if (!engine || !stemDefs.length) return;
+  // La calibración va antes que los marcadores: bindStemToObject lee la
+  // matrixWorld en el momento de vincular, y esa ya debe ser la de la sala
+  // colocada (si no, el primer frame suena en el sitio equivocado).
+  applyARCalib(loadARCalib());
+  roomGroup.updateMatrixWorld(true);
   const D2R = Math.PI / 180;
   stemDefs.forEach((s, i) => {
     const az = (s.azimuthDeg || 0) * D2R, el = (s.elevationDeg || 0) * D2R;
@@ -1236,7 +1346,7 @@ function buildARSources() {
     const dir = [-ce * Math.sin(az), se, -ce * Math.cos(az)];
     const m = makeSourceMarker(s.name);
     m.position.set(dir[0] * AR_RADIUS, AR_HEIGHT + dir[1] * AR_RADIUS, dir[2] * AR_RADIUS);
-    scene.add(m);
+    roomGroup.add(m);
     m.updateMatrixWorld(true);          // matrixWorld válido antes de leerla en bind
     engine.bindStemToObject(i, m);
     arSources.push(m);
@@ -1244,7 +1354,7 @@ function buildARSources() {
 }
 
 function clearARSources() {
-  for (const m of arSources) scene.remove(m);
+  for (const m of arSources) roomGroup.remove(m);
   arSources = [];
   // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,
   // que es la geometría del 360 al que estamos regresando
@@ -1288,6 +1398,7 @@ async function enterAR() {
 
     arSession.addEventListener('end', () => {
       telemetry?.stop();
+      if (arCalibrating) { saveARCalib(); arCalibrating = false; }   // salir con el grip apretado
       clearARSources();
       renderer.setClearAlpha(1);
       if (sphere) sphere.visible = true;
@@ -1306,6 +1417,7 @@ async function enterAR() {
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
+          updateARCalib(frame.session, pose);                     // recolocar la sala (grip + joysticks)
           engine?.update();                                       // panners siguen a los objetos anclados
 
           // Telemetría: pose de cabeza en AR passthrough (sin zoom/foco).
@@ -1320,7 +1432,7 @@ async function enterAR() {
     if (videoEl) videoEl.play();
     if (audioEl) audioEl.play().catch(() => {});
     if (audioCtx) audioCtx.resume();
-    toast(`AR · ${arSources.length} fuentes ancladas`);
+    toast(`AR · ${arSources.length} fuentes · grip + joystick para alinear la sala`);
 
   } catch (e) {
     toast('Error WebXR AR: ' + e.message);

@@ -40,21 +40,46 @@ no GPU for video, no A/V drift to manage.
   buries the anchored sources. Note this is *not* the spotlight's `bedDuck`, which
   is driven by gaze × zoom and never fires in AR (zoom is 0 there).
 
+- **Manual room alignment.** All the markers hang from a single `roomGroup`,
+  whose transform *is* the room→XR alignment. See below.
+
 The audio engine is already generic: `bindStemToObject` / `update` follow **any**
 `Object3D`, so the partner only works in Three.js / WebXR placing objects — the
 spatial audio comes for free.
 
+### Room alignment: `roomGroup`
+
+`local-floor` puts the origin wherever each user started their session, so the
+same musician lands somewhere different for every spectator. The goal is not to
+register the room physically — it is that everyone shares the same layout.
+
+The correction has only **4 degrees of freedom** (yaw + XZ translation): the floor
+is already at y=0 and the IMU aligns the vertical. Solving 6 DoF would tilt the
+room a few degrees and sound wrong with no error message. Those three numbers are
+`roomGroup.position` / `roomGroup.rotation.y`.
+
+Nothing is computed today: holding the **grip**, the left stick translates and the
+right stick rotates the room until the wireframe markers sit on the real
+musicians (pressing a stick resets). Rotation is applied **around the head**, not
+around the group origin — otherwise the scene orbits an arbitrary point and
+alignment is impossible. Releasing the grip stores the three numbers in
+`localStorage` under `arCalib:<ar.venue|default>`, so the next session starts
+aligned. Tolerance is generous: the ear resolves ~5-10° off-axis, ~40 cm at 3 m.
+
+This is the same mechanism Case C drives later — the cameras just set those three
+numbers instead of the hand, and everything downstream is unchanged.
+
 ### What's missing (partner work)
 
-- **Anchoring to the real world.** Markers currently float at fixed positions
-  *relative to the user*; they are not *tracked* to the room. Add WebXR
-  **hit-test** + **anchors** (and/or **plane / mesh detection**) so each musician
-  sticks to a real surface and persists as the user moves. If instead the
-  positions come from an external camera rig, see **Case C**.
-- **Interactive placement.** Drag / position the markers (the code already notes
-  "ready for draggable markers later"). `hand-tracking` is requested as an
-  `optionalFeature` but is **not used** yet.
-- **Scene persistence** of the AR layout across sessions.
+- **Anchoring to the real world.** Beyond the manual alignment above, the markers
+  are not *tracked* to the room. Add WebXR **hit-test** + **anchors** (and/or
+  **plane / mesh detection**) so each musician sticks to a real surface. If
+  instead the positions come from an external camera rig, see **Case C**.
+- **Interactive placement.** Drag / position *individual* markers (`roomGroup`
+  moves them all as a block). `hand-tracking` is requested as an `optionalFeature`
+  but is **not used** yet.
+- **Scene persistence** of the per-musician AR layout (the alignment itself
+  already persists).
 
 ### Audio-only authoring in the editor (recommended design)
 
