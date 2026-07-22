@@ -121,7 +121,9 @@ export class ImmersiveAudioEngine {
     this._zoomMin   = 1;     // factor de zoom a partir del cual empieza el spotlight
     this._zoomMax   = 2.5;   // factor de zoom que da el boost completo
     this._bedDuck   = 0;     // cuánto se agacha el bed al enfocar (0 = nada, 1 = a cero)
-    this._bedGain   = null;  // GainNode del bed (creado en attach)
+    this._bedGain   = null;  // GainNode del bed, escrito por el duck (creado en attach)
+    this._bedLevel  = null;  // GainNode del bed, estático (setBedLevel)
+    this._bedLevelValue = 1; // se guarda aquí para sobrevivir a un attach posterior
     // Atenuación por distancia de cada fuente (ajustable con setSourceParams).
     // Manda en AR, donde uno se acerca andando; en el 360 las fuentes están
     // siempre a _stemRadius de la cabeza y la curva es irrelevante.
@@ -187,16 +189,26 @@ export class ImmersiveAudioEngine {
     // aparta el fondo. Ver _updateSpotlight().
     this._bedGain = this.ctx.createGain();
     this._bedGain.gain.value = 1;
-    this._bedGain.connect(this.gain);
+
+    // Nivel del bed, en serie DETRÁS del duck y separado de él a propósito:
+    // _updateSpotlight() reescribe _bedGain en cada frame, así que un ajuste
+    // manual sobre ese nodo se pierde al frame siguiente. Este otro no lo toca
+    // nadie salvo setBedLevel(). Lo usa AR, donde el bed compite con la sala de
+    // verdad y sobra volumen, y donde el duck no puede hacer nada porque sin
+    // zoom el peso de todos los stems es 0.
+    this._bedLevel = this.ctx.createGain();
+    this._bedLevel.gain.value = this._bedLevelValue;
+    this._bedGain.connect(this._bedLevel);
+    this._bedLevel.connect(this.gain);
 
     if (mode === 'omnitone') {
-      // FOA → OmnitoneFOADecoder (binaural HRTF + rotación) → bedGain → gain
+      // FOA → OmnitoneFOADecoder (binaural HRTF + rotación) → bedGain → bedLevel → gain
       this.decoder = new OmnitoneFOADecoder(this.ctx);
       await this.decoder.initialize();
       foaInput.connect(this.decoder.input);
       this.decoder.output.connect(this._bedGain);
     } else {
-      // FOA → rotator → multiplier(zoom) → HOASTBinDecoder → bedGain → gain
+      // FOA → rotator → multiplier(zoom) → HOASTBinDecoder → bedGain → bedLevel → gain
       this.rotator    = new HOASTRotator(this.ctx, this.order);
       this.multiplier = new MatrixMultiplier(this.ctx, this.order);
       this.decoder    = new HOASTBinDecoder(this.ctx, this.order);
@@ -280,6 +292,7 @@ export class ImmersiveAudioEngine {
   async dispose() {
     try { this.source && this.source.disconnect(); } catch (_) {}
     try { this._bedGain && this._bedGain.disconnect(); } catch (_) {}
+    try { this._bedLevel && this._bedLevel.disconnect(); } catch (_) {}
     try { this.gain && this.gain.disconnect(); } catch (_) {}
     if (this.ownsContext && this.ctx) {
       try { await this.ctx.close(); } catch (_) {}
@@ -719,6 +732,21 @@ export class ImmersiveAudioEngine {
   }
 
   /**
+   * Nivel del bed, multiplicando al duck. 1 = como se grabó, 0 = mudo. Pensado
+   * para AR, donde la mezcla completa del concierto compite con la sala real y
+   * conviene dejarla de fondo sin tocar el nivel de cada músico.
+   * @param {number} v  0..1
+   */
+  setBedLevel(v) {
+    this._bedLevelValue = Math.min(1, Math.max(0, Number(v) || 0));
+    if (this._bedLevel)
+      this._bedLevel.gain.setTargetAtTime(this._bedLevelValue, this.ctx.currentTime, 0.08);
+  }
+
+  /** Nivel del bed (para guardar/restaurar, p.ej. al entrar/salir de AR). */
+  getBedLevel() { return this._bedLevelValue; }
+
+  /**
    * Trim de un stem, en dB. Iguala niveles de grabación dispares: el spotlight
    * sube a todos por igual, así que un músico grabado 6 dB por debajo del resto
    * no se despega del bed por mucho que se le mire. Se ajusta en vivo desde la
@@ -753,7 +781,10 @@ export class ImmersiveAudioEngine {
       zoomFactor: this._zoomFactor, zoomMin: lo, zoomMax: hi, zN,
       gazeAzimuthDeg: Math.atan2(-f[0], -f[2]) * D,
       gazeElevationDeg: Math.asin(Math.max(-1, Math.min(1, f[1]))) * D,
+      // El duck y el nivel están en serie: lo que se oye es el producto. Se dan
+      // los dos, o un bed bajo en AR parecería un duck enganchado.
       bedGain: this._bedGain ? this._bedGain.gain.value : null,
+      bedLevel: this._bedLevelValue,
       // El ángulo total no dice DÓNDE fallas. Separado en azimut y elevación sí:
       // 42° repartidos como (6°, 42°) es que estás mirando al suelo, no que el
       // azimut del músico esté mal escrito.

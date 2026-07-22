@@ -51,6 +51,9 @@
     "yawOffsetDeg": 64,
     "mirror": true
   },
+  "ar": {
+    "bedGain": 0.35
+  },
   "spotlight": {
     "maxBoost": 1.5,
     "focusExp": 6.5,

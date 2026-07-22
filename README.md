@@ -82,6 +82,14 @@ Open in the browser:
    with `./make-bed.sh -l take.wav`, then
    `./make-bed.sh take.wav media/bed.wav 0,2,4,6`. The encoder refuses any other
    channel count rather than silently reading the wrong four.
+   If instead the take arrives as **four separate mono files**, one per component
+   (an NT-SF1 recording, a DAW export), merge them with **Build a bed from
+   separate W/X/Y/Z files** in the editor, or from a terminal:
+   `./make-bed.sh -m W.wav X.wav Y.wav Z.wav media/bed.wav [fuma|ambix]`.
+   The arguments are named by **component**, never by the position they had in the
+   recorder: the write order is what the format decides — FuMa `W,X,Y,Z`, AmbiX
+   `W,Y,Z,X`. Order only; gains are untouched. Getting this wrong yields a rotated
+   sound field that *Analyse bed* can no longer undo.
 2. **Musicians**: add one stem per instrumentalist and **drag it on the top-down
    radar** to place it in azimuth (top = front of the video, left = +90°). Fine
    tune name/azimuth/elevation in the side panel.
@@ -279,6 +287,8 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 | `/api/scene` | GET/POST | Read / save `scene.json` |
 | `/api/encode` | POST `{mode}` | Launch `stream.sh` (`vod`\|`live`) |
 | `/api/proxy` | POST `{src,scale}` | Transcode a lightweight 8-bit proxy |
+| `/api/bed/analyze` | POST `{bed,bedFormat,stems}` | Check the declared channel order and measure the mic's rotation |
+| `/api/bed/build` | POST `{w,x,y,z,out,bedFormat}` | Merge four mono components into a 4-channel bed (runs `make-bed.sh -m`) |
 | `/api/encode/status` | GET | Encode status (running, `speed`, log) |
 | `/api/encode/stop` | POST | Stop the running encode |
 
@@ -305,6 +315,11 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
   // musician: louder, not more solo. 0 = off, 0.7 = bed drops to 30%.
   "spotlight": { "maxBoost": 1.5, "focusExp": 4, "restGain": 0, "zoomMax": 2.5,
                  "bedDuck": 0.7 },
+  // AR only. The bed holds the whole concert; in passthrough it competes with the
+  // real room and buries the anchored musicians. `bedDuck` cannot help here — AR
+  // runs at zoom 0, so no stem is ever "focused" and the duck never fires.
+  // 0.35 ≈ -9 dB. Restored to 1 on leaving AR.
+  "ar": { "bedGain": 0.35 },
   // How far the ambisonic mic was turned from the camera when recording. Rotates
   // the FOA bed only, never the stems. Override live with ?ayaw= / ?amirror=.
   "alignment": { "yawOffsetDeg": 0, "mirror": false },

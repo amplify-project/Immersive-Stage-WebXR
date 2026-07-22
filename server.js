@@ -383,6 +383,44 @@ async function handleAPI(req, res, pathname) {
       } catch (e) { return sendJSON(res, 400, { error: e.message }); }
     }
 
+    // ── Construcción del bed a partir de las 4 componentes sueltas ──────────
+    // Quien graba con una NT-SF1 (o exporta desde un DAW) acaba con W, X, Y, Z
+    // en cuatro WAV mono. El trabajo real —y el único sitio donde el orden de
+    // canales se decide— vive en make-bed.sh; aquí solo se le pasan las rutas,
+    // ya confinadas a media/. Se devuelve el comando exacto para poder repetirlo
+    // a mano, como hace el monitor de sync.
+    if (pathname === '/api/bed/build' && req.method === 'POST') {
+      const body = await readBody(req);
+      const fmt = body.bedFormat === 'ambix' ? 'ambix' : 'fuma';
+      // Se valida en absoluto y se pasa en relativo: el script corre con cwd=ROOT
+      // y su mensaje final dicta el valor de scene.json → "bed", que es relativo.
+      // Con rutas absolutas ese consejo saldría inservible.
+      const safe = (rel, what) => {
+        if (!rel) throw new Error(`Falta la componente ${what}`);
+        const p = path.resolve(ROOT, rel);
+        if (!p.startsWith(MEDIA_DIR + path.sep)) throw new Error(`Ruta fuera de media/: ${rel}`);
+        return path.relative(ROOT, p);
+      };
+      let args;
+      try {
+        args = ['-m', safe(body.w, 'W'), safe(body.x, 'X'), safe(body.y, 'Y'), safe(body.z, 'Z'),
+                safe(body.out, 'de salida'), fmt];
+      } catch (e) { return sendJSON(res, 400, { error: e.message }); }
+
+      const script = path.join(ROOT, 'make-bed.sh');
+      const cmd = './make-bed.sh ' + args.map(a => (/^[\w./-]+$/.test(a) ? a : `'${a}'`)).join(' ');
+      // Un bed de media hora son cientos de MB: holgura, pero no infinito.
+      execFile('bash', [script, ...args], { cwd: ROOT, timeout: 600000, maxBuffer: 1 << 20 },
+        (err, out, errout) => {
+          const text = String(out || '') + String(errout || '');
+          // make-bed.sh explica por qué se niega (no es mono, ya existe, otro
+          // sample rate...). Ese texto es mejor error que cualquiera que invente.
+          if (err) return sendJSON(res, 400, { error: text.trim() || err.message, cmd });
+          return sendJSON(res, 200, { ok: true, out: body.out, bedFormat: fmt, cmd, log: text.trim() });
+        });
+      return;
+    }
+
     // ── Estado / parar ──────────────────────────────────────────────────────
     if (pathname === '/api/encode/status' && req.method === 'GET') {
       return sendJSON(res, 200, job ? {
