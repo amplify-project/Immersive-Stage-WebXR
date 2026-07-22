@@ -169,10 +169,15 @@ async function listMedia() {
 //  (la de producción, con la Insta360 y la X32 conectadas), no en el navegador.
 //    vídeo → v4l2 (/dev/video*)   ·   audio → ALSA (hw:CARD,DEV con nº canales)
 // ════════════════════════════════════════════════════════════════════════════
+// LC_ALL/LANG=C: `arecord -l` está traducido, y en una máquina en italiano o en
+// español imprime "scheda"/"tarjeta" en vez de "card". El parser de más abajo no
+// casa nada y la lista de dispositivos ALSA sale vacía sin ningún error — mientras
+// el vídeo sigue funcionando, porque v4l2-ctl no está localizado. Fijamos el locale
+// solo para los comandos que enumeramos.
 function run(cmd, args) {
   return new Promise(res => {
-    execFile(cmd, args, { timeout: 5000 }, (err, out, errout) =>
-      res(err ? '' : String(out || '') + String(errout || '')));
+    execFile(cmd, args, { timeout: 5000, env: { ...process.env, LC_ALL: 'C', LANG: 'C' } },
+      (err, out, errout) => res(err ? '' : String(out || '') + String(errout || '')));
   });
 }
 
