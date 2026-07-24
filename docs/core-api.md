@@ -103,6 +103,7 @@ bound to an `Object3D` (e.g. an AR anchor).
 > `bindStemToObject` anchor them, `unbindStem` releases them.
 | `setStemRadius(r)` | Radius of the static azimuth/elevation placement (default `1`). |
 | `getFocusedStem(minWeight = 0.2)` → `number` | Index of the most-focused source (look × zoom) above the threshold, or `-1`. Reuses the spotlight weight — used to trigger the close-up of the musician you look at. |
+| `getGazedStem({ coneDeg = 12, tieAim = 0.01 })` → `number` | Index of the source being **looked at**, zoom out of the picture, or `-1` if none falls in the cone. Anchored sources are measured head→source, so walking changes the angle by itself; equal angles go to the closer one. This is the AR counterpart of `getFocusedStem`, whose weight is always 0 there (no zoom). It decides nothing on its own — dwell and hysteresis belong to the caller. |
 | `get stemCount` → `number` | Number of spatial sources. |
 
 `ref` accepts a **numeric index** (`0..N-1`, channel order) or the source's
@@ -245,7 +246,7 @@ The `/api/encode` VOD path collects `scene.stems[*].closeup` (in order) into the
 
 | Area | File | Change |
 |------|------|--------|
-| Core | `src/audio/ImmersiveAudioEngine.js` | Stems → spatial sources (`pos`/`object3d`); `setStemPosition`, `bindStemToObject`, `unbindStem`, `update`, `setStemRadius`, `getFocusedStem`, `getSpotlightParams`, `get stemCount`. Listener position from the head matrix. Spotlight uses the live head→source direction. |
+| Core | `src/audio/ImmersiveAudioEngine.js` | Stems → spatial sources (`pos`/`object3d`); `setStemPosition`, `bindStemToObject`, `unbindStem`, `update`, `setStemRadius`, `getFocusedStem`, `getGazedStem`, `getSpotlightParams`, `get stemCount`. Listener position from the head matrix. Spotlight uses the live head→source direction. |
 | Player | `index.html` | WebXR **AR** mode (passthrough, 3D source markers); **close-up** floating plane + 3rd Shaka instance + focus-driven track switching; `renderer` `alpha:true`. |
 | Encode | `stream.sh` | Multi-track DASH: `CLOSEUPS`/`CLOSEUP_SCALE`/`CLOSEUP_VBITRATE`, dynamic adaptation sets, per-stream video filters/bitrate. |
 | Editor | `editor.html` | Per-musician close-up video selector (VOD). |

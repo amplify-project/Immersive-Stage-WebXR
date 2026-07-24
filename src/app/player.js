@@ -1271,13 +1271,101 @@ function makeLabelSprite(text) {
 }
 
 // Marcador de fuente: esfera de alambre emisiva + etiqueta con el nombre.
+const AR_MARK_IDLE  = 0x00d4ff;   // marcador en reposo
+const AR_MARK_FOCUS = 0xffd24a;   // marcador del músico enfocado
+
 function makeSourceMarker(name) {
   const g = new THREE.Group();
   g.add(new THREE.Mesh(
     new THREE.IcosahedronGeometry(0.08, 1),
-    new THREE.MeshBasicMaterial({ color: 0x00d4ff, wireframe: true })));
+    // Material por marcador (no compartido): el realce del foco pinta solo uno.
+    new THREE.MeshBasicMaterial({ color: AR_MARK_IDLE, wireframe: true })));
   g.add(makeLabelSprite(name));
   return g;
+}
+
+// ══════════════════════════════════════════════════════
+// FOCO EN AR (mirada sostenida)
+// ══════════════════════════════════════════════════════
+// En VR el foco es puntería × zoom, y el zoom es la intención declarada: "quiero
+// a ése". En AR no hay zoom, así que la intención hay que leerla del tiempo —
+// mirar a alguien un rato— y del sitio, que ya está en las coordenadas de sala.
+//
+// Dos conos y dos tiempos, asimétricos a propósito. Con un solo umbral el foco
+// parpadea entre dos músicos vecinos con el temblor natural de la cabeza, y ese
+// parpadeo llega tal cual a la telemetría: una atención compartida que salta 5
+// veces por segundo no es un dato, es ruido. Entrar cuesta (cono estrecho +
+// permanencia); quedarse es fácil (cono ancho + margen para soltar).
+//
+// Esto NO toca el audio: en AR cada fuente ya suena en su sitio y el spotlight
+// está apagado. Alimenta la telemetría y el realce del marcador, que es además
+// lo que permite ajustar estos números mirándolos puestos en las gafas.
+const AR_FOCUS = {
+  coneDeg:    12,   // semiángulo para captar el foco
+  keepDeg:    22,   // semiángulo, más ancho, para conservarlo
+  dwellMs:   400,   // hay que sostener la mirada para que cuente
+  releaseMs: 350,   // y perderla este rato para soltarlo
+};
+// Los cuatro números salen de scene.json → `ar.focus` si están, porque son
+// justo lo que hay que ajustar probándolo en la sala: la permanencia buena
+// depende de la separación entre músicos y de lo lejos que esté el público.
+// Se ignora en silencio lo que no sea un número: un valor suelto mal escrito no
+// debe dejar el foco sin cono.
+function loadARFocusCfg() {
+  const c = arCfg.focus;
+  if (!c) return;
+  for (const k of Object.keys(AR_FOCUS)) if (typeof c[k] === 'number' && isFinite(c[k])) AR_FOCUS[k] = c[k];
+}
+
+let arFocus      = -1;   // músico enfocado (índice de stem) o -1
+let arFocusCand  = -1;   // candidato en observación
+let arFocusSince = 0;    // ms en que el candidato pasó a serlo
+let arFocusLost  = 0;    // ms en que el enfocado salió del cono ancho (0 = dentro)
+
+function resetARFocus() {
+  arFocus = arFocusCand = -1;
+  arFocusSince = arFocusLost = 0;
+}
+
+// Un frame de foco. `now` es el timestamp del bucle de render (ms).
+function updateARFocus(now) {
+  if (!engine) return -1;
+  const prev = arFocus;
+  const cand = engine.getGazedStem({ coneDeg: AR_FOCUS.coneDeg });
+
+  if (cand !== arFocusCand) { arFocusCand = cand; arFocusSince = now; }
+
+  // Soltar: el enfocado deja de ser el mejor del cono ANCHO. Se mide "el mejor"
+  // y no "sigue dentro" para que un músico claramente más centrado te lo quite,
+  // en vez de tener que salir del cono de uno para poder entrar en el del otro.
+  //
+  // Y no se suelta mientras haya candidato: como releaseMs < dwellMs, soltar en
+  // cuanto sales del cono de A mete un -1 de unos frames antes de que B confirme
+  // —el parpadeo que esto viene a evitar, y encima en el momento más informativo,
+  // el del relevo. Sin candidato al que pasar, el foco se pierde de verdad.
+  if (arFocus >= 0) {
+    const stillOn = engine.getGazedStem({ coneDeg: AR_FOCUS.keepDeg }) === arFocus;
+    if (stillOn || cand >= 0) arFocusLost = 0;
+    else {
+      if (!arFocusLost) arFocusLost = now;
+      if (now - arFocusLost >= AR_FOCUS.releaseMs) { arFocus = -1; arFocusLost = 0; }
+    }
+  }
+
+  // Coger: candidato sostenido durante dwellMs, venga de -1 o de otro músico.
+  if (cand >= 0 && cand !== arFocus && now - arFocusSince >= AR_FOCUS.dwellMs) {
+    arFocus = cand; arFocusLost = 0;
+  }
+
+  if (arFocus !== prev) paintARFocus();
+  return arFocus;
+}
+
+function paintARFocus() {
+  arSources.forEach((m, i) => {
+    const mesh = m.children[0];
+    if (mesh && mesh.material) mesh.material.color.setHex(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE);
+  });
 }
 
 // ══════════════════════════════════════════════════════
@@ -1400,6 +1488,8 @@ function buildARSources() {
 function clearARSources() {
   for (const m of arSources) roomGroup.remove(m);
   arSources = [];
+  // El foco indexa este array: dejarlo vivo señalaría a un músico que ya no está.
+  resetARFocus();
   // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,
   // que es la geometría del 360 al que estamos regresando
   if (engine) for (let i = 0; i < engine.stemCount; i++) engine.unbindStem(i);
@@ -1423,6 +1513,8 @@ async function enterAR() {
 
     if (sphere) sphere.visible = false;           // el mundo real sustituye al 360
     if (closeupMesh) { closeupMesh.visible = false; closeupStem = -1; }   // sin close-ups en AR
+    loadARFocusCfg();                             // ar.focus de la escena, si lo trae
+    resetARFocus();
 
     // En AR cada fuente debe oírse desde su sitio (no solo al "mirar + zoom"):
     // subimos restGain a tope y anulamos el boost por zoom; la espacialización y
@@ -1469,9 +1561,11 @@ async function enterAR() {
           roomGroup.updateMatrixWorld(true);
           engine?.update();                                       // panners siguen a los objetos anclados
 
-          // Telemetría: pose de cabeza en coordenadas de sala (sin zoom/foco).
+          // Telemetría: pose de cabeza en coordenadas de sala + músico mirado.
+          // El zoom sigue siendo 0: en AR no existe, y mandar otra cosa mentiría
+          // al consumidor sobre en qué rango leer `z`.
           const [tp, tq] = arTelemetryPose(pose);
-          telemetry?.sample(tp, tq, 0, -1, videoEl?.currentTime || 0);
+          telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
         }
       }
       updateAmbiViz();

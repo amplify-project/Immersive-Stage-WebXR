@@ -45,6 +45,11 @@ no GPU for video, no A/V drift to manage.
   `engine.update()` per frame → the HRTF `PannerNode` follows the object, with
   natural distance attenuation.
 - Head moves through the room (`engine.setRotationFromMatrix4(pose.transform.matrix)`).
+- **Focus by sustained gaze.** No zoom exists in AR, so the musician being
+  attended to is the one held near the centre of view for `dwellMs`
+  (`engine.getGazedStem` + the dwell/hysteresis in `updateARFocus`). His marker
+  turns amber, and the index travels in the telemetry `f` field, in the same
+  room frame as everything else. Tunable per venue in `scene.json` → `ar.focus`.
 - The FOA bed drops to `scene.json` → `ar.bedGain` (default `0.35`) via
   `engine.setBedLevel()`, and back to its old level on exit. The bed is the whole
   concert, musicians included: at full level it competes with the real room and

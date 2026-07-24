@@ -116,11 +116,35 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 | `f`   | focused musician: index into `scene.json` → `stems` (`-1` = none) |
 | `g`   | *optional* real eye-gaze `[x,y,z]` (else omitted)   |
 
-`f` is whichever musician the spotlight weighs most (`engine.getFocusedStem`), so
-it is reported whether or not the scene defines `closeup` tracks — a viewer can
-attend to a musician without a close-up video existing for them. It stays `-1`
-until `z` is high enough for one stem to dominate, and in AR (all sources audible
-at their own place) it is always `-1`.
+`f` is derived differently in each mode, because attention is declared
+differently.
+
+**In VR** it is whichever musician the spotlight weighs most
+(`engine.getFocusedStem`, aim × zoom), reported whether or not the scene defines
+`closeup` tracks — a viewer can attend to a musician without a close-up video
+existing for them. It stays `-1` until `z` is high enough for one stem to
+dominate.
+
+**In AR** there is no zoom to declare intent (`z` is always `0`), so the signal is
+**sustained gaze**: `engine.getGazedStem` picks the musician nearest the centre of
+view — ties going to the closer one, since at 6 m a 12° cone covers 1.3 m and
+several musicians share it — and the player only reports them after the gaze has
+held for `dwellMs`, releasing after `releaseMs` outside a wider cone. The two
+cones and two timers are deliberately asymmetric: with a single threshold, `f`
+flickers between neighbouring musicians on natural head tremor, and an aggregated
+attention that jumps five times a second is noise, not data. The focus is never
+dropped while another musician is already dwelling, so a handover reads `A → B`
+and never `A → nobody → B`.
+
+Tune them per venue in `scene.json` — the right dwell depends on how far apart
+the musicians are and how far away the audience stands:
+
+```json
+"ar": { "focus": { "coneDeg": 12, "keepDeg": 22, "dwellMs": 400, "releaseMs": 350 } }
+```
+
+The focused musician's marker turns amber in passthrough, which is how you tune
+those numbers: put the headset on and watch when the highlight commits.
 
 ### Relay → consumer (`/consume`)
 
