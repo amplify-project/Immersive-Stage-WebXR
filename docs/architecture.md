@@ -49,7 +49,7 @@ those two contracts, and the other side keeps working.
 | `index.html` | **Player.** Three.js scene, Shaka playback, WebXR (VR/AR), HUD, A/V drift control, close-up logic. | Add a viewer-side feature (rendering, XR, UI, track switching). |
 | `src/audio/ImmersiveAudioEngine.js` | **Audio engine.** Owns the whole Web Audio graph: FOA HRTF decode + per-stem `PannerNode`s + spotlight. Framework-agnostic. | Add spatial-audio behavior (positions, spotlight, new sources). |
 | `src/audio/*` | Engine internals: `OmnitoneFOADecoder` (HRTF), `HOAST*` (cardioid fallback), `zoom-matrix`, `ambisonicAxes`. | Rarely — low-level DSP. |
-| `editor.html` | **Visual editor.** Authors `scene.json`: sources, top-down placement radar, spotlight, encode controls, live device pickers. | Add an authoring control or a new scene field. |
+| `editor.html` | **Visual editor.** Authors `scene.json`: sources, top-down placement radar, front height view, spotlight, encode controls, live device pickers. | Add an authoring control or a new scene field. |
 | `server.js` | **Backend.** Static file server (Range/MSE) + `/api/*` (scene I/O, encode/proxy jobs, live devices, monitor). No npm deps. | Add an API route or a job type. |
 | `stream.sh` | **Encoder.** Builds the ffmpeg invocation that packages video + multichannel Opus (+ close-ups) into DASH, for VOD and live. | Add an encode option / output layout. |
 | `x4_bridge/` | **Live 360 capture.** Stitches the Insta360 X4 and exposes `/dev/video10`. | Live capture pipeline only. |
@@ -97,8 +97,9 @@ a bug we already fixed.
 
 ### Authoring (editor → scene.json)
 `editor.html` edits an in-memory `scene` object and `POST`s it to `/api/scene`.
-Placement comes from the top-down radar (azimuth/elevation per stem); spotlight
-and encode params from their panels; live device choices into `scene.live`.
+Placement comes from two views of the same two numbers per stem: the top-down radar
+(azimuth) and the front height view (elevation, shown in metres at `AR_RADIUS`);
+spotlight and encode params from their panels; live device choices into `scene.live`.
 
 ### Encoding (scene.json → manifest)
 `POST /api/encode {mode}` reads `scene.json` and translates it into **environment

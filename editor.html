@@ -33,6 +33,10 @@
   .stemrow.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
   .x{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px}.x:hover{color:var(--bad)}
   canvas#radar{width:100%;aspect-ratio:1;background:radial-gradient(circle,#0d1620,#080a0f);border:1px solid #ffffff14;border-radius:50%;touch-action:none}
+  /* Se escala al ancho de la columna; el arrastre ya convierte de coordenadas
+     de pantalla a las del canvas por proporción. */
+  canvas#heightView{width:100%;background:#0a0e14;
+    border:1px solid #ffffff14;border-radius:8px;touch-action:none;display:block}
   .hint{font-size:12px;color:var(--muted);margin-top:6px}
   .slider{display:flex;align-items:center;gap:10px;margin:8px 0;font-family:var(--mono);font-size:12px}
   .slider input[type=range]{flex:1} .slider .v{width:54px;text-align:right;color:var(--accent)}
@@ -192,13 +196,20 @@
   </div>
 
   <div class="card">
-    <h2>3D placement (top-down view)</h2>
+    <h2>3D placement · 360 sphere (top-down)</h2>
     <canvas id="radar" width="600" height="600"></canvas>
-    <div id="selPanel" style="display:none;margin-top:12px">
+    <!-- Oculto con visibility, no con display: apareciendo y desapareciendo movía
+         hacia abajo las vistas de sala justo al seleccionar, y el primer arrastre
+         del día se iba al garete porque el punto se desplazaba bajo el cursor. -->
+    <div id="selPanel" style="visibility:hidden;margin-top:12px">
       <div class="row">
         <div><label>Name</label><input type="text" id="selName"></div>
         <div style="flex:0 0 110px"><label>Azimuth °</label><input type="number" id="selAz" step="1"></div>
         <div style="flex:0 0 110px"><label>Elevation °</label><input type="number" id="selEl" step="1"></div>
+        <!-- Misma magnitud que selEl, en las unidades en las que se piensa una
+             sala. Ver la vista de altura para por qué los metros dependen del
+             radio de colocación en AR. -->
+        <div style="flex:0 0 110px"><label>Height m</label><input type="number" id="selH" step="0.05"></div>
         <!-- Trim de la toma: iguala micros y previos dispares. Sin él, el músico
              grabado por debajo del bed nunca se despega de él bajo el spotlight. -->
         <div style="flex:0 0 110px"><label>Gain dB</label><input type="number" id="selGain" step="0.5"></div>
@@ -206,6 +217,17 @@
     </div>
     <p class="hint">Up = front of the video (0°). Left = +90°. Right = −90°.</p>
   </div>
+
+  <div class="card">
+    <h2>Height · 360 sphere (front view)</h2>
+    <canvas id="heightView" width="600" height="260"></canvas>
+    <p class="hint">Azimuth across, height up — the band unrolled in front of you. Drag a
+      dot up or down to raise or lower that musician; its azimuth stays where the radar
+      left it. In the 360 sphere a musician is a <em>direction</em>, not a point: these
+      metres are that angle read at 1.6 m, only so you have something to compare against
+      the room. For AR, place the musician in the room below.</p>
+  </div>
+
 </div>
 
 <div class="col">
@@ -323,7 +345,7 @@ async function init() {
   bindLiveControls();
   setMode(mode);
   renderStems();
-  drawRadar();
+  drawViews();
   pollStatus();
   setInterval(pollStatus, 1500);
   pollBridge();
@@ -458,8 +480,14 @@ function bindControls() {
   codecWarn();
   // selected panel
   $('selName').oninput = e => { if(selected>=0){ scene.stems[selected].name=e.target.value; renderStems(); } };
-  $('selAz').oninput   = e => { if(selected>=0){ scene.stems[selected].azimuthDeg=+e.target.value; renderStems(); drawRadar(); } };
-  $('selEl').oninput   = e => { if(selected>=0){ scene.stems[selected].elevationDeg=+e.target.value; } };
+  $('selAz').oninput   = e => { if(selected>=0){ scene.stems[selected].azimuthDeg=+e.target.value; renderStems(); drawViews(); } };
+  $('selEl').oninput   = e => { if(selected>=0){ scene.stems[selected].elevationDeg=+e.target.value;
+                                                renderStems(); drawViews(); $('selH').value=hOfEl(+e.target.value).toFixed(2); } };
+  // Metres in, degrees stored: the two fields are one number in two units, so each
+  // one writes the other rather than keeping a second copy in the scene.
+  $('selH').oninput    = e => { if(selected>=0){ const el=Math.round(elOfH(clampH(+e.target.value)));
+                                                scene.stems[selected].elevationDeg=el;
+                                                renderStems(); drawViews(); $('selEl').value=el; } };
   $('selGain').oninput = e => { if(selected>=0){ scene.stems[selected].gainDb=+e.target.value; } };
 }
 
@@ -474,10 +502,10 @@ function addSelectedStem() {
   scene.stems.push({ file, name, azimuthDeg: Math.max(-160,Math.min(160,az)), elevationDeg: 0 });
   $('addStem').value = '';
   selected = scene.stems.length-1;
-  renderStems(); drawRadar(); syncSelPanel();
+  renderStems(); drawViews(); syncSelPanel();
 }
-function removeStem(i){ scene.stems.splice(i,1); if(selected>=scene.stems.length) selected=-1; renderStems(); drawRadar(); syncSelPanel(); }
-function selectStem(i){ selected=i; renderStems(); drawRadar(); syncSelPanel(); }
+function removeStem(i){ scene.stems.splice(i,1); if(selected>=scene.stems.length) selected=-1; renderStems(); drawViews(); syncSelPanel(); }
+function selectStem(i){ selected=i; renderStems(); drawViews(); syncSelPanel(); }
 
 // LIVE: adds a musician mapped to the next free channel after the FOA.
 function addLiveStem() {
@@ -488,7 +516,7 @@ function addLiveStem() {
   const az = Math.max(-160, Math.min(160, Math.round(-50 + n*20)));
   scene.stems.push({ name: 'M'+(n+1), channel: ch, azimuthDeg: az, elevationDeg: 0 });
   selected = scene.stems.length-1;
-  renderStems(); drawRadar(); syncSelPanel();
+  renderStems(); drawViews(); syncSelPanel();
 }
 
 // <option> list of media/ videos for the close-up selector.
@@ -509,7 +537,7 @@ function renderStems() {
     <div class="stemrow ${i===selected?'sel':''}" onclick="selectStem(${i})">
       <span class="dot" style="background:${PALETTE[i%PALETTE.length]}"></span>
       <input type="text" value="${s.name||''}" onclick="event.stopPropagation()"
-             oninput="scene.stems[${i}].name=this.value;drawRadar()">
+             oninput="scene.stems[${i}].name=this.value;drawViews()">
       ${live ? `<span class="small" style="flex:none">ch</span>
       <input type="number" class="az" style="width:54px" min="0" value="${s.channel!=null?s.channel:''}"
              onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=+this.value">` : ''}
@@ -522,10 +550,11 @@ function renderStems() {
 }
 function syncSelPanel() {
   const p = $('selPanel');
-  if (selected<0 || !scene.stems[selected]) { p.style.display='none'; return; }
-  p.style.display='block';
+  if (selected<0 || !scene.stems[selected]) { p.style.visibility='hidden'; return; }
+  p.style.visibility='visible';
   const s = scene.stems[selected];
   $('selName').value = s.name||''; $('selAz').value = Math.round(s.azimuthDeg); $('selEl').value = Math.round(s.elevationDeg||0);
+  $('selH').value = hOfEl(s.elevationDeg||0).toFixed(2);
   $('selGain').value = s.gainDb || 0;
 }
 
@@ -568,10 +597,94 @@ function radarDown(ev){ const {x,y}=radarPos(ev); let best=-1,bd=1e9;
   scene.stems.forEach((s,i)=>{ const p=azToXY(s.azimuthDeg); const d=Math.hypot(p.x-x,p.y-y); if(d<bd){bd=d;best=i;} });
   if(best>=0 && bd<40){ dragging=best; selectStem(best); ev.preventDefault(); } }
 function radarMove(ev){ if(dragging<0) return; const {x,y}=radarPos(ev);
-  scene.stems[dragging].azimuthDeg = Math.round(xyToAz(x,y)); renderStems(); drawRadar(); syncSelPanel(); ev.preventDefault(); }
+  scene.stems[dragging].azimuthDeg = Math.round(xyToAz(x,y)); renderStems(); drawViews(); syncSelPanel(); ev.preventDefault(); }
 function radarUp(){ dragging=-1; }
 radar.addEventListener('mousedown',radarDown); window.addEventListener('mousemove',radarMove); window.addEventListener('mouseup',radarUp);
 radar.addEventListener('touchstart',radarDown,{passive:false}); radar.addEventListener('touchmove',radarMove,{passive:false}); radar.addEventListener('touchend',radarUp);
+
+// ── Height (front view: azimuth across, height up) ───────────────────────────
+// The engine places a stem by DIRECTION, never by point: azimuth + elevation on a
+// sphere around the listener. So a height in metres only means something once a
+// distance is fixed, and the only distance the user ever sees is the radius the AR
+// markers are placed at. These two constants mirror player.js (AR_RADIUS/AR_HEIGHT);
+// change them there and the metres printed here stop matching the headset.
+const AR_RADIUS = 1.6;                             // placement distance in AR (m)
+const AR_HEIGHT = 1.3;                             // listener ear height (m)
+const H_MAX = AR_HEIGHT + AR_RADIUS;               // straight overhead (elev +90°)
+// The floor cuts the sphere at −54°: lower is unreachable at this radius, so the
+// view stops there instead of offering heights that cannot be stored.
+const H_MIN = 0;
+
+const hOfEl = el => AR_HEIGHT + AR_RADIUS * Math.sin(el*Math.PI/180);
+const elOfH = h  => Math.asin(Math.max(-1,Math.min(1,(h-AR_HEIGHT)/AR_RADIUS)))*180/Math.PI;
+const clampH = h => Math.max(H_MIN, Math.min(H_MAX, h));
+
+const hview = $('heightView'); const hctx = hview.getContext('2d');
+const HPAD = 34;
+const azToHX = az => hview.width/2 + (az/180)*(hview.width/2 - HPAD);
+const hToY   = h  => hview.height-HPAD - (h-H_MIN)/(H_MAX-H_MIN)*(hview.height-2*HPAD);
+const yToH   = y  => H_MIN + (hview.height-HPAD-y)/(hview.height-2*HPAD)*(H_MAX-H_MIN);
+
+function drawHeight() {
+  const w=hview.width, h=hview.height;
+  hctx.clearRect(0,0,w,h);
+  // azimuth grid
+  hctx.strokeStyle='#ffffff0c'; hctx.lineWidth=1;
+  hctx.fillStyle='#8b949e'; hctx.font='12px monospace'; hctx.textAlign='center';
+  [-180,-90,0,90,180].forEach(az=>{ const x=azToHX(az);
+    hctx.beginPath(); hctx.moveTo(x,HPAD); hctx.lineTo(x,h-HPAD); hctx.stroke();
+    hctx.fillText(az===0?'FRONT 0°':(az>0?'+':'')+az+'°', x, h-HPAD+18); });
+  // height grid, every half metre
+  hctx.textAlign='right';
+  for(let m=0; m<=H_MAX+1e-6; m+=0.5){ const y=hToY(m);
+    hctx.strokeStyle='#ffffff0c'; hctx.beginPath(); hctx.moveTo(HPAD,y); hctx.lineTo(w-HPAD,y); hctx.stroke();
+    hctx.fillStyle='#8b949e'; hctx.fillText(m.toFixed(1), HPAD-6, y+4); }
+  // ear level: the line a stem sits on at elevation 0, i.e. where they all start
+  const ey=hToY(AR_HEIGHT);
+  hctx.strokeStyle='#ffffff33'; hctx.setLineDash([5,5]); hctx.lineWidth=1.5;
+  hctx.beginPath(); hctx.moveTo(HPAD,ey); hctx.lineTo(w-HPAD,ey); hctx.stroke(); hctx.setLineDash([]);
+  hctx.fillStyle='#8b949e'; hctx.textAlign='left'; hctx.fillText('ears '+AR_HEIGHT.toFixed(2)+' m · 0°', HPAD+4, ey-6);
+  // floor
+  const fy=hToY(0); hctx.strokeStyle='#ffffff22'; hctx.lineWidth=2;
+  hctx.beginPath(); hctx.moveTo(HPAD,fy); hctx.lineTo(w-HPAD,fy); hctx.stroke();
+  // stems
+  scene.stems.forEach((s,i)=>{
+    const el=s.elevationDeg||0, x=azToHX(s.azimuthDeg||0), y=hToY(clampH(hOfEl(el)));
+    const c=PALETTE[i%PALETTE.length];
+    hctx.strokeStyle=c+'44'; hctx.lineWidth=2;
+    hctx.beginPath(); hctx.moveTo(x,fy); hctx.lineTo(x,y); hctx.stroke();   // stand on the floor
+    hctx.fillStyle=c; hctx.beginPath(); hctx.arc(x,y,i===selected?11:8,0,7); hctx.fill();
+    if(i===selected){ hctx.strokeStyle='#fff'; hctx.lineWidth=2; hctx.beginPath(); hctx.arc(x,y,14,0,7); hctx.stroke(); }
+    // Near the floor the metres would land on the azimuth labels, so both texts
+    // move above the dot instead of straddling it.
+    const low = y > fy-28;
+    hctx.fillStyle='#e6edf3'; hctx.font='bold 12px monospace'; hctx.textAlign='center';
+    hctx.fillText(s.name||('S'+i), x, low ? y-32 : y-18);
+    // Same clamp as the dot: a stem typed below −54° would otherwise be drawn on
+    // the floor while its label read a height under it.
+    hctx.fillStyle='#8b949e'; hctx.font='11px monospace';
+    hctx.fillText(clampH(hOfEl(el)).toFixed(2)+' m', x, low ? y-18 : y+24);
+  });
+}
+
+// Vertical drag only: azimuth belongs to the radar, and a horizontal slip here
+// would silently undo the placement done there.
+let hDragging=-1;
+function hviewPos(ev){ const r=hview.getBoundingClientRect(); const t=ev.touches?ev.touches[0]:ev;
+  return { x:(t.clientX-r.left)/r.width*hview.width, y:(t.clientY-r.top)/r.height*hview.height }; }
+function hDown(ev){ const {x,y}=hviewPos(ev); let best=-1,bd=1e9;
+  scene.stems.forEach((s,i)=>{ const px=azToHX(s.azimuthDeg||0), py=hToY(clampH(hOfEl(s.elevationDeg||0)));
+    const d=Math.hypot(px-x,py-y); if(d<bd){bd=d;best=i;} });
+  if(best>=0 && bd<40){ hDragging=best; selectStem(best); ev.preventDefault(); } }
+function hMove(ev){ if(hDragging<0) return; const {y}=hviewPos(ev);
+  scene.stems[hDragging].elevationDeg = Math.round(elOfH(clampH(yToH(y))));
+  renderStems(); drawViews(); syncSelPanel(); ev.preventDefault(); }
+function hUp(){ hDragging=-1; }
+hview.addEventListener('mousedown',hDown); window.addEventListener('mousemove',hMove); window.addEventListener('mouseup',hUp);
+hview.addEventListener('touchstart',hDown,{passive:false}); hview.addEventListener('touchmove',hMove,{passive:false}); hview.addEventListener('touchend',hUp);
+
+// Both views draw the same stems, so they are never redrawn apart.
+function drawViews(){ drawRadar(); drawHeight(); }
 
 // ── Bed construction ─────────────────────────────────────────────────────────
 // Four mono components in, one 4-channel bed out. The server hands it to

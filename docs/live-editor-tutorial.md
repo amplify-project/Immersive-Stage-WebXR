@@ -161,8 +161,27 @@ Click a musician and the panel beside the radar opens on that one:
 | Field | What it is |
 |---|---|
 | **Azimuth °** | The number you just dragged, typed exactly — useful for round angles, or when two players overlap on the radar and the dot is hard to grab. |
-| **Elevation °** | Typed, never dragged: a top-down view has nowhere to show height. Positive is up. Leave it at 0 for a band on the camera's floor; raise it for a choir on risers or a camera slung below the players. |
+| **Elevation °** | How high the musician sits, as an angle. Positive is up. Leave it at 0 for a band on the camera's floor; raise it for a choir on risers or a camera slung below the players. Drag it in the height view below, or type it here. |
+| **Height m** | The same number in metres instead of degrees — see the height view. |
 | **Gain dB** | A trim for the take, not a mix control. If one musician was recorded a couple of dB under the bed, the spotlight can never lift them clear of it — no amount of `maxBoost` fixes a stem that starts buried. Match them here first, then tune the spotlight. |
+
+### Height
+
+Under the radar, the **height view** is the same six musicians seen from the front:
+azimuth runs across, height runs up, and dragging a dot vertically raises or lowers that
+one. Its azimuth does not move — that belongs to the radar — so the two views never
+fight over the same number.
+
+The metres are not a second coordinate. A stem is stored as a *direction*, so a height
+only becomes metres once a distance is fixed, and the one printed here is the distance
+the AR markers are placed at (1.6 m, `AR_RADIUS` in `player.js`). What that buys you is
+a number you can compare against the room: the dashed line is ear level, 1.30 m, where
+every musician starts, and the floor is the bottom axis. A singer on a 40 cm riser is
+a little above the dashed line, not a number of degrees you have to imagine.
+
+Because it is a direction, the floor cuts the view at −54°: below that there is nothing
+left to place at this radius, and the view stops rather than offer heights that cannot
+be stored.
 
 > **If the whole scene is rotated** — every musician equally wrong, the band coherent
 > but turned as a block — do not drag them one by one. That is the **microphone turned
