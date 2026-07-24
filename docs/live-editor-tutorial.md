@@ -183,6 +183,35 @@ Because it is a direction, the floor cuts the view at −54°: below that there 
 left to place at this radius, and the view stops rather than offer heights that cannot
 be stored.
 
+### The room, for AR
+
+AR is not the 360 sphere, and the difference is not cosmetic. In VR the listener sits at
+the centre and never moves, so a musician is a *direction* and distance is inaudible —
+the engine keeps every unanchored source at the same radius from the head. In AR the
+spectator walks among the musicians: distance and height above the floor are heard, and
+a direction is not enough to say where somebody stands.
+
+So the **AR room** panel places each musician as a point in metres — top view for x and
+z, front view for the height — and writes it into `scene.json` as its own block:
+
+```json
+{ "name": "SAX", "azimuthDeg": -137, "elevationDeg": 0,
+  "ar": { "x": 1.8, "y": 1.55, "z": -2.4 } }
+```
+
+The two placements coexist on purpose: the sphere numbers drive the 360 video, the `ar`
+block drives passthrough, and neither view touches the other's numbers.
+
+A musician you have not placed is drawn **hollow**, at the point the player falls back
+to — his 360 direction at 1.6 m. Dragging him, or *Place all from the sphere*, fixes him
+exactly where he already was, so seeding changes nothing you can hear; from there you
+move him to where he really stood. *Unplace* hands him back to the sphere.
+
+The origin (0,0) is not a spectator. It is the room reference the headsets align
+themselves to with the thumbstick calibration, so that a musician sits in the same place
+for everybody. Later the partner's cameras will publish these same coordinates and the
+manual placement stops being necessary — the format does not change, only who writes it.
+
 > **If the whole scene is rotated** — every musician equally wrong, the band coherent
 > but turned as a block — do not drag them one by one. That is the **microphone turned
 > relative to the camera**, and it is one scene-level number: *Analyse bed* measures it

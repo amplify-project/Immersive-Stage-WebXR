@@ -33,10 +33,11 @@
   .stemrow.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
   .x{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px}.x:hover{color:var(--bad)}
   canvas#radar{width:100%;aspect-ratio:1;background:radial-gradient(circle,#0d1620,#080a0f);border:1px solid #ffffff14;border-radius:50%;touch-action:none}
-  /* Se escala al ancho de la columna; el arrastre ya convierte de coordenadas
-     de pantalla a las del canvas por proporción. */
-  canvas#heightView{width:100%;background:#0a0e14;
+  /* Los tres rectangulares se escalan al ancho de la columna; el arrastre ya
+     convierte de coordenadas de pantalla a las del canvas por proporción. */
+  canvas#heightView,canvas#arPlan,canvas#arFront{width:100%;background:#0a0e14;
     border:1px solid #ffffff14;border-radius:8px;touch-action:none;display:block}
+  canvas#arFront{margin-top:10px}
   .hint{font-size:12px;color:var(--muted);margin-top:6px}
   .slider{display:flex;align-items:center;gap:10px;margin:8px 0;font-family:var(--mono);font-size:12px}
   .slider input[type=range]{flex:1} .slider .v{width:54px;text-align:right;color:var(--accent)}
@@ -228,6 +229,31 @@
       the room. For AR, place the musician in the room below.</p>
   </div>
 
+  <div class="card">
+    <h2>AR room · passthrough (metres)</h2>
+    <p class="hint" style="margin-top:0">Where each musician really stands in the room:
+      a point in metres, not a direction. AR is not the 360 sphere — the listener walks
+      among the sources, so distance and height are heard. Top view first (x across,
+      front of the room up), then the same room from the front (x across, height up).</p>
+    <canvas id="arPlan" width="600" height="600"></canvas>
+    <canvas id="arFront" width="600" height="240"></canvas>
+    <div class="row" style="margin-top:10px">
+      <div style="flex:1 1 70px"><label>X m</label><input type="number" id="arX" step="0.1"></div>
+      <div style="flex:1 1 70px"><label>Height m</label><input type="number" id="arY" step="0.05"></div>
+      <div style="flex:1 1 70px"><label>Z m</label><input type="number" id="arZ" step="0.1"></div>
+      <div style="flex:1 1 70px"><label>Room ± m</label><input type="number" id="arExtent" step="0.5" min="1"></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="ghost" style="flex:1" onclick="arPlaceAll()">Place all from the sphere</button>
+      <button class="ghost" style="flex:1" onclick="arUnplace()">Unplace selected</button>
+    </div>
+    <p class="hint">A musician with no room position is drawn hollow, at the spot the
+      player falls back to (the 360 direction at 1.6 m). Dragging it — or
+      <em>Place all</em> — fixes it there, changing nothing you can hear, and from then
+      on it is a real point you can move. <em>Unplace</em> hands it back to the sphere.
+      The origin is where the room alignment puts you: the same reference the headset
+      calibrates against, not any one spectator.</p>
+  </div>
 </div>
 
 <div class="col">
@@ -302,6 +328,7 @@ let scene = {
   video: '', bed: '', bedFormat: 'fuma',
   stems: [],
   alignment: { yawOffsetDeg: 0, mirror: false },
+  ar: {},                       // bedGain, venue (player) + roomExtent (this view)
   spotlight: { maxBoost: 1.5, focusExp: 4, restGain: 0, zoomMax: 2.5 },
   encode: { codec: 'h264_nvenc', scale: '1920:960', vbitrate: '6000k', seg: 2, s3Bucket: '', s3Region: '' },
   live: {
@@ -346,6 +373,7 @@ async function init() {
   setMode(mode);
   renderStems();
   drawViews();
+  syncSelPanel();          // deja los campos de sala en su estado inicial
   pollStatus();
   setInterval(pollStatus, 1500);
   pollBridge();
@@ -489,6 +517,13 @@ function bindControls() {
                                                 scene.stems[selected].elevationDeg=el;
                                                 renderStems(); drawViews(); $('selEl').value=el; } };
   $('selGain').oninput = e => { if(selected>=0){ scene.stems[selected].gainDb=+e.target.value; } };
+  // AR room: typing a coordinate places the musician just as dragging does.
+  const arField = k => e => { if(selected<0) return;
+    const p=Object.assign({}, arPos(scene.stems[selected])); p[k]=+e.target.value;
+    arSet(selected, p); renderStems(); drawViews(); };
+  $('arX').oninput = arField('x'); $('arY').oninput = arField('y'); $('arZ').oninput = arField('z');
+  $('arExtent').oninput = e => { scene.ar = scene.ar||{}; scene.ar.roomExtent = +e.target.value||5; drawViews(); };
+  $('arExtent').value = arExtent();
 }
 
 // ── Stems ───────────────────────────────────────────────────────────────────
@@ -550,12 +585,24 @@ function renderStems() {
 }
 function syncSelPanel() {
   const p = $('selPanel');
+  syncARFields();
   if (selected<0 || !scene.stems[selected]) { p.style.visibility='hidden'; return; }
   p.style.visibility='visible';
   const s = scene.stems[selected];
   $('selName').value = s.name||''; $('selAz').value = Math.round(s.azimuthDeg); $('selEl').value = Math.round(s.elevationDeg||0);
   $('selH').value = hOfEl(s.elevationDeg||0).toFixed(2);
   $('selGain').value = s.gainDb || 0;
+}
+
+// The three AR boxes show the room point of whoever is selected — the stored one,
+// or the fallback the player would use, so an unplaced musician still reads out
+// where he is being heard rather than blank.
+function syncARFields() {
+  const s = scene.stems[selected], on = !!s;
+  for (const id of ['arX','arY','arZ']) $(id).disabled = !on;
+  if (!on) { for (const id of ['arX','arY','arZ']) $(id).value = ''; return; }
+  const p = arPos(s);
+  $('arX').value = (+p.x).toFixed(2); $('arY').value = (+p.y).toFixed(2); $('arZ').value = (+p.z).toFixed(2);
 }
 
 // ── Radar (azimuth by drag) ───────────────────────────────────────────────────
@@ -683,8 +730,160 @@ function hUp(){ hDragging=-1; }
 hview.addEventListener('mousedown',hDown); window.addEventListener('mousemove',hMove); window.addEventListener('mouseup',hUp);
 hview.addEventListener('touchstart',hDown,{passive:false}); hview.addEventListener('touchmove',hMove,{passive:false}); hview.addEventListener('touchend',hUp);
 
-// Both views draw the same stems, so they are never redrawn apart.
-function drawViews(){ drawRadar(); drawHeight(); }
+// ── AR room (metres): the same room from above and from the front ────────────
+// In AR the musician is a POINT, not a direction: the spectator walks among the
+// sources, so distance and height are heard and the 360 sphere stops being a
+// useful model. That point is `stem.ar = {x,y,z}` in metres of the room frame —
+// the frame the headset aligns with roomGroup, and the one the partner's cameras
+// will publish into later. A stem without it is not an error: the player projects
+// its 360 direction onto the AR_RADIUS sphere, and that is what the hollow dot
+// shows, so an unplaced scene still sounds like something in AR.
+// AR_RADIUS / AR_HEIGHT come from the height view above — same two constants
+// mirrored from player.js, and the fallback here must agree with the one there.
+const AR_Y_MAX  = 3.0;      // top of the front view (m above the floor)
+const arExtent = () => Math.max(1, (scene.ar && +scene.ar.roomExtent) || 5);
+
+// Same projection as arPosition() in player.js: seeding a stem must be inaudible.
+function arFallbackPos(s){
+  const D2R=Math.PI/180, az=(s.azimuthDeg||0)*D2R, el=(s.elevationDeg||0)*D2R;
+  const ce=Math.cos(el), se=Math.sin(el);
+  return { x:-ce*Math.sin(az)*AR_RADIUS, y:AR_HEIGHT+se*AR_RADIUS, z:-ce*Math.cos(az)*AR_RADIUS };
+}
+const arPlaced = s => !!(s && s.ar && isFinite(s.ar.x) && isFinite(s.ar.y) && isFinite(s.ar.z));
+const arPos    = s => arPlaced(s) ? s.ar : arFallbackPos(s);
+// Merge, never replace: `ar` also carries bedGain-style extras and, later, the mesh.
+function arSet(i, p){ const s=scene.stems[i]; if(!s) return;
+  s.ar = Object.assign({}, s.ar, { x:+(+p.x).toFixed(2), y:+(+p.y).toFixed(2), z:+(+p.z).toFixed(2) }); }
+
+const arplan=$('arPlan'), pctx=arplan.getContext('2d');
+const arfront=$('arFront'), fctx=arfront.getContext('2d');
+const APAD=30;
+// Screen x grows with world +X (right), screen y grows with world +Z, so −Z —
+// the front of the room, the way the camera looks — is up, as on the radar.
+const mToPx  = () => (arplan.width/2 - APAD)/arExtent();
+const planX  = x => arplan.width/2  + x*mToPx();
+const planY  = z => arplan.height/2 + z*mToPx();
+const pxToX  = px => (px - arplan.width/2)/mToPx();
+const pxToZ  = py => (py - arplan.height/2)/mToPx();
+const frontX = x => arfront.width/2 + x*mToPx();
+const frontY = y => arfront.height-APAD - (y/AR_Y_MAX)*(arfront.height-2*APAD);
+const pyToY  = py => (arfront.height-APAD-py)/(arfront.height-2*APAD)*AR_Y_MAX;
+
+// One dot, in whichever of the two views. Hollow = falling back to the sphere.
+function arDot(ctx,x,y,i,label,sub){
+  const c=PALETTE[i%PALETTE.length], placed=arPlaced(scene.stems[i]), r=i===selected?11:8;
+  ctx.lineWidth=2;
+  if(placed){ ctx.fillStyle=c; ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill(); }
+  else { ctx.strokeStyle=c; ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.stroke(); }
+  if(i===selected){ ctx.strokeStyle='#fff'; ctx.beginPath(); ctx.arc(x,y,r+4,0,7); ctx.stroke(); }
+  ctx.fillStyle='#e6edf3'; ctx.font='bold 12px monospace'; ctx.textAlign='center';
+  ctx.fillText(label, x, y-r-8);
+  // Sólo el seleccionado lleva la cifra: una banda entera cabe en medio metro de
+  // altura, y seis etiquetas ahí se tapan entre ellas y con los nombres.
+  if(sub && i===selected){ ctx.fillStyle='#8b949e'; ctx.font='11px monospace'; ctx.fillText(sub, x, y+r+14); }
+}
+
+function drawARPlan(){
+  const w=arplan.width, h=arplan.height, cx=w/2, cy=h/2, s=mToPx(), ext=arExtent();
+  pctx.clearRect(0,0,w,h);
+  // metre grid: whole metres, halves too when the room is small enough to see them
+  const step = ext<=3 ? 0.5 : 1;
+  pctx.strokeStyle='#ffffff0c'; pctx.lineWidth=1;
+  for(let m=-Math.floor(ext/step)*step; m<=ext+1e-6; m+=step){
+    pctx.beginPath(); pctx.moveTo(planX(m),APAD); pctx.lineTo(planX(m),h-APAD); pctx.stroke();
+    pctx.beginPath(); pctx.moveTo(APAD,planY(m)); pctx.lineTo(w-APAD,planY(m)); pctx.stroke(); }
+  pctx.strokeStyle='#ffffff1c'; pctx.lineWidth=1.5;
+  pctx.beginPath(); pctx.moveTo(cx,APAD); pctx.lineTo(cx,h-APAD); pctx.moveTo(APAD,cy); pctx.lineTo(w-APAD,cy); pctx.stroke();
+  pctx.fillStyle='#8b949e'; pctx.font='13px monospace'; pctx.textAlign='center';
+  pctx.fillText('FRONT of the room', cx, APAD-10);
+  pctx.textAlign='left';  pctx.fillText('−'+ext+' m', APAD, cy-8);
+  pctx.textAlign='right'; pctx.fillText('+'+ext+' m', w-APAD, cy-8);
+  // the origin: not a spectator, but the reference the headsets align to
+  pctx.fillStyle='#ffffff55'; pctx.beginPath(); pctx.arc(cx,cy,5,0,7); pctx.fill();
+  pctx.fillStyle='#8b949e'; pctx.font='11px monospace'; pctx.textAlign='left';
+  pctx.fillText('room origin (0,0)', cx+10, cy+16);
+  scene.stems.forEach((st,i)=>{ const p=arPos(st);
+    arDot(pctx, planX(p.x), planY(p.z), i, st.name||('S'+i),
+          Math.hypot(p.x,p.z).toFixed(1)+' m'); });
+}
+
+function drawARFront(){
+  const w=arfront.width, h=arfront.height, ext=arExtent();
+  fctx.clearRect(0,0,w,h);
+  fctx.strokeStyle='#ffffff0c'; fctx.lineWidth=1;
+  fctx.fillStyle='#8b949e'; fctx.font='12px monospace'; fctx.textAlign='right';
+  for(let m=0;m<=AR_Y_MAX+1e-6;m+=0.5){ const y=frontY(m);
+    fctx.beginPath(); fctx.moveTo(APAD,y); fctx.lineTo(w-APAD,y); fctx.stroke();
+    fctx.fillText(m.toFixed(1), APAD-6, y+4); }
+  const fy=frontY(0);
+  fctx.strokeStyle='#ffffff22'; fctx.lineWidth=2;
+  fctx.beginPath(); fctx.moveTo(APAD,fy); fctx.lineTo(w-APAD,fy); fctx.stroke();
+  // ~ear height of a standing listener: the line a source is level with the head
+  const ey=frontY(AR_HEIGHT);
+  fctx.strokeStyle='#ffffff33'; fctx.setLineDash([5,5]); fctx.lineWidth=1.5;
+  fctx.beginPath(); fctx.moveTo(APAD,ey); fctx.lineTo(w-APAD,ey); fctx.stroke(); fctx.setLineDash([]);
+  fctx.fillStyle='#8b949e'; fctx.textAlign='left'; fctx.fillText('ear height ≈'+AR_HEIGHT.toFixed(2)+' m', APAD+4, ey-6);
+  fctx.textAlign='center'; fctx.fillText('−'+ext+' m', APAD+16, h-10); fctx.fillText('+'+ext+' m', w-APAD-16, h-10);
+  scene.stems.forEach((st,i)=>{ const p=arPos(st), x=frontX(p.x), y=frontY(Math.max(0,Math.min(AR_Y_MAX,p.y)));
+    fctx.strokeStyle=PALETTE[i%PALETTE.length]+'44'; fctx.lineWidth=2;
+    fctx.beginPath(); fctx.moveTo(x,fy); fctx.lineTo(x,y); fctx.stroke();
+    arDot(fctx, x, y, i, st.name||('S'+i), p.y.toFixed(2)+' m'); });
+}
+
+// Dragging an unplaced dot materialises it where the fallback already put it, so
+// the first drag starts from what you were hearing instead of jumping.
+let arDragging=-1, arDragView='';
+function arHit(ev, canvas, xOf, yOf){
+  const r=canvas.getBoundingClientRect(), t=ev.touches?ev.touches[0]:ev;
+  const x=(t.clientX-r.left)/r.width*canvas.width, y=(t.clientY-r.top)/r.height*canvas.height;
+  let best=-1,bd=1e9;
+  scene.stems.forEach((st,i)=>{ const p=arPos(st); const d=Math.hypot(xOf(p)-x,yOf(p)-y); if(d<bd){bd=d;best=i;} });
+  return { x, y, hit: bd<40 ? best : -1 };
+}
+function arDown(view){ return ev=>{
+  const c = view==='plan' ? arplan : arfront;
+  const h = view==='plan' ? arHit(ev,c,p=>planX(p.x),p=>planY(p.z))
+                          : arHit(ev,c,p=>frontX(p.x),p=>frontY(Math.max(0,Math.min(AR_Y_MAX,p.y))));
+  if(h.hit<0) return;
+  arDragging=h.hit; arDragView=view; arSet(h.hit, arPos(scene.stems[h.hit]));
+  selectStem(h.hit); ev.preventDefault(); }; }
+function arMove(ev){
+  if(arDragging<0) return;
+  const c = arDragView==='plan' ? arplan : arfront;
+  const r=c.getBoundingClientRect(), t=ev.touches?ev.touches[0]:ev;
+  const px=(t.clientX-r.left)/r.width*c.width, py=(t.clientY-r.top)/r.height*c.height;
+  const cur=arPos(scene.stems[arDragging]);
+  // Vertical only in the front view, as in the 360 one: the plan owns x and z.
+  arSet(arDragging, arDragView==='plan'
+    ? { x:pxToX(px), y:cur.y, z:pxToZ(py) }
+    : { x:cur.x, y:Math.max(0,Math.min(AR_Y_MAX,pyToY(py))), z:cur.z });
+  renderStems(); drawViews(); syncSelPanel(); ev.preventDefault();
+}
+function arUp(){ arDragging=-1; }
+arplan.addEventListener('mousedown',arDown('plan')); arfront.addEventListener('mousedown',arDown('front'));
+window.addEventListener('mousemove',arMove); window.addEventListener('mouseup',arUp);
+arplan.addEventListener('touchstart',arDown('plan'),{passive:false});
+arfront.addEventListener('touchstart',arDown('front'),{passive:false});
+window.addEventListener('touchmove',arMove,{passive:false}); window.addEventListener('touchend',arUp);
+
+function arPlaceAll(){
+  let n=0;
+  scene.stems.forEach((s,i)=>{ if(!arPlaced(s)){ arSet(i, arFallbackPos(s)); n++; } });
+  drawViews(); syncSelPanel();
+  toast(n ? `${n} musician(s) placed where they already sounded` : 'All of them were already placed');
+}
+function arUnplace(){
+  const s=scene.stems[selected];
+  if(!s) return toast('Pick a musician first');
+  if(!arPlaced(s)) return toast('That one is already on the sphere');
+  // Drop only the coordinates: `ar` will hold the mesh too.
+  delete s.ar.x; delete s.ar.y; delete s.ar.z;
+  if(!Object.keys(s.ar).length) delete s.ar;
+  drawViews(); syncSelPanel(); toast('Back to the 360 direction at '+AR_RADIUS+' m');
+}
+
+// All four views draw the same stems, so they are never redrawn apart.
+function drawViews(){ drawRadar(); drawHeight(); drawARPlan(); drawARFront(); }
 
 // ── Bed construction ─────────────────────────────────────────────────────────
 // Four mono components in, one 4-channel bed out. The server hands it to

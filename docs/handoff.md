@@ -27,9 +27,20 @@ no GPU for video, no A/V drift to manage.
 
 - `immersive-ar` session with passthrough (`renderer.setClearAlpha(0)`, 360
   sphere hidden).
-- One 3D marker per musician (wireframe ball + name label), placed **around the
-  user by azimuth/elevation** at a fixed radius (`AR_RADIUS = 1.6 m`,
-  `AR_HEIGHT = 1.3 m`).
+- One 3D marker per musician (wireframe ball + name label), placed at its **room
+  point in metres** — `stem.ar = {x, y, z}` in `scene.json`, authored in the
+  editor's *AR room* panel, and the same frame the cameras will publish into.
+  A stem without that block falls back to its **360 direction projected onto a
+  sphere** (`AR_RADIUS = 1.6 m`, `AR_HEIGHT = 1.3 m`, `arPosition()` in
+  `player.js`): a scene that was never placed still sounds like something, with
+  everyone at the same invented distance.
+
+  > The 360 sphere and the room are **not the same model**. In VR the listener
+  > sits at the centre and a stem is a *direction* — distance is not heard,
+  > because an unanchored source always rides `_stemRadius`. In AR the spectator
+  > walks among the sources, so distance and height above the floor are heard and
+  > have to be real. That is why placement is authored twice, and why `ar` is a
+  > separate block rather than a reinterpretation of `azimuthDeg`/`elevationDeg`.
 - Each marker bound to its stem: `engine.bindStemToObject(i, marker)` +
   `engine.update()` per frame → the HRTF `PannerNode` follows the object, with
   natural distance attenuation.

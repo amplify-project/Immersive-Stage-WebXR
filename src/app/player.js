@@ -1195,8 +1195,32 @@ async function enterXR() {
 // su canal de audio se espacializa en esa posición con el PannerNode HRTF del
 // motor (bindStemToObject + update). La cabeza se mueve por el espacio y el
 // sonido viene de cada objeto, con atenuación natural por distancia.
+//
+// Una sala NO es la esfera del 360. En VR el oyente está en el centro y un stem
+// es una DIRECCIÓN (azimut/elevación): la distancia no se oye, porque la fuente
+// va siempre a `_stemRadius` de la cabeza. En AR el músico es un PUNTO de la
+// sala, con su distancia y su altura reales sobre el suelo, y el espectador se
+// mueve entre ellos. Por eso un stem puede traer un bloque `ar: {x,y,z}` en
+// metros de sala; sin él caemos a la proyección de abajo, que coloca la
+// dirección del 360 sobre una esfera a AR_RADIUS. Esa proyección es un apaño
+// razonable para una escena sin colocar —todos a la misma distancia inventada—,
+// no la geometría de la sala.
 const AR_RADIUS = 1.6;    // distancia de colocación inicial (m)
 const AR_HEIGHT = 1.3;    // altura base de los objetos (m)
+
+// Punto de sala de un stem, en el marco de roomGroup: el bloque `ar` si lo trae,
+// y si no la dirección del 360 proyectada sobre la esfera.
+function arPosition(s) {
+  const p = s.ar;
+  if (p && isFinite(p.x) && isFinite(p.y) && isFinite(p.z)) return [p.x, p.y, p.z];
+  const D2R = Math.PI / 180;
+  const az = (s.azimuthDeg || 0) * D2R, el = (s.elevationDeg || 0) * D2R;
+  const ce = Math.cos(el), se = Math.sin(el);
+  // misma convención que el motor: frente = −Z, izquierda = −X, arriba = +Y.
+  return [-ce * Math.sin(az) * AR_RADIUS,
+          AR_HEIGHT + se * AR_RADIUS,
+          -ce * Math.cos(az) * AR_RADIUS];
+}
 
 // Etiqueta de texto como sprite (nombre del músico, sobre el objeto).
 function makeLabelSprite(text) {
@@ -1338,14 +1362,9 @@ function buildARSources() {
   // colocada (si no, el primer frame suena en el sitio equivocado).
   applyARCalib(loadARCalib());
   roomGroup.updateMatrixWorld(true);
-  const D2R = Math.PI / 180;
   stemDefs.forEach((s, i) => {
-    const az = (s.azimuthDeg || 0) * D2R, el = (s.elevationDeg || 0) * D2R;
-    const ce = Math.cos(el), se = Math.sin(el);
-    // misma convención que el motor: frente = −Z, izquierda = −X, arriba = +Y.
-    const dir = [-ce * Math.sin(az), se, -ce * Math.cos(az)];
     const m = makeSourceMarker(s.name);
-    m.position.set(dir[0] * AR_RADIUS, AR_HEIGHT + dir[1] * AR_RADIUS, dir[2] * AR_RADIUS);
+    m.position.fromArray(arPosition(s));
     roomGroup.add(m);
     m.updateMatrixWorld(true);          // matrixWorld válido antes de leerla en bind
     engine.bindStemToObject(i, m);

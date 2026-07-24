@@ -97,9 +97,11 @@ a bug we already fixed.
 
 ### Authoring (editor → scene.json)
 `editor.html` edits an in-memory `scene` object and `POST`s it to `/api/scene`.
-Placement comes from two views of the same two numbers per stem: the top-down radar
-(azimuth) and the front height view (elevation, shown in metres at `AR_RADIUS`);
-spotlight and encode params from their panels; live device choices into `scene.live`.
+Placement is authored twice, because VR and AR are different models. The 360 sphere —
+a *direction* per stem — comes from the top-down radar (azimuth) and the front height
+view (elevation); the AR room — a *point in metres* — from the AR room panel, into
+`stem.ar = {x,y,z}`, with the sphere projection as the player's fallback. Spotlight and
+encode params come from their panels; live device choices into `scene.live`.
 
 ### Encoding (scene.json → manifest)
 `POST /api/encode {mode}` reads `scene.json` and translates it into **environment
