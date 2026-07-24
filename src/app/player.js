@@ -1047,7 +1047,8 @@ async function enterXR() {
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(xrSession);
 
-    if (telemetry) { telemetry.meta.mode = 'vr'; telemetry.start(); }
+    // frame: en qué marco viajan p/q. En VR es el del propio casco (ver arTelemetryPose).
+    if (telemetry) { telemetry.meta.mode = 'vr'; telemetry.meta.frame = 'local-floor'; telemetry.start(); }
 
     document.getElementById('xr-btn').textContent = 'EXIT VR';
 
@@ -1207,6 +1208,30 @@ async function enterXR() {
 // no la geometría de la sala.
 const AR_RADIUS = 1.6;    // distancia de colocación inicial (m)
 const AR_HEIGHT = 1.3;    // altura base de los objetos (m)
+
+// Telemetría en coordenadas de SALA (ver arTelemetryPose). Temporales de módulo:
+// el bucle de AR pasa por aquí en cada frame y no conviene asignar ahí.
+const _telP = new THREE.Vector3();
+const _telQ = new THREE.Quaternion();
+const _telR = new THREE.Quaternion();
+
+// Pose de cabeza pasada del marco del casco al de la sala.
+//
+// `local-floor` pone el origen donde arrancó cada sesión: en bruto, la pose de
+// dos espectadores no es comparable entre sí, ni con los músicos, que viven en
+// el marco de roomGroup (stem.ar). Como T ya existe —ES roomGroup— basta con
+// deshacerla: la posición al espacio local del grupo, y la orientación sin su
+// yaw. En VR no aplica y se sigue enviando la pose tal cual: allí no hay sala,
+// el oyente está en el centro de la esfera. El hello lleva `frame` para que el
+// consumidor sepa cuál de los dos marcos está recibiendo.
+function arTelemetryPose(pose) {
+  const p = pose.transform.position, q = pose.transform.orientation;
+  _telP.set(p.x, p.y, p.z);
+  roomGroup.worldToLocal(_telP);                 // usa matrixWorld: actualizarla antes
+  _telQ.set(q.x, q.y, q.z, q.w)
+       .premultiply(_telR.copy(roomGroup.quaternion).invert());
+  return [_telP, _telQ];
+}
 
 // Punto de sala de un stem, en el marco de roomGroup: el bloque `ar` si lo trae,
 // y si no la dirección del 360 proyectada sobre la esfera.
@@ -1391,7 +1416,8 @@ async function enterAR() {
     });
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(arSession);
-    if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.start(); }
+    // 'room': mismo marco que stem.ar y que las posiciones que publicarán las cámaras.
+    if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room'; telemetry.start(); }
     renderer.setClearAlpha(0);                    // deja ver el passthrough
     document.getElementById('ar-btn').textContent = 'EXIT AR';
 
@@ -1437,11 +1463,15 @@ async function enterAR() {
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
           updateARCalib(frame.session, pose);                     // recolocar la sala (grip + joysticks)
+          // La calibración de ESTE frame tiene que contar ya: worldToLocal (y los
+          // panners, que siguen la matrixWorld de los marcadores) leen la matriz,
+          // y sin esto van un frame por detrás mientras se recoloca la sala.
+          roomGroup.updateMatrixWorld(true);
           engine?.update();                                       // panners siguen a los objetos anclados
 
-          // Telemetría: pose de cabeza en AR passthrough (sin zoom/foco).
-          telemetry?.sample(pose.transform.position, pose.transform.orientation,
-                            0, -1, videoEl?.currentTime || 0);
+          // Telemetría: pose de cabeza en coordenadas de sala (sin zoom/foco).
+          const [tp, tq] = arTelemetryPose(pose);
+          telemetry?.sample(tp, tq, 0, -1, videoEl?.currentTime || 0);
         }
       }
       updateAmbiViz();

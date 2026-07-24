@@ -36,7 +36,7 @@ function ok(msg) { console.log('  ✓ ' + msg); }
   // producer sends a pose looking straight down -Z (identity quaternion)
   const producer = new WebSocket(`${BASE}/ingest`);
   await once(producer, 'open');
-  producer.send(JSON.stringify({ hello: 'smoke-1', meta: { mode: 'vr' } }));
+  producer.send(JSON.stringify({ hello: 'smoke-1', meta: { mode: 'vr' } }));   // sin frame: el relay asume local-floor
   await wait(50);
   producer.send(JSON.stringify({ b: [{ t: 1, mt: 0, p: [0, 1.6, 0], q: [0, 0, 0, 1], z: 0, f: -1 }] }));
   await wait(150);
@@ -48,6 +48,22 @@ function ok(msg) { console.log('  ✓ ' + msg); }
   if (upd && upd.gaze && Math.abs(upd.gaze[0]) < 1e-6 && Math.abs(upd.gaze[1]) < 1e-6 && Math.abs(upd.gaze[2] + 1) < 1e-6)
     ok('relay derived head-forward gaze = [0,0,-1] for identity quaternion');
   else fail('gaze derivation wrong: ' + JSON.stringify(upd && upd.gaze));
+
+  // Marco de coordenadas: el consumidor tiene que saber si p/q vienen en el
+  // local-floor del casco (VR) o en el de la sala (AR). Sin declarar, local-floor.
+  if (upd && upd.frame === 'local-floor') ok('update carries frame, defaulting to local-floor');
+  else fail('frame missing or wrong on update: ' + JSON.stringify(upd && upd.frame));
+
+  const arProducer = new WebSocket(`${BASE}/ingest`);
+  await once(arProducer, 'open');
+  arProducer.send(JSON.stringify({ hello: 'smoke-ar', meta: { mode: 'ar', frame: 'room' } }));
+  await wait(50);
+  arProducer.send(JSON.stringify({ b: [{ t: 1, mt: 0, p: [1, 1.6, -2], q: [0, 0, 0, 1], z: 0, f: -1 }] }));
+  await wait(150);
+  const arUpd = events.find(e => e.type === 'update' && e.id === 'smoke-ar');
+  if (arUpd && arUpd.frame === 'room') ok('AR player declared frame=room and it reached the consumer');
+  else fail('AR frame not propagated: ' + JSON.stringify(arUpd && arUpd.frame));
+  arProducer.close();
 
   // drop producer -> expect a leave (either on close or via TTL sweep)
   producer.close();

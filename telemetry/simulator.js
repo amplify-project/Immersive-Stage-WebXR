@@ -52,7 +52,9 @@ class SimClient {
     const ws = new WebSocket(INGEST);
     this.ws = ws;
     ws.on('open', () => {
-      ws.send(JSON.stringify({ hello: this.id, meta: { ua: 'simulator', mode: this.mode } }));
+      // El frame acompaña al modo, como en el player: sala en AR, local-floor en VR.
+      ws.send(JSON.stringify({ hello: this.id, meta: { ua: 'simulator', mode: this.mode,
+        frame: this.mode === 'ar' ? 'room' : 'local-floor' } }));
       this.timer = setInterval(() => this.tick(), 1000 / RATE);
     });
     ws.on('close', () => { clearInterval(this.timer); this.timer = null; });

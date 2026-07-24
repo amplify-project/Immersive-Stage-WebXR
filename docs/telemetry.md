@@ -29,12 +29,32 @@ Unity are touched** — you swap the relay's internals for a Redis-backed one.
 
 ## Coordinate frame (read this)
 
-Each player's pose is in **its own `local-floor` space** — origin wherever that
-headset established the floor at session start. Poses from different players are
-**not** in a shared world. Since players are only shown in the external render
-(and don't see each other), the render places each one independently (per seat /
-per viewport). If you ever need them co-located in one scene, add a shared
-spatial anchor — that is a render-side decision, not a telemetry-pipeline one.
+Which frame `p`/`q` are in **depends on the mode**: `"local-floor"` in VR,
+`"room"` in AR. The player declares it in the `hello` (`meta.frame`) and the relay
+puts it on **every** player record it emits, snapshot and update alike, as
+`frame`. Read it rather than assuming — the day one spectator joins in AR, a
+consumer that assumes will mix two frames with no error anywhere.
+
+**VR — `local-floor`.** Origin wherever that headset established the floor at
+session start, so poses from different players are **not** in a shared world.
+That is fine here: the listener sits at the centre of the 360 sphere and never
+walks, players don't see each other, and the external render places each one
+independently (per seat / per viewport).
+
+**AR — `room`.** Passthrough is the opposite case: the spectators share one
+physical room and walk around in it. The player already holds the room→headset
+transform (`roomGroup`, the manual alignment), so it publishes the head pose with
+that transform undone — the **same frame as `stem.ar`**, the musicians' room
+coordinates in `scene.json`, and the frame the partner's cameras will publish
+into. Two headsets calibrated differently therefore report the *same* numbers for
+someone standing in the same spot, and distance from a listener to a musician is
+a subtraction. A session that never calibrated has an identity transform, so its
+poses are unchanged — `room` is then just its own `local-floor`, and the pose is
+only comparable across headsets once each has been aligned.
+
+Consumers that place players per seat keep working unchanged in VR; in AR they
+now receive co-located poses, which is what makes several spectators renderable
+in one scene without a spatial anchor of their own.
 
 ## Gaze
 
@@ -78,7 +98,7 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 
 ```jsonc
 // once, on connect
-{ "hello": "player-42", "meta": { "ua": "...", "mode": "vr" } }
+{ "hello": "player-42", "meta": { "ua": "...", "mode": "vr", "frame": "local-floor" } }
 
 // data frames (batched)
 { "b": [
@@ -90,8 +110,8 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 |-------|-----------------------------------------------------|
 | `t`   | client monotonic time (ms, `performance.now`)       |
 | `mt`  | media presentation time (s) — what they were seeing |
-| `p`   | head position `[x,y,z]`                             |
-| `q`   | head orientation quaternion `[x,y,z,w]`            |
+| `p`   | head position `[x,y,z]`, in the frame named by `meta.frame` |
+| `q`   | head orientation quaternion `[x,y,z,w]`, same frame |
 | `z`   | zoom / attention depth, normalized `0..1`            |
 | `f`   | focused musician: index into `scene.json` → `stems` (`-1` = none) |
 | `g`   | *optional* real eye-gaze `[x,y,z]` (else omitted)   |
@@ -106,10 +126,10 @@ at their own place) it is always `-1`.
 
 ```jsonc
 // on connect: current state of every live player
-{ "type": "snapshot", "players": [ { "id": "...", "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "mt": 0 } ] }
+{ "type": "snapshot", "players": [ { "id": "...", "frame": "room", "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "mt": 0 } ] }
 
 // live stream
-{ "type": "update", "id": "player-42", "t": 12345.6, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
+{ "type": "update", "id": "player-42", "frame": "room", "t": 12345.6, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
 { "type": "leave",  "id": "player-42" }
 ```
 
@@ -190,6 +210,7 @@ using System.Collections.Generic;
 
 [System.Serializable] public class Pose {
     public string type, id;
+    public string frame;         // "local-floor" (VR) or "room" (AR) — see above
     public float[] p, q, gaze;   // JsonUtility handles float[]
     public float z, mt; public int f;
 }

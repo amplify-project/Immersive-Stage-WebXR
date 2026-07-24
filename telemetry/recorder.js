@@ -19,9 +19,13 @@ const URL     = args.url || 'ws://localhost:8090/consume';
 const OUT     = args.out || `session-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
 const SECONDS = args.seconds ? +args.seconds : 0;
 
+// `frame` goes last on purpose: appended columns don't move the ones anybody is
+// already parsing. It says what px/py/pz mean — this headset's local-floor (VR)
+// or the shared room (AR) — which a recording of several spectators cannot be
+// read without.
 const COLS = ['wall_iso', 'wall_ms', 'id', 'client_ms', 'media_s',
               'px', 'py', 'pz', 'qx', 'qy', 'qz', 'qw',
-              'gx', 'gy', 'gz', 'zoom', 'focus'];
+              'gx', 'gy', 'gz', 'zoom', 'focus', 'frame'];
 
 const out = fs.createWriteStream(OUT, { flags: 'w' });
 out.write(COLS.join(',') + '\n');
@@ -56,7 +60,7 @@ function row(m) {
     n(p[0]), n(p[1]), n(p[2]),
     n(q[0]), n(q[1]), n(q[2]), n(q[3]),
     n(g[0]), n(g[1]), n(g[2]),
-    n(m.z), m.f ?? '',
+    n(m.z), m.f ?? '', m.frame || '',
   ].join(',') + '\n');
   rows++;
   seen.add(m.id);

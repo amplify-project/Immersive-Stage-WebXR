@@ -96,20 +96,27 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
       if (msg.hello) {                              // handshake
         id = String(msg.hello);
         const prev = players.get(id) || {};
-        players.set(id, { ...prev, id, meta: msg.meta || {}, lastSeen: Date.now() });
+        const meta = msg.meta || {};
+        // Which frame p/q are in travels with every record, not just in the
+        // hello: meta stays server-side, and a consumer that reads `p` without
+        // knowing whether it is this headset's local-floor or the shared room
+        // will silently mix the two the day one spectator is in AR.
+        players.set(id, { ...prev, id, meta, frame: meta.frame || 'local-floor',
+                          lastSeen: Date.now() });
         return;
       }
       if (!id || !Array.isArray(msg.b)) return;     // data frames need a prior hello
 
       const now = Date.now();
       for (const s of msg.b) {
+        const prev = players.get(id) || { meta: {} };
         const rec = {
-          id, t: s.t, mt: s.mt,
+          id, frame: prev.frame || 'local-floor',
+          t: s.t, mt: s.mt,
           p: s.p, q: s.q,
           gaze: s.g || forwardFromQuat(s.q),        // real eye-gaze if sent, else head-forward
           z: s.z, f: s.f,
         };
-        const prev = players.get(id) || { meta: {} };
         players.set(id, { ...prev, ...rec, lastSeen: now });
         broadcast({ type: 'update', ...rec });
       }
