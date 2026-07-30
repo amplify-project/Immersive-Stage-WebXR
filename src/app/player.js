@@ -138,6 +138,139 @@ function renderLoop() {
 // llega al motor (factor congelado), la mirada no lo enfoca (peso 0) o la
 // cadena de audio no obedece (peso alto, ganancia plana). Aquí se ven los tres.
 const SPOTLOG = new URLSearchParams(location.search).get('spotlog') === '1';
+
+// ?arperf=1 — reparto del tiempo de CADA frame de AR, para saber si un bache es
+// nuestro o del sistema. El bucle mide cuatro tramos y cada 2 s resume el peor.
+//
+// Cómo se lee: si `total` se dispara mientras los tramos siguen en décimas de
+// milisegundo, el tiempo NO se va en este JavaScript — se va en el compositor de
+// passthrough o en el hilo de audio (seis panners HRTF interpolando HRIRs
+// mientras te desplazas), y no hay nada que optimizar aquí. Si el que sube es un
+// tramo concreto, ese es el culpable y tiene arreglo.
+const ARPERF = new URLSearchParams(location.search).get('arperf') === '1';
+const _perf = { n: 0, t0: 0, worst: 0, sum: 0, audio: 0, focus: 0, render: 0, worstAt: '', vf0: -1 };
+
+// Fotogramas de vídeo que el navegador lleva DECODIFICADOS. En AR la esfera está
+// oculta y nadie dibuja esa textura, pero el <video> sigue reproduciendo porque
+// de él sale el audio: si esta cuenta avanza, se está decodificando 360 para no
+// enseñarlo a nadie, y ahí hay trabajo que quitar. Si no avanza, el navegador ya
+// se lo ha ahorrado y hay que buscar el bache en otro sitio.
+function decodedFrames() {
+  const q = videoEl && videoEl.getVideoPlaybackQuality && videoEl.getVideoPlaybackQuality();
+  return q ? q.totalVideoFrames : -1;
+}
+
+// El informe se lee DENTRO de las gafas o no se lee: en sesión inmersiva no hay
+// consola, y la pantalla plana de la página no la está mirando nadie. Un sprite
+// colgado delante de la cara es el único sitio donde el dato llega a tiempo.
+let arPerfPanel = null;
+const AR_PERF_PANEL_W = 640, AR_PERF_PANEL_H = 200;   // px de canvas (~4:1.25)
+
+function arPerfPanelDraw(lines) {
+  if (!arPerfPanel) {
+    const c = document.createElement('canvas');
+    c.width = AR_PERF_PANEL_W; c.height = AR_PERF_PANEL_H;
+    const tex = new THREE.CanvasTexture(c);
+    tex.minFilter = THREE.LinearFilter;
+    arPerfPanel = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+    // Un sprite siempre mira a la cámara, así que basta con colocarlo: 40 cm de
+    // alto a 1.2 m se lee sin esfuerzo y no tapa a los músicos.
+    arPerfPanel.scale.set(0.4 * (AR_PERF_PANEL_W / AR_PERF_PANEL_H), 0.4, 1);
+    arPerfPanel.renderOrder = 999;
+    arPerfPanel.userData.canvas = c;
+    scene.add(arPerfPanel);
+  }
+  const c = arPerfPanel.userData.canvas, cx = c.getContext('2d');
+  cx.clearRect(0, 0, c.width, c.height);
+  cx.fillStyle = 'rgba(0,0,0,0.72)';
+  cx.fillRect(0, 0, c.width, c.height);
+  cx.font = 'bold 30px monospace';
+  cx.textBaseline = 'top';
+  lines.forEach((l, i) => {
+    // La línea del vídeo es la que decide la hipótesis: en verde para que no se
+    // pierda entre las demás.
+    cx.fillStyle = i === lines.length - 1 ? '#5dff8f' : '#00d4ff';
+    cx.fillText(l, 20, 20 + i * 44);
+  });
+  arPerfPanel.material.map.needsUpdate = true;
+}
+
+// Delante de la cara, un poco por debajo del eje de la mirada. Se recoloca cada
+// frame para que andar no lo deje atrás.
+const _panelFwd = new THREE.Vector3();
+const _panelQ   = new THREE.Quaternion();
+function arPerfPanelPlace(pose) {
+  if (!arPerfPanel) return;
+  const p = pose.transform.position, q = pose.transform.orientation;
+  _panelFwd.set(0, 0, -1).applyQuaternion(_panelQ.set(q.x, q.y, q.z, q.w));
+  arPerfPanel.position.set(p.x + _panelFwd.x * 1.2,
+                           p.y + _panelFwd.y * 1.2 - 0.25,
+                           p.z + _panelFwd.z * 1.2);
+}
+
+function arPerfPanelClear() {
+  if (!arPerfPanel) return;
+  scene.remove(arPerfPanel);
+  arPerfPanel.material.map.dispose();
+  arPerfPanel.material.dispose();
+  arPerfPanel = null;
+}
+
+function arPerfReport(now) {
+  // La ventana arranca en el primer frame; sin esto, t0=0 contra un
+  // performance.now() de varios segundos suelta un informe de 1 frame al entrar.
+  if (!_perf.t0) { _perf.t0 = now; _perf.vf0 = decodedFrames(); return; }
+  if (_perf.n && now - _perf.t0 >= 2000) {
+    const avg = (_perf.sum / _perf.n).toFixed(2);
+    // Fotogramas decodificados por segundo en esta ventana. ~24-30 = el vídeo se
+    // está decodificando entero; 0 = el navegador ya no lo decodifica.
+    const vf = decodedFrames();
+    const vfps = (vf >= 0 && _perf.vf0 >= 0) ? ((vf - _perf.vf0) / ((now - _perf.t0) / 1000)).toFixed(1) : '?';
+    console.log(`[arperf] ${_perf.n} frames · medio ${avg} ms · peor ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})` +
+      ` · audio ${(_perf.audio / _perf.n).toFixed(2)} · foco ${(_perf.focus / _perf.n).toFixed(2)}` +
+      ` · render ${(_perf.render / _perf.n).toFixed(2)} · vídeo decodificado ${vfps} fps`);
+    arPerfPanelDraw([
+      `${_perf.n} frames · medio ${avg} ms`,
+      `peor ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})`,
+      `audio ${(_perf.audio / _perf.n).toFixed(2)} · render ${(_perf.render / _perf.n).toFixed(2)}`,
+      `vídeo decodificado ${vfps} fps`,
+    ]);
+    // Cada ventana se guarda además para el volcado de la página al salir, que
+    // sobrevive a quitarse las gafas.
+    window.__arperf = window.__arperf || [];
+    window.__arperf.push({ frames: _perf.n, avgMs: +avg, worstMs: +_perf.worst.toFixed(1),
+                           worstAt: _perf.worstAt, videoFps: +vfps });
+    _perf.n = _perf.sum = _perf.worst = _perf.audio = _perf.focus = _perf.render = 0;
+    _perf.t0 = now; _perf.vf0 = vf;
+  }
+}
+
+// Volcado en la propia página al salir de AR. El toast dura 3 s y se lo come el
+// tiempo de quitarse las gafas; esto se queda hasta que se recarga.
+function arPerfDump() {
+  const w = window.__arperf;
+  if (!w || !w.length) return;
+  let el = document.getElementById('arperf-dump');
+  if (!el) {
+    el = document.createElement('pre');
+    el.id = 'arperf-dump';
+    el.style.cssText = 'position:fixed;right:8px;top:8px;z-index:9999;margin:0;max-height:80vh;' +
+      'overflow:auto;padding:10px 12px;background:rgba(0,0,0,.82);color:#0f0;border-radius:6px;' +
+      'font:12px/1.4 monospace';
+    el.addEventListener('click', () => el.remove());   // molesta poco, se quita de un toque
+    document.body.appendChild(el);
+  }
+  const peor = w.reduce((a, b) => (b.worstMs > a.worstMs ? b : a));
+  const vid  = w.reduce((a, b) => a + b.videoFps, 0) / w.length;
+  el.textContent =
+    `[arperf] ${w.length} ventanas de 2 s   (toca aquí para cerrar)\n` +
+    `peor frame  ${peor.worstMs} ms  (${peor.worstAt})\n` +
+    `vídeo decodificado, media  ${vid.toFixed(1)} fps` +
+    `   → ${vid > 5 ? 'SÍ se decodifica el 360 para nadie' : 'el navegador ya no lo decodifica'}\n\n` +
+    w.map((x, i) => `${String(i * 2).padStart(3)}s  ${String(x.frames).padStart(4)} fr` +
+      `  medio ${String(x.avgMs).padStart(6)}  peor ${String(x.worstMs).padStart(6)}` +
+      `  vídeo ${String(x.videoFps).padStart(5)} fps  (${x.worstAt})`).join('\n');
+}
 let spotLogEl = null, spotLogNext = 0;
 function updateSpotLog() {
   if (!SPOTLOG || !engine || !engine.getSpotlightState) return;
@@ -1597,6 +1730,11 @@ async function enterAR() {
 
     arSession.addEventListener('end', () => {
       // ?arperf=1: el resumen se enseña aquí, que es cuando vuelve a haber pantalla.
+      if (ARPERF) {
+        arPerfPanelClear();
+        arPerfDump();
+        console.log('[arperf] ventanas:', window.__arperf);
+      }
       telemetry?.stop();
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
@@ -1619,6 +1757,7 @@ async function enterAR() {
       // (es el mismo elemento del que sale el audio).
       if (sphere && sphere.visible && videoEl && videoEl.readyState >= 2 && videoTexture)
         videoTexture.needsUpdate = true;
+      const _p0 = ARPERF ? performance.now() : 0;
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
         const pose = refSpace && frame.getViewerPose(refSpace);
@@ -1632,12 +1771,17 @@ async function enterAR() {
           // recorrido del subárbol 72 veces por segundo para nada.
           if (arCalibrating) roomGroup.updateMatrixWorld(true);
           engine?.update();                                       // panners siguen a los objetos anclados
+          const _p1 = ARPERF ? performance.now() : 0;
 
           // Telemetría: pose de cabeza en coordenadas de sala + músico mirado.
           // El zoom sigue siendo 0: en AR no existe, y mandar otra cosa mentiría
           // al consumidor sobre en qué rango leer `z`.
           const [tp, tq] = arTelemetryPose(pose);
           telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
+          if (ARPERF) {
+            _perf.audio += _p1 - _p0; _perf.focus += performance.now() - _p1;
+            arPerfPanelPlace(pose);      // el panel sigue a la cabeza
+          }
         }
       }
       // Sin updateAmbiViz(): es un canvas 2D del HUD de la página, que en sesión
@@ -1645,13 +1789,27 @@ async function enterAR() {
       // analyser y un bucle sobre el buffer entero (getDominantDirection) en cada
       // frame, en el hilo principal, para no dibujar nada. Al salir de AR vuelve
       // el bucle de escritorio y se repinta solo.
+      const _p2 = ARPERF ? performance.now() : 0;
       renderer.render(scene, camera);
+      if (ARPERF) {
+        const end = performance.now(), total = end - _p0;
+        _perf.render += end - _p2; _perf.sum += total; _perf.n++;
+        if (total > _perf.worst) {
+          _perf.worst = total;
+          // El reparto del PEOR frame es lo que dice dónde se fue el tiempo.
+          _perf.worstAt = `audio ${(_p2 - _p0).toFixed(1)} / render ${(end - _p2).toFixed(1)}`;
+        }
+        arPerfReport(end);
+      }
     });
 
     if (videoEl) videoEl.play();
     if (audioEl) audioEl.play().catch(() => {});
     if (audioCtx) audioCtx.resume();
     toast(`AR · ${arSources.length} fuentes · grip + joystick para alinear la sala`);
+    // El panel no tiene nada que enseñar hasta cerrar la primera ventana de 2 s.
+    // Sin este cartel, esos dos segundos se leen como "?arperf=1 no funciona".
+    if (ARPERF) { arPerfPanelDraw(['[arperf] midiendo…', '', 'primera ventana en 2 s', '']); }
     // Después de arrancar la sesión: la recarga corta el audio un instante y es
     // menos molesta con el passthrough ya puesto que retrasando la entrada.
     if (AR_CUT_VIDEO) {
