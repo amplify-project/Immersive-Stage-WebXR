@@ -26,7 +26,9 @@ no GPU for video, no A/V drift to manage.
 `index.html` (`enterAR()` / `buildARSources()`) + the engine:
 
 - `immersive-ar` session with passthrough (`renderer.setClearAlpha(0)`, 360
-  sphere hidden).
+  sphere hidden **and no longer decoded** — entering AR reloads the source with
+  `manifest.disableVideo`, so the paragraph above is now true at runtime and not
+  only on paper; see [`core-api.md`](core-api.md) §7).
 - One 3D marker per musician (wireframe ball + name label), placed at its **room
   point in metres** — `stem.ar = {x, y, z}` in `scene.json`, authored in the
   editor's *AR room* panel, and the same frame the cameras will publish into.

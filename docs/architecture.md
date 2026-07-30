@@ -90,6 +90,13 @@ a bug we already fixed.
 - **Decoder budget on Quest:** few simultaneous hardware decoders. Keep it to
   4K 360 + at most one extra video (e.g. one close-up). Don't decode N videos at
   once (see [`handoff.md`](handoff.md) Case B).
+- **Hidden ≠ free.** A hidden sphere still costs a full 4K decode: the decoder
+  runs off the main thread and starves the passthrough compositor without ever
+  appearing in a JS profile. AR therefore *reloads* the source with
+  `manifest.disableVideo` instead of merely hiding the mesh
+  ([`core-api.md`](core-api.md) §7). The same reasoning applies to anything else
+  that keeps running unseen in an immersive session — the page's 2D HUD canvases
+  are not composited there either, so their per-frame work is skipped.
 
 ---
 

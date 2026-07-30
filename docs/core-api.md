@@ -144,6 +144,27 @@ How it works:
 
 - `renderer` is created with `alpha: true`; on entering AR, `setClearAlpha(0)`
   lets the **passthrough** show through. The 360 sphere is hidden.
+- **The 360 is not decoded in AR.** Hiding the sphere does not stop the decoder:
+  measured on the Quest, the loop ran at 90 fps with 0.52 ms of JavaScript per
+  frame while the browser kept decoding the 4K 360 at its full 24 fps for a
+  texture nobody samples — work done off the main thread, which is why it never
+  showed in a per-section split and still stalled the passthrough compositor when
+  the viewer walked. Entering AR therefore sets `manifest.disableVideo` and
+  **reloads the source** (Shaka only reads that flag at `load()`); leaving AR
+  reloads with video back on and re-attaches the texture. The audio survives the
+  reload because it lives in its own `AdaptationSet` (multichannel Opus in WebM)
+  and the `<video>` element stays the Web Audio source, just without a picture
+  track. Live reloads at the live edge; VOD saves `currentTime` and returns to it.
+  `?arnovideo=0` keeps the old behaviour for an A/B comparison.
+
+  > Verified on the Quest (2026-07-30): the frame rate holds and walking is
+  > smooth. Two caveats before trusting it elsewhere. The reload costs a
+  > **~1–2 s audio gap** on entering AR — it is fired *after* the session starts,
+  > where passthrough is already up and the gap is least annoying. And the
+  > audio's **channel count is re-negotiated** on reload: the
+  > `MediaElementAudioSourceNode` survives, but a silent fall back to stereo
+  > would also look like "smoother", so confirm the stems still come from their
+  > own positions.
 - `buildARSources()` places one marker per stem (using its azimuth/elevation) and
   calls `engine.bindStemToObject(i, marker)`.
 - In AR `restGain` is set to `1` (every source is audible from its real spot;

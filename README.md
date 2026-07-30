@@ -256,6 +256,16 @@ musician + zoom in**, their stem appears from its position.
 - **`make-channel-test.sh`** / **`make-stem-demo.sh`** — generate test manifests
   (audio-only N-channel / video + FOA + tones).
 
+### Debug flags (player URL)
+
+| Flag | What it does |
+|------|--------------|
+| `?arperf=1` | **AR frame budget.** Splits every AR frame into audio / focus / render, keeps the worst frame of each 2 s window, and counts how many video frames the browser actually decodes (`getVideoPlaybackQuality`). The report is a **sprite panel 1.2 m in front of your face** — an immersive session has no console and nobody reads the flat page — and a persistent block lands top-right on exit (click to dismiss). Read it like this: if `total` spikes while the sections stay in tenths of a millisecond, the time is **not** in our JavaScript (passthrough compositor or the audio thread), and the decode line says whether the 360 is still being decoded for nobody. |
+| `?arnovideo=0` | Keeps decoding the 360 while in AR (the pre-`1e42924` behaviour), to A/B against the default. |
+| `?spotlog=1` | Overlay of the instantaneous spotlight state (zoom, gaze, per-stem weight and gain). |
+| `?avlog=1` | A/V diagnosis in the console every second (`window.avDiag()`). |
+| `?maxh=1440` | Caps the video rendition height — confirms whether audio lag comes from the 4K decode not keeping up. |
+
 ---
 
 ## File map
