@@ -16,6 +16,7 @@ let videoEl   = document.getElementById('hidden-video');
 let audioEl   = document.getElementById('hidden-audio');
 let closeupEl = document.getElementById('hidden-closeup');
 let shakaVideo = null;
+let curManifestSrc = null;           // fuente en curso (recarga al entrar/salir de AR)
 let shakaAudio = null;
 let shakaCloseup = null;             // 3ª instancia Shaka: pista de close-up
 let shakaCfg   = null;               // config compartida (la fija loadDualShaka)
@@ -225,6 +226,7 @@ function loadFile(input) {
 async function startManifest(src) {
   showSpinner(true);
   hideLoader();
+  curManifestSrc = src;         // lo necesita la recarga sin vídeo al entrar en AR
 
   // Limpiar players anteriores
   if (syncInterval) { clearInterval(syncInterval); syncInterval = null; }
@@ -1224,13 +1226,14 @@ const _telR = new THREE.Quaternion();
 // yaw. En VR no aplica y se sigue enviando la pose tal cual: allí no hay sala,
 // el oyente está en el centro de la esfera. El hello lleva `frame` para que el
 // consumidor sepa cuál de los dos marcos está recibiendo.
+const _telPair = [_telP, _telQ];     // se devuelve siempre el mismo par: sin basura por frame
 function arTelemetryPose(pose) {
   const p = pose.transform.position, q = pose.transform.orientation;
   _telP.set(p.x, p.y, p.z);
   roomGroup.worldToLocal(_telP);                 // usa matrixWorld: actualizarla antes
   _telQ.set(q.x, q.y, q.z, q.w)
        .premultiply(_telR.copy(roomGroup.quaternion).invert());
-  return [_telP, _telQ];
+  return _telPair;
 }
 
 // Punto de sala de un stem, en el marco de roomGroup: el bloque `ar` si lo trae,
@@ -1313,8 +1316,12 @@ const AR_FOCUS = {
 // debe dejar el foco sin cono.
 function loadARFocusCfg() {
   const c = arCfg.focus;
-  if (!c) return;
-  for (const k of Object.keys(AR_FOCUS)) if (typeof c[k] === 'number' && isFinite(c[k])) AR_FOCUS[k] = c[k];
+  if (c) for (const k of Object.keys(AR_FOCUS)) if (typeof c[k] === 'number' && isFinite(c[k])) AR_FOCUS[k] = c[k];
+  // Los conos que se le pasan al motor son objetos reutilizados (ver más abajo):
+  // hay que rehacerlos aquí o la escena ajustaría AR_FOCUS y el motor seguiría
+  // preguntando por los grados de fábrica.
+  _coneEnter.coneDeg = AR_FOCUS.coneDeg;
+  _coneKeep.coneDeg  = AR_FOCUS.keepDeg;
 }
 
 let arFocus      = -1;   // músico enfocado (índice de stem) o -1
@@ -1327,11 +1334,16 @@ function resetARFocus() {
   arFocusSince = arFocusLost = 0;
 }
 
+// Los dos conos, como objetos fijos: se consultan 2 veces por frame y crear el
+// literal ahí dentro es basura para el recolector 144 veces por segundo.
+const _coneEnter = { coneDeg: AR_FOCUS.coneDeg };
+const _coneKeep  = { coneDeg: AR_FOCUS.keepDeg };
+
 // Un frame de foco. `now` es el timestamp del bucle de render (ms).
 function updateARFocus(now) {
   if (!engine) return -1;
   const prev = arFocus;
-  const cand = engine.getGazedStem({ coneDeg: AR_FOCUS.coneDeg });
+  const cand = engine.getGazedStem(_coneEnter);
 
   if (cand !== arFocusCand) { arFocusCand = cand; arFocusSince = now; }
 
@@ -1344,7 +1356,7 @@ function updateARFocus(now) {
   // —el parpadeo que esto viene a evitar, y encima en el momento más informativo,
   // el del relevo. Sin candidato al que pasar, el foco se pierde de verdad.
   if (arFocus >= 0) {
-    const stillOn = engine.getGazedStem({ coneDeg: AR_FOCUS.keepDeg }) === arFocus;
+    const stillOn = engine.getGazedStem(_coneKeep) === arFocus;
     if (stillOn || cand >= 0) arFocusLost = 0;
     else {
       if (!arFocusLost) arFocusLost = now;
@@ -1366,6 +1378,56 @@ function paintARFocus() {
     const mesh = m.children[0];
     if (mesh && mesh.material) mesh.material.color.setHex(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE);
   });
+}
+
+// ══════════════════════════════════════════════════════
+// EN AR NO SE DECODIFICA EL 360
+// ══════════════════════════════════════════════════════
+// Medido con `?arperf=1` en la Quest: en passthrough el bucle va a 90 fps y
+// nuestro JavaScript cuesta 0,52 ms de media —un 5% del frame— mientras el
+// contador de `getVideoPlaybackQuality()` marca 24 fps, que es exactamente la
+// tasa del manifest. Es decir: la esfera está oculta, nadie mira esa textura, y
+// aun así se decodifica el 4K entero. Ese trabajo lo hace el decodificador
+// hardware fuera del hilo principal, por eso no salía en el reparto por tramos y
+// sí se notaba en el compositor de passthrough al andar.
+//
+// Shaka lee `manifest.disableVideo` SOLO al cargar, así que quitarlo obliga a
+// recargar la fuente. Sale a cuenta: entrar en AR es un gesto explícito y poco
+// frecuente, y el manifest trae el audio en su propio AdaptationSet (Opus
+// multicanal en WebM), así que la variante sin vídeo se sostiene sola —el
+// <video> sigue siendo el elemento del que cuelga Web Audio, solo que ya sin
+// pista de imagen que decodificar.
+//
+// En directo se recarga al borde, que es donde quieres estar de todas formas. En
+// VOD hay que guardar el `currentTime` y volver a él.
+//
+// `?arnovideo=0` lo desactiva, para comparar contra el comportamiento anterior
+// sin tener que tocar código.
+const AR_CUT_VIDEO = new URLSearchParams(location.search).get('arnovideo') !== '0';
+let videoDisabled = false;
+
+async function setVideoDisabled(off) {
+  if (!shakaVideo || !curManifestSrc || off === videoDisabled) return;
+  const wasPlaying = !videoEl.paused;
+  const t = videoEl.currentTime;
+  let live = false;
+  try { live = shakaVideo.isLive(); } catch (_) { /* aún sin manifest */ }
+  shakaVideo.configure({ manifest: { disableVideo: off } });
+  // Shaka ignora en silencio las claves que no conoce (solo un warning en
+  // consola, que aquí no ve nadie). Si el build del CDN no la tuviera, la
+  // recarga saldría igual de cara y pareceríamos tontos midiendo lo mismo.
+  if (shakaVideo.getConfiguration().manifest.disableVideo !== off)
+    throw new Error('este build de Shaka no soporta manifest.disableVideo');
+  // En directo, sin startTime: se entra por el borde. En VOD se vuelve al mismo
+  // punto, o la recarga se sentiría como un salto al principio.
+  await shakaVideo.load(curManifestSrc, live ? undefined : t);
+  videoDisabled = off;
+  // Al recuperar el vídeo hay pista nueva: la textura vieja apunta al mismo
+  // elemento, pero re-crearla es barato y evita quedarse con el último fotograma
+  // congelado de antes de entrar en AR.
+  if (!off) attachVideoTexture();
+  if (wasPlaying) videoEl.play().catch(() => {});
+  if (audioEl && audioEl !== videoEl && wasPlaying) audioEl.play().catch(() => {});
 }
 
 // ══════════════════════════════════════════════════════
@@ -1534,7 +1596,10 @@ async function enterAR() {
     buildARSources();
 
     arSession.addEventListener('end', () => {
+      // ?arperf=1: el resumen se enseña aquí, que es cuando vuelve a haber pantalla.
       telemetry?.stop();
+      // Vuelve la esfera, así que vuelve a hacer falta la imagen.
+      if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
       if (arCalibrating) { saveARCalib(); arCalibrating = false; }   // salir con el grip apretado
       clearARSources();
       renderer.setClearAlpha(1);
@@ -1548,17 +1613,24 @@ async function enterAR() {
     });
 
     renderer.setAnimationLoop((time, frame) => {
-      if (videoEl && videoEl.readyState >= 2 && videoTexture) videoTexture.needsUpdate = true;
+      // La esfera del 360 está oculta en passthrough, así que su textura no se
+      // dibuja: marcarla sucia cada frame solo sirve para que el día que se
+      // vuelva a ver suba un fotograma viejo. El <video> sigue corriendo igual
+      // (es el mismo elemento del que sale el audio).
+      if (sphere && sphere.visible && videoEl && videoEl.readyState >= 2 && videoTexture)
+        videoTexture.needsUpdate = true;
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
           updateARCalib(frame.session, pose);                     // recolocar la sala (grip + joysticks)
-          // La calibración de ESTE frame tiene que contar ya: worldToLocal (y los
-          // panners, que siguen la matrixWorld de los marcadores) leen la matriz,
-          // y sin esto van un frame por detrás mientras se recoloca la sala.
-          roomGroup.updateMatrixWorld(true);
+          // La sala solo se mueve mientras se calibra, y es entonces cuando su
+          // matriz tiene que estar al día en el propio frame: la leen worldToLocal
+          // y los panners, que siguen la matrixWorld de los marcadores. El resto
+          // del tiempo ya la refresca el render, y forzarla aquí era repetir el
+          // recorrido del subárbol 72 veces por segundo para nada.
+          if (arCalibrating) roomGroup.updateMatrixWorld(true);
           engine?.update();                                       // panners siguen a los objetos anclados
 
           // Telemetría: pose de cabeza en coordenadas de sala + músico mirado.
@@ -1568,7 +1640,11 @@ async function enterAR() {
           telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
         }
       }
-      updateAmbiViz();
+      // Sin updateAmbiViz(): es un canvas 2D del HUD de la página, que en sesión
+      // inmersiva no se compone y por tanto nadie ve. Cuesta cuatro lecturas de
+      // analyser y un bucle sobre el buffer entero (getDominantDirection) en cada
+      // frame, en el hilo principal, para no dibujar nada. Al salir de AR vuelve
+      // el bucle de escritorio y se repinta solo.
       renderer.render(scene, camera);
     });
 
@@ -1576,6 +1652,13 @@ async function enterAR() {
     if (audioEl) audioEl.play().catch(() => {});
     if (audioCtx) audioCtx.resume();
     toast(`AR · ${arSources.length} fuentes · grip + joystick para alinear la sala`);
+    // Después de arrancar la sesión: la recarga corta el audio un instante y es
+    // menos molesta con el passthrough ya puesto que retrasando la entrada.
+    if (AR_CUT_VIDEO) {
+      setVideoDisabled(true)
+        .then(() => toast('vídeo 360 desactivado en AR'))
+        .catch(e => { console.warn('[ar] cortar vídeo:', e); toast('no se pudo cortar el vídeo: ' + e.message); });
+    }
 
   } catch (e) {
     toast('Error WebXR AR: ' + e.message);
