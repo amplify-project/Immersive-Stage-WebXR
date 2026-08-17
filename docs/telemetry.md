@@ -102,13 +102,18 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 
 // data frames (batched)
 { "b": [
-  { "t": 12345.6, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "z": 0, "f": -1 }
+  { "t": 12345.6, "w": 1785500757720, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "z": 0, "f": -1 }
 ] }
+
+// clock probe — the relay asks, the player answers at once with its own reading
+// ← { "ping": 1785500757000 }
+// → { "pong": 1785500757000, "c": 12295.4 }
 ```
 
 | field | meaning                                             |
 |-------|-----------------------------------------------------|
 | `t`   | client monotonic time (ms, `performance.now`)       |
+| `w`   | client wall clock at capture (ms, `Date.now`)       |
 | `mt`  | media presentation time (s) — what they were seeing |
 | `p`   | head position `[x,y,z]`, in the frame named by `meta.frame` |
 | `q`   | head orientation quaternion `[x,y,z,w]`, same frame |
@@ -150,17 +155,62 @@ those numbers: put the headset on and watch when the highlight commits.
 
 ```jsonc
 // on connect: current state of every live player
-{ "type": "snapshot", "players": [ { "id": "...", "frame": "room", "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "mt": 0 } ] }
+{ "type": "snapshot", "players": [ { "id": "...", "frame": "room", "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "w": 0, "srv": 0, "mt": 0 } ] }
 
 // live stream
-{ "type": "update", "id": "player-42", "frame": "room", "t": 12345.6, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
+{ "type": "update", "id": "player-42", "frame": "room", "t": 12345.6, "w": 1785500757720, "srv": 1785500757719.4, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
 { "type": "leave",  "id": "player-42" }
 ```
 
 The consumer keeps a `Dictionary<id, pose>`, applies `snapshot` then `update`s,
 removes on `leave`, and **interpolates** between updates for smooth avatars
-(updates arrive ~every 1000/`rateHz` ms). Align players in time with the relay's
-receive order, not client `t` (headset clocks are unsynced).
+(updates arrive ~every 1000/`rateHz` ms). For a live render, drive it off arrival
+order: it is the freshest thing you have and one batch of lag does not show.
+
+## Putting two headsets on one time axis
+
+Use **`srv`**. It is the sample expressed on the relay's clock — the only clock
+every player shares — and it is what the recorder writes as `server_ms`.
+
+Neither of the alternatives works, and both are tempting:
+
+- **Stamping on arrival** timestamps the *batch*. Every sample in a `flushMs`
+  window lands in the same millisecond, so a recording has far fewer distinct
+  timestamps than rows, and no amount of care afterwards recovers the order
+  inside a batch.
+- **The headset's own wall clock** (`w`) is honest about the instant but not
+  about the hour: two Quests agree only as well as their NTP does, and nothing
+  in the system measures that.
+
+So the relay measures it. Every `pingMs` (2 s) it sends `ping` with its own
+clock; the player answers immediately with its monotonic reading; the relay
+knows how long the round trip took and places that reading on its own timeline —
+Cristian's algorithm, keeping the exchange with the **smallest round trip** out
+of the last 16, which is NTP's filter and for the same reason: a fast exchange
+had no time to queue up asymmetrically. The residual error is bounded by half
+that best round trip (sub-ms on the LAN in the smoke test, a few ms over Quest
+WiFi). Drift is handled by construction, since the window keeps re-measuring.
+
+`srv` is `null` until the first probe completes — one round trip after `hello`,
+so in practice only if a player sends data before answering a ping. Every
+`/ingest` client should reply to `ping`; `Telemetry.js` and the simulator do.
+
+That leaves four clocks in a recording, each with one job:
+
+| column       | what it is                          | use it for |
+|--------------|-------------------------------------|------------|
+| `server_ms`  | sample on the relay's clock (`srv`) | **anything involving more than one player** |
+| `client_ms`  | headset monotonic (`t`)             | deltas within one player — no steps, no estimate in the way |
+| `capture_ms` | headset wall clock (`w`)            | tying a session to the outside world: a camera, a log, a notebook |
+| `wall_ms`    | when the recorder saw the row       | debugging the transport; it repeats per batch |
+
+## Sampling rate
+
+`rateHz` is a real rate, not a per-frame budget: the client keeps a fixed grid of
+deadlines and serves each one on the first render frame past it. Each sample is
+therefore up to one frame late (≤14 ms at 72 Hz) but the lateness does not
+accumulate, so 20 Hz records ~20 rows per second and `client_ms` deltas alternate
+around 50 ms rather than sitting on a rounded-up 55.5 ms.
 
 ## Running the relay
 

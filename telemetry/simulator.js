@@ -57,6 +57,13 @@ class SimClient {
         frame: this.mode === 'ar' ? 'room' : 'local-floor' } }));
       this.timer = setInterval(() => this.tick(), 1000 / RATE);
     });
+    // Contestar la sonda de reloj, como el player: sin esto el relay no puede
+    // estimar el offset y las muestras salen sin `srv` (lo que probaría el
+    // recorder con una columna server_ms vacía, no la tubería de verdad).
+    ws.on('message', (raw) => {
+      let m; try { m = JSON.parse(raw); } catch (_) { return; }
+      if (m.ping !== undefined) ws.send(JSON.stringify({ pong: m.ping, c: Date.now() - this.t0 }));
+    });
     ws.on('close', () => { clearInterval(this.timer); this.timer = null; });
     ws.on('error', () => { /* close follows; bounce()/reconnect handles it */ });
   }
@@ -79,7 +86,7 @@ class SimClient {
     const z = Math.max(0, Math.sin(dt * 0.2 + this.phase));
     const f = z > 0.6 ? Math.floor((dt * 0.25 + this.phase) % 6) : -1;
 
-    const s = { t: +(Date.now() - this.t0).toFixed(1), mt: round4(dt), p, q, z: round4(z), f };
+    const s = { t: +(Date.now() - this.t0).toFixed(1), w: Date.now(), mt: round4(dt), p, q, z: round4(z), f };
     this.ws.send(JSON.stringify({ b: [s] }));
   }
 
