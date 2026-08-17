@@ -1433,20 +1433,23 @@ function makeSourceMarker(name) {
 // veces por segundo no es un dato, es ruido. Entrar cuesta (cono estrecho +
 // permanencia); quedarse es fácil (cono ancho + margen para soltar).
 //
-// Esto NO toca el audio: en AR cada fuente ya suena en su sitio y el spotlight
-// está apagado. Alimenta la telemetría y el realce del marcador, que es además
-// lo que permite ajustar estos números mirándolos puestos en las gafas.
+// Del foco cuelgan tres cosas: la telemetría, el marcador ámbar y el realce del
+// stem enfocado (boostDb/duckDb, que el motor aplica sobre la mezcla). El realce
+// pende del MISMO veredicto que el marcador a propósito: lo que se oye subir es
+// exactamente lo que se ve encenderse, así que se ajusta con las gafas puestas.
 const AR_FOCUS = {
   coneDeg:    12,   // semiángulo para captar el foco
   keepDeg:    22,   // semiángulo, más ancho, para conservarlo
   dwellMs:   400,   // hay que sostener la mirada para que cuente
   releaseMs: 350,   // y perderla este rato para soltarlo
+  boostDb:     6,   // cuánto sube el enfocado
+  duckDb:      0,   // cuánto bajan los demás (0 = no se les toca)
 };
-// Los cuatro números salen de scene.json → `ar.focus` si están, porque son
-// justo lo que hay que ajustar probándolo en la sala: la permanencia buena
-// depende de la separación entre músicos y de lo lejos que esté el público.
-// Se ignora en silencio lo que no sea un número: un valor suelto mal escrito no
-// debe dejar el foco sin cono.
+// Los seis números salen de scene.json → `ar.focus` si están, porque son justo lo
+// que hay que ajustar probándolo en la sala: la permanencia buena depende de la
+// separación entre músicos y de lo lejos que esté el público, y el realce que hace
+// falta, de cuánto tapa el ruido de la sala real. Se ignora en silencio lo que no
+// sea un número: un valor suelto mal escrito no debe dejar el foco sin cono.
 function loadARFocusCfg() {
   const c = arCfg.focus;
   if (c) for (const k of Object.keys(AR_FOCUS)) if (typeof c[k] === 'number' && isFinite(c[k])) AR_FOCUS[k] = c[k];
@@ -1455,6 +1458,7 @@ function loadARFocusCfg() {
   // preguntando por los grados de fábrica.
   _coneEnter.coneDeg = AR_FOCUS.coneDeg;
   _coneKeep.coneDeg  = AR_FOCUS.keepDeg;
+  engine?.setFocusParams({ boostDb: AR_FOCUS.boostDb, duckDb: AR_FOCUS.duckDb });
 }
 
 let arFocus      = -1;   // músico enfocado (índice de stem) o -1
@@ -1465,6 +1469,7 @@ let arFocusLost  = 0;    // ms en que el enfocado salió del cono ancho (0 = den
 function resetARFocus() {
   arFocus = arFocusCand = -1;
   arFocusSince = arFocusLost = 0;
+  engine?.setFocusedStem(-1);   // que no quede un músico realzado de la sesión anterior
 }
 
 // Los dos conos, como objetos fijos: se consultan 2 veces por frame y crear el
@@ -1502,7 +1507,7 @@ function updateARFocus(now) {
     arFocus = cand; arFocusLost = 0;
   }
 
-  if (arFocus !== prev) paintARFocus();
+  if (arFocus !== prev) { paintARFocus(); engine?.setFocusedStem(arFocus); }
   return arFocus;
 }
 
@@ -1708,8 +1713,6 @@ async function enterAR() {
 
     if (sphere) sphere.visible = false;           // el mundo real sustituye al 360
     if (closeupMesh) { closeupMesh.visible = false; closeupStem = -1; }   // sin close-ups en AR
-    loadARFocusCfg();                             // ar.focus de la escena, si lo trae
-    resetARFocus();
 
     // En AR cada fuente debe oírse desde su sitio (no solo al "mirar + zoom"):
     // subimos restGain a tope y anulamos el boost por zoom; la espacialización y
@@ -1726,6 +1729,12 @@ async function enterAR() {
       engine.setSpotlightParams({ restGain: 1 });
       engine.setBedLevel(arCfg.bedGain != null ? arCfg.bedGain : AR_BED_GAIN);
     }
+    // Después del bloque de arriba: los dos escriben ganancias en el motor, y
+    // hacerlo antes sería calcularlas con el restGain del 360 para pisarlas acto
+    // seguido. El foco arranca suelto en cada sesión: entrar en AR no debe heredar
+    // al músico que se estuviera mirando en la anterior.
+    loadARFocusCfg();                             // ar.focus de la escena, si lo trae
+    resetARFocus();
     buildARSources();
 
     arSession.addEventListener('end', () => {
@@ -1739,7 +1748,8 @@ async function enterAR() {
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
       if (arCalibrating) { saveARCalib(); arCalibrating = false; }   // salir con el grip apretado
-      clearARSources();
+      resetARFocus();          // suelta el realce: el músico enfocado no puede
+      clearARSources();        // seguir 6 dB arriba en el 360 al que se vuelve
       renderer.setClearAlpha(1);
       if (sphere) sphere.visible = true;
       if (engine && arPrevSpot) engine.setSpotlightParams(arPrevSpot);

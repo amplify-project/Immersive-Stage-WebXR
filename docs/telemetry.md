@@ -145,11 +145,16 @@ Tune them per venue in `scene.json` — the right dwell depends on how far apart
 the musicians are and how far away the audience stands:
 
 ```json
-"ar": { "focus": { "coneDeg": 12, "keepDeg": 22, "dwellMs": 400, "releaseMs": 350 } }
+"ar": { "focus": { "coneDeg": 12, "keepDeg": 22, "dwellMs": 400, "releaseMs": 350,
+                   "boostDb": 6, "duckDb": 0 } }
 ```
 
-The focused musician's marker turns amber in passthrough, which is how you tune
-those numbers: put the headset on and watch when the highlight commits.
+The focused musician's marker turns amber in passthrough **and** their stem is
+raised by `boostDb` (the rest dropping by `duckDb`, if set), which is how you tune
+these numbers: put the headset on and watch — and listen for — when the highlight
+commits. `f` therefore records more than attention in AR: it records what the
+listener was actually hearing louder, so a session can be read as the sequence of
+musicians each spectator chose to bring forward.
 
 ### Relay → consumer (`/consume`)
 

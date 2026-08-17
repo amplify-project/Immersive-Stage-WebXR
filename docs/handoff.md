@@ -49,9 +49,13 @@ no GPU for video, no A/V drift to manage.
 - Head moves through the room (`engine.setRotationFromMatrix4(pose.transform.matrix)`).
 - **Focus by sustained gaze.** No zoom exists in AR, so the musician being
   attended to is the one held near the centre of view for `dwellMs`
-  (`engine.getGazedStem` + the dwell/hysteresis in `updateARFocus`). His marker
-  turns amber, and the index travels in the telemetry `f` field, in the same
-  room frame as everything else. Tunable per venue in `scene.json` → `ar.focus`.
+  (`engine.getGazedStem` + the dwell/hysteresis in `updateARFocus`). Three things
+  hang off that one verdict: their marker turns amber, their stem is raised by
+  `ar.focus.boostDb` (with the rest optionally lowered by `duckDb`, via
+  `engine.setFocusParams`), and the index travels in the telemetry `f` field, in
+  the same room frame as everything else. Sight and sound commit together on
+  purpose — what lights up is what got louder, so both are tuned in one pass with
+  the headset on. Tunable per venue in `scene.json` → `ar.focus`.
 - The FOA bed drops to `scene.json` → `ar.bedGain` (default `0.35`) via
   `engine.setBedLevel()`, and back to its old level on exit. The bed is the whole
   concert, musicians included: at full level it competes with the real room and
