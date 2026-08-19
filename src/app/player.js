@@ -716,8 +716,17 @@ async function setupFOA() {
       const _r = await fetch('/scene.json', { cache: 'no-store' });
       if (_r.ok) {
         const _sc = await _r.json();
+        // Se copia el stem ENTERO y solo se normaliza lo que hay que normalizar.
+        // Enumerar los campos a mano costó dos funciones que no llegaron nunca a
+        // funcionar: el editor escribía `ar` (posición en metros de la sala) y
+        // `gainDb` (trim por músico) y este map los tiraba, así que en AR todo el
+        // mundo acababa en la esfera de 1,6 m —lo que el partner ve como "sigue
+        // dibujando el círculo"— y el trim no llegaba al motor. Cualquier campo
+        // que el editor añada mañana sobrevive por defecto, que es lo que hay que
+        // dar por supuesto entre dos ficheros que ya comparten formato.
         if (Array.isArray(_sc.stems) && _sc.stems.length)
           _stems = _sc.stems.map(s => ({
+            ...s,
             azimuthDeg: +s.azimuthDeg || 0, elevationDeg: +s.elevationDeg || 0,
             name: s.name, closeup: s.closeup || null }));
         if (_sc.spotlight) _spot = _sc.spotlight;
