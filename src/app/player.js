@@ -1429,6 +1429,103 @@ function makeSourceMarker(name) {
   return g;
 }
 
+// ── Mallas de los músicos ────────────────────────────────────────────────────
+//
+// Un GLB por músico en lugar de la esfera de alambre. Va en scene.json, junto al
+// stem al que representa, porque es una propiedad de ESE músico:
+//
+//   "stems": [ { "name": "DR", "mesh": "meshes/bateria.glb" }, … ]
+//   "stems": [ { "name": "DR", "mesh": { "url": "…", "heightM": 1.7, "yawDeg": 90 } } ]
+//   "ar": { "mesh": "meshes/generico.glb" }        ← por defecto para todos
+//
+// El punto del stem sigue siendo el del AUDIO (la altura a la que suena, sobre
+// AR_HEIGHT o el `ar.y` que traiga), mientras que la malla representa a alguien
+// DE PIE en el suelo. Por eso la malla no se coloca en ese punto sino colgando de
+// él hacia abajo: así el panner no se entera de que hemos puesto un muñeco, y el
+// audio de una escena con mallas es idéntico al de la misma escena sin ellas.
+// El cargador y el ajuste de escala viven en src/app/mesh-fit.js (window.MeshFit),
+// no aquí: el editor tiene que colocar el modelo EXACTAMENTE igual que las gafas
+// para que su vista previa sirva de algo, y dos copias de esta función son dos
+// copias que se separan. `MeshFit.fit()` devuelve un grupo envoltorio con el
+// modelo dentro —nunca toca la transformación propia del GLB— y dentro de
+// `userData.fit` deja lo que midió, que es lo que el editor enseña por pantalla.
+
+// Aro en el suelo, bajo los pies. Con malla propia el foco no puede marcarse
+// repintando el material —el GLB trae los suyos, y teñirlos estropea la textura
+// del músico y encima puede no verse—, así que el ámbar se va al aro, que se lee
+// igual de bien sea cual sea el modelo.
+function makeFocusRing() {
+  const r = new THREE.Mesh(
+    new THREE.RingGeometry(0.34, 0.42, 32),
+    new THREE.MeshBasicMaterial({ color: AR_MARK_IDLE, side: THREE.DoubleSide,
+                                  transparent: true, opacity: 0.75, depthWrite: false }));
+  r.rotation.x = -Math.PI / 2;
+  // Un centímetro por encima del suelo, y no en y=0: ahí la base de la malla es
+  // coplanar con el aro y las dos se disputan el mismo píxel — parpadeo al mover
+  // la cabeza, que en las gafas se ve fatal.
+  r.position.y = 0.01;
+  return r;
+}
+
+// Luz para las mallas. El player no tenía ninguna, y no le hacía falta: la esfera
+// del 360, los marcadores y las etiquetas son MeshBasicMaterial, que se dibuja
+// tal cual. Un GLB llega con materiales PBR, y un PBR sin luces sale NEGRO —
+// dentro de las gafas eso son bultos negros en medio del passthrough.
+//
+// Hemisférica más una direccional suave: la primera da un ambiente parejo que no
+// deja ninguna cara a oscuras (en AR no hay escenario que iluminar, hay una sala
+// real cuya luz no conocemos), y la segunda marca volumen para que una figura no
+// se lea como una silueta plana. Sin sombras: cuestan y aquí no aportan.
+let arLights = null;
+function ensureARLights() {
+  if (arLights) return arLights;
+  arLights = new THREE.Group();
+  arLights.add(new THREE.HemisphereLight(0xffffff, 0x707070, 1.1));
+  const key = new THREE.DirectionalLight(0xffffff, 0.55);
+  key.position.set(1, 3, 2);
+  arLights.add(key);
+  return arLights;
+}
+
+// Cuelga la malla del marcador ya colocado. Asíncrono a propósito: la sesión de AR
+// arranca con las esferas de alambre y cada músico aparece cuando su fichero
+// termina de bajar, en vez de esperar todos a que baje el último.
+// ?nomesh=1 → vuelven las esferas de alambre. Para separar un problema de las
+// mallas de uno del passthrough sin tener que editar la escena y volver a entrar.
+const AR_NO_MESH = new URLSearchParams(location.search).get('nomesh') === '1';
+
+function attachMeshTo(marker, cfg, floorY) {
+  const spec = MeshFit.spec(cfg);
+  if (!spec.url || AR_NO_MESH) return;
+  MeshFit.load(spec.url).then(src => {
+    // Mientras bajaba el fichero se puede haber salido de AR (o recolocado la
+    // sala): si este marcador ya no está en la escena, el GLB no pinta nada aquí.
+    if (!arSources.includes(marker)) return;
+    const holder = new THREE.Group();
+    // clone(): varios músicos pueden compartir fichero (el `ar.mesh` común) y cada
+    // uno necesita su propio nodo. Ojo, un clon plano no arrastra el esqueleto de
+    // una malla animada — cuando toque animar habrá que ir a SkeletonUtils.clone.
+    holder.add(MeshFit.fit(src.clone(true), { ...spec, name: spec.url }));
+    holder.position.y = floorY;               // del punto de audio al suelo
+    holder.add(makeFocusRing());
+    marker.add(holder);
+    // Al colgar la primera malla, y no antes: una escena sin mallas no gasta ni
+    // una luz, que es como ha funcionado el player hasta ahora.
+    scene.add(ensureARLights());
+    marker.userData.focusRing = holder.children[1];
+    // La esfera de alambre era el sitio del músico mientras no había músico.
+    marker.children[0].visible = false;
+    marker.updateMatrixWorld(true);
+    // El aro nace en reposo, y este músico puede estar enfocado YA: si su fichero
+    // tardó más que el dwell, sin esto se le vería apagado estando en foco.
+    paintARFocus();
+  }).catch(e => {
+    // Un GLB que no carga deja al músico con su esfera: se sigue oyendo y se
+    // sigue pudiendo enfocar, que es lo que no puede perderse por un fichero malo.
+    console.warn(`[ar] malla "${spec.url}":`, e.message || e);
+  });
+}
+
 // ══════════════════════════════════════════════════════
 // FOCO EN AR (mirada sostenida)
 // ══════════════════════════════════════════════════════
@@ -1522,8 +1619,10 @@ function updateARFocus(now) {
 
 function paintARFocus() {
   arSources.forEach((m, i) => {
-    const mesh = m.children[0];
-    if (mesh && mesh.material) mesh.material.color.setHex(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE);
+    // Con malla manda el aro del suelo; sin ella, la esfera de alambre. Nunca las
+    // dos: la esfera está oculta en cuanto hay músico que mirar.
+    const mark = m.userData.focusRing || m.children[0];
+    if (mark && mark.material) mark.material.color.setHex(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE);
   });
 }
 
@@ -1686,17 +1785,24 @@ function buildARSources() {
   roomGroup.updateMatrixWorld(true);
   stemDefs.forEach((s, i) => {
     const m = makeSourceMarker(s.name);
-    m.position.fromArray(arPosition(s));
+    const p = arPosition(s);
+    m.position.fromArray(p);
     roomGroup.add(m);
     m.updateMatrixWorld(true);          // matrixWorld válido antes de leerla en bind
     engine.bindStemToObject(i, m);
     arSources.push(m);
+    // Después del bind: la malla es decorado y no debe estar en el camino de lo
+    // que suena. `-p[1]` baja del punto de audio al suelo de la sala.
+    attachMeshTo(m, s.mesh || arCfg.mesh, -p[1]);
   });
 }
 
 function clearARSources() {
   for (const m of arSources) roomGroup.remove(m);
   arSources = [];
+  // Fuera las luces con las mallas: en el 360 no hay nada que iluminar y una luz
+  // de más es trabajo del shader por cada fotograma que nadie ve.
+  if (arLights) scene.remove(arLights);
   // El foco indexa este array: dejarlo vivo señalaría a un músico que ya no está.
   resetARFocus();
   // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,

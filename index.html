@@ -90,6 +90,12 @@
 <script src="https://cdn.jsdelivr.net/npm/spherical-harmonic-transform@0.1.1/bundle/spherical-harmonic-transform.js"></script>
 <!-- Omnitone (binaural FOA con HRTF embebidos) — vendorizado, funciona offline -->
 <script src="./src/vendor/omnitone.min.js"></script>
+<!-- Mallas de los músicos en AR (scene.json → stems[i].mesh). Vendorizado y no del
+     CDN a propósito: tiene que ser exactamente la r128 del three de arriba. -->
+<script src="./src/vendor/GLTFLoader.js"></script>
+<!-- Carga y ajuste de las mallas, compartido con el editor: la vista previa de
+     allí tiene que colocar el modelo igual que aquí, o no sirve de nada. -->
+<script src="./src/app/mesh-fit.js"></script>
 
 <script type="module" src="./src/app/player.js"></script>
 </body>

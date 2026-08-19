@@ -26,3 +26,9 @@ x4_bridge/insta360_v4l2_bridge
 # Recorded telemetry sessions (telemetry/recorder.js)
 telemetry/*.csv
 session-*.csv
+
+# Musician meshes: the assets are big and per-venue; only the known-good test
+# figure travels with the repo, so a headset can be checked against a file that
+# is certain to be valid.
+meshes/*
+!meshes/test-figure.glb

@@ -38,6 +38,12 @@
   canvas#heightView,canvas#arPlan,canvas#arFront{width:100%;background:#0a0e14;
     border:1px solid #ffffff14;border-radius:8px;touch-action:none;display:block}
   canvas#arFront{margin-top:10px}
+  /* La vista previa de la malla: mismo marco que las otras, pero el cursor dice
+     que se arrastra para girar, que es lo único que no se adivina mirándola. */
+  canvas#meshView{width:100%;background:#0a0e14;border:1px solid #ffffff14;
+    border-radius:8px;touch-action:none;display:block;cursor:ew-resize}
+  #meshMeas{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:6px;white-space:pre-wrap}
+  #meshMeas .warn{color:var(--warn,#ffd400)}
   .hint{font-size:12px;color:var(--muted);margin-top:6px}
   .slider{display:flex;align-items:center;gap:10px;margin:8px 0;font-family:var(--mono);font-size:12px}
   .slider input[type=range]{flex:1} .slider .v{width:54px;text-align:right;color:var(--accent)}
@@ -215,6 +221,41 @@
              grabado por debajo del bed nunca se despega de él bajo el spotlight. -->
         <div style="flex:0 0 110px"><label>Gain dB</label><input type="number" id="selGain" step="0.5"></div>
       </div>
+      <!-- Malla del músico en AR. El modelo se escala solo a "Mesh height", así que
+           da igual en qué unidades venga exportado; "Yaw" lo gira para que mire
+           donde debe. Nada de esto toca el audio: la malla cuelga del punto que
+           suena hacia el suelo, y el panner sigue en su sitio. -->
+      <div class="row" style="margin-top:8px">
+        <div><label>3D model (AR)</label>
+          <select id="selMesh"><option value="">— none (wireframe marker) —</option></select></div>
+        <div style="flex:0 0 130px"><label>Mesh height m</label>
+          <input type="number" id="selMeshH" step="0.05" min="0.1" placeholder="1.70"></div>
+        <div style="flex:0 0 110px"><label>Yaw °</label>
+          <input type="number" id="selMeshYaw" step="5" placeholder="0"></div>
+        <div style="flex:0 0 150px"><label>&nbsp;</label>
+          <button type="button" id="meshUpBtn" style="width:100%">Upload .glb…</button>
+          <input type="file" id="meshUpFile" accept=".glb,model/gltf-binary" style="display:none"></div>
+      </div>
+      <!-- Preview. It renders the model through the SAME fit the headset uses
+           (src/app/mesh-fit.js), which is the only reason it is worth having:
+           a 45 m wall or a musician facing backwards must be found here and not
+           inside the glasses. -->
+      <div id="meshPreview" style="margin-top:10px;display:none">
+        <canvas id="meshView" width="600" height="340"></canvas>
+        <div id="meshMeas"></div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="selMeshZUp" style="width:auto;margin:0"> Z-up model (arrives lying on its back)
+        </label>
+        <p class="hint">Exporters that work Z-up (Blender, CAD) hand the figure over rotated −90° about X.
+          Bad orientation is nearly always axis-shaped, which is why this is a tick box and not an angle.</p>
+        <p class="hint">Drag sideways to turn the model (writes <b>Yaw</b>); drag up and down to look
+          from higher or lower; wheel to get closer. The grey figure is <b>1.70 m</b>, the camera is
+          where the audience will be, and the amber arrow is where <b>yaw</b> points — not a guess at
+          which way the model actually faces.</p>
+      </div>
+      <p class="hint">Uploads land in <code>meshes/</code> on this machine and are offered to every
+        musician. <code>.glb</code> only — a <code>.gltf</code> drags its textures and buffers along as
+        separate files, which one upload cannot carry.</p>
     </div>
     <p class="hint">Up = front of the video (0°). Left = +90°. Right = −90°.</p>
   </div>
@@ -319,9 +360,18 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- Sólo para la vista previa de las mallas. Misma r128 que index.html, y el
+     mismo GLTFLoader vendorizado: la vista previa no vale nada si no carga y
+     coloca el GLB exactamente igual que el player. Si no hay red y three no
+     llega, el editor sigue funcionando entero y sólo desaparece la vista. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="./src/vendor/GLTFLoader.js"></script>
+<script src="./src/app/mesh-fit.js"></script>
+
 <script>
 const PALETTE = ['#00d4ff','#34d399','#ffd400','#ff7ab6','#a78bfa','#ff8a3d','#7ee787','#f778ba','#79c0ff','#ffa657'];
 let media = [];
+let meshes = [];                 // meshes/*.glb del servidor (modelos de los músicos)
 let devices = { video: [], audio: [] };
 let scene = {
   mode: 'vod',
@@ -346,13 +396,17 @@ function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show');
 // ── Initial load ─────────────────────────────────────────────────────────────
 async function init() {
   let apiOk = true;
-  const [mRes, sRes, dRes] = await Promise.all([
+  const [mRes, sRes, dRes, gRes] = await Promise.all([
     fetch('/api/media').then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).catch(()=>{ apiOk=false; return {media:[]}; }),
     fetch('/api/scene').then(r=>r.ok?r.json():{}).catch(()=>({})),
     fetch('/api/devices').then(r=>r.ok?r.json():{video:[],audio:[]}).catch(()=>({video:[],audio:[]})),
+    // Un backend viejo no conoce /api/meshes: la lista queda vacía y el editor
+    // sigue funcionando, en vez de caerse entero por un selector.
+    fetch('/api/meshes').then(r=>r.ok?r.json():{meshes:[]}).catch(()=>({meshes:[]})),
   ]);
   if (!apiOk) $('apiErr').style.display = 'block';
   media = mRes.media || [];
+  meshes = gRes.meshes || [];
   devices = { video: dRes.video||[], audio: dRes.audio||[] };
   if (apiOk && !media.length) toast('The media/ folder is empty');
   if (sRes && (sRes.stems || sRes.video || sRes.live)) {
@@ -517,6 +571,20 @@ function bindControls() {
                                                 scene.stems[selected].elevationDeg=el;
                                                 renderStems(); drawViews(); $('selEl').value=el; } };
   $('selGain').oninput = e => { if(selected>=0){ scene.stems[selected].gainDb=+e.target.value; } };
+
+  // ── Malla del músico ───────────────────────────────────────────────────────
+  $('selMesh').onchange    = e => { if(selected>=0){ setStemMesh(selected, { url: e.target.value }); renderStems(); updateMeshPreview(); } };
+  $('selMeshH').oninput    = e => { if(selected>=0){ setStemMesh(selected, { heightM: e.target.value }); updateMeshPreview(); } };
+  $('selMeshYaw').oninput  = e => { if(selected>=0){ setStemMesh(selected, { yawDeg: e.target.value }); updateMeshPreview(); } };
+  // Z-up: gira −90° en X ANTES de medir, así que cambia la escala además de la
+  // pose — un modelo tumbado se estaba escalando por su fondo, no por su altura.
+  $('selMeshZUp').onchange = e => { if(selected>=0){ setStemMesh(selected, { zUp: e.target.checked }); updateMeshPreview(); } };
+  $('meshUpBtn').onclick   = () => $('meshUpFile').click();
+  $('meshUpFile').onchange = async e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';                       // volver a elegir el mismo fichero dispara otro change
+    if (f) await uploadMesh(f);
+  };
   // AR room: typing a coordinate places the musician just as dragging does.
   const arField = k => e => { if(selected<0) return;
     const p=Object.assign({}, arPos(scene.stems[selected])); p[k]=+e.target.value;
@@ -566,6 +634,282 @@ function videoOptionsHTML(sel) {
     vids.map(m=>`<option value="${m.file}" ${m.file===sel?'selected':''}>${m.name}</option>`).join('');
 }
 
+// ── Mallas ───────────────────────────────────────────────────────────────────
+//
+// En scene.json un `mesh` es la cadena a secas mientras no haga falta más, y un
+// objeto en cuanto se toca la altura o el giro. Guardar siempre el objeto sería
+// llenar la escena de `{"heightM":1.7,"yawDeg":0}` que no dicen nada, y esos dos
+// valores por defecto los pone el player.
+function meshSpec(s) {
+  const m = s && s.mesh;
+  if (!m) return {};
+  return typeof m === 'string' ? { url: m } : Object.assign({}, m);
+}
+
+function setStemMesh(i, patch) {
+  const s = scene.stems[i]; if (!s) return;
+  const spec = Object.assign(meshSpec(s), patch);
+  // Cadena vacía = campo en blanco: es quitar el valor, no ponerlo a cero.
+  for (const k of ['heightM', 'yawDeg']) {
+    if (spec[k] === '' || spec[k] == null || !isFinite(+spec[k])) delete spec[k];
+    else spec[k] = +spec[k];
+  }
+  // Un giro de 0° es el valor por defecto, no una decisión: guardarlo llenaría la
+  // escena de `"yawDeg":0` sólo porque alguien arrastró y volvió. Con zUp igual.
+  if (spec.yawDeg === 0) delete spec.yawDeg;
+  if (!spec.zUp) delete spec.zUp;
+  if (!spec.url) { delete s.mesh; return; }     // "none" → fuera la malla entera
+  const plain = spec.heightM == null && spec.yawDeg == null && !spec.zUp;
+  s.mesh = plain ? spec.url : spec;
+}
+
+function meshOptionsHTML(sel) {
+  return '<option value="">— none (wireframe marker) —</option>' +
+    meshes.map(m=>`<option value="${m.file}" ${m.file===sel?'selected':''}>${m.name} · ${(m.size/1e6).toFixed(1)} MB</option>`).join('');
+}
+
+async function uploadMesh(file) {
+  toast(`Uploading ${file.name}…`);
+  try {
+    const r = await fetch('/api/mesh?name=' + encodeURIComponent(file.name),
+                          { method: 'POST', body: file });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    meshes = (await fetch('/api/meshes').then(x=>x.json()).catch(()=>({meshes}))).meshes || meshes;
+    // Subir estando un músico seleccionado es querer ESA malla para ÉL: es el
+    // gesto entero, y obligar a volver al desplegable después sobra.
+    if (selected >= 0) setStemMesh(selected, { url: j.file });
+    // Reemplazar un .glb por su versión corregida y seguir viendo el viejo es el
+    // bucle de trabajo entero roto: la caché de MeshFit guarda por URL, y aquí la
+    // URL es la misma a propósito.
+    if (typeof MeshFit !== 'undefined') MeshFit.invalidate(j.file);
+    if (meshView.key.startsWith(j.file + '|')) mvClearModel();
+    syncSelPanel();
+    renderStems();
+    toast(`${j.name} uploaded`);
+  } catch (e) {
+    toast('Upload failed: ' + e.message);
+  }
+}
+
+// ── Vista previa 3D de la malla ──────────────────────────────────────────────
+//
+// Lo que se ve aquí lo coloca `MeshFit.fit()`, el mismo ajuste que corre dentro
+// de las gafas: si esta vista usara su propia copia, "en el editor se veía bien"
+// volvería a ser una frase posible, y entonces la vista no serviría para nada.
+//
+// La cámara mira desde donde estará el público, hay una figura de 1,70 m al lado
+// para tener contra qué comparar, y el arrastre horizontal escribe el yaw en la
+// escena mientras giras: la orientación se corrige mirándola, no calculándola.
+const meshView = {
+  ready: false, renderer: null, scene: null, camera: null,
+  wrap: null,          // el grupo que devuelve MeshFit.fit (el modelo ya ajustado)
+  arrow: null,         // flecha ámbar: hacia dónde apunta el yaw
+  figure: null,        // la silueta de 1,70 m, que se aparta según lo ancho que sea el modelo
+  target: 0.85,        // altura a la que mira la cámara
+  key: '',             // url|altura|zUp de lo que hay montado: el yaw no recarga nada
+  token: 0,            // descarta la carga de un músico del que ya te has ido
+  pitch: 0.22, dist: 3.0,
+};
+
+const mvClamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const mvEsc = t => String(t).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+// Figura de referencia: 1,70 m exactos de la planta de los pies a la coronilla.
+// Es lo único que convierte "se ve grande" en "mide dos metros y medio".
+function mvScaleFigure() {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshLambertMaterial({ color: 0x8fa6b8, transparent: true, opacity: 0.4 });
+  const put = (geo, y) => { const m = new THREE.Mesh(geo, mat); m.position.y = y; g.add(m); };
+  put(new THREE.CylinderGeometry(0.10, 0.13, 0.85, 12), 0.425);   // piernas: 0 → 0.85
+  put(new THREE.CylinderGeometry(0.17, 0.15, 0.62, 12), 1.16);    // tronco:  0.85 → 1.47
+  put(new THREE.SphereGeometry(0.115, 16, 12), 1.585);            // cabeza:  1.47 → 1.70
+  g.position.set(-1.15, 0, 0);
+  return g;
+}
+
+// La flecha dice hacia dónde apunta el YAW, no hacia dónde mira el modelo: de la
+// caja envolvente sale el eje, pero no cuál de los dos lados es la cara, y una
+// heurística que acierta el 70% de las veces es peor que ninguna.
+function mvYawArrow() {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffd24a, transparent: true, opacity: 0.9 });
+  const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.004, 0.55), mat);
+  shaft.position.set(0, 0.012, 0.42);
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.20, 16), mat);
+  head.position.set(0, 0.012, 0.79);
+  head.rotation.x = Math.PI / 2;          // el cono nace mirando a +Y
+  g.add(shaft); g.add(head);
+  return g;
+}
+
+function mvInit() {
+  if (meshView.ready) return true;
+  if (typeof THREE === 'undefined' || typeof MeshFit === 'undefined') return false;
+  const cv = $('meshView');
+  const r = new THREE.WebGLRenderer({ canvas: cv, antialias: true });
+  r.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  r.setSize(cv.width, cv.height, false);   // false: el CSS ya lo estira a la columna
+  const sc = new THREE.Scene();
+  sc.background = new THREE.Color(0x0a0e14);
+  // Las mismas luces que el player monta en AR, y con los mismos valores: un GLB
+  // es PBR, así que la luz decide cómo se ve. Con otra iluminación aquí, ajustar
+  // el modelo mirando esta vista sería ajustarlo para una escena que no existe.
+  sc.add(new THREE.HemisphereLight(0xffffff, 0x707070, 1.1));
+  const key = new THREE.DirectionalLight(0xffffff, 0.55);
+  key.position.set(1, 3, 2); sc.add(key);
+  const grid = new THREE.GridHelper(8, 16, 0x33506a, 0x18222c);
+  sc.add(grid);
+  meshView.figure = mvScaleFigure(); sc.add(meshView.figure);
+  // Aro a los pies: el mismo que marca el foco dentro de las gafas, y de paso
+  // enseña qué huella ocupa el músico en el suelo de la sala.
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.34, 0.42, 32),
+    new THREE.MeshBasicMaterial({ color: 0x00d4ff, side: THREE.DoubleSide,
+                                  transparent: true, opacity: 0.6, depthWrite: false }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.01; sc.add(ring);
+  meshView.arrow = mvYawArrow(); sc.add(meshView.arrow);
+  meshView.renderer = r; meshView.scene = sc;
+  meshView.camera = new THREE.PerspectiveCamera(38, cv.width / cv.height, 0.05, 60);
+  meshView.ready = true;
+  mvBindDrag(cv);
+  mvCamera();
+  return true;
+}
+
+// Cámara desde donde estará el público. En coordenadas de sala el frente está en
+// −Z (lo mismo que arPosition() en el player), así que el público de un músico
+// queda en su +Z: mirar desde ahí es ver lo que verá quien lo tenga delante.
+function mvCamera() {
+  const d = meshView.dist, p = meshView.pitch, t = meshView.target;
+  meshView.camera.position.set(0, t + Math.sin(p) * d, Math.cos(p) * d);
+  meshView.camera.lookAt(0, t, 0);
+}
+
+// Encuadre según lo que haya montado. Una cámara a distancia fija sirve para una
+// persona y para nada más: la batería de prueba mide 4,2 m de ancho y se salía
+// del canvas tapando justo la silueta con la que hay que compararla, que es como
+// perder la única referencia de la vista. Y la silueta se aparta lo que haga
+// falta, porque plantada a 1,15 m acababa dentro del modelo.
+function mvFrame(info) {
+  const halfW = Math.max(info.spanM, 0.5) / 2;
+  const h = Math.max(info.heightM, 1.7);
+  meshView.figure.position.x = -(halfW + 0.55);
+  meshView.target = h / 2;
+  const vfov = meshView.camera.fov * Math.PI / 180;
+  const hfov = 2 * Math.atan(Math.tan(vfov / 2) * meshView.camera.aspect);
+  const need = halfW + 0.85;                       // hasta el borde de la silueta
+  meshView.dist = mvClamp(Math.max((h / 2) / Math.tan(vfov / 2),
+                                   need / Math.tan(hfov / 2)) * 1.3, 1.4, 14);
+  mvCamera();
+}
+
+function mvRender() {
+  if (meshView.ready) meshView.renderer.render(meshView.scene, meshView.camera);
+}
+
+function mvBindDrag(cv) {
+  let last = null;
+  cv.addEventListener('pointerdown', e => {
+    last = { x: e.clientX, y: e.clientY };
+    cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!last) return;
+    const dx = e.clientX - last.x, dy = e.clientY - last.y;
+    last = { x: e.clientX, y: e.clientY };
+    // Horizontal: gira el modelo y ESO se guarda en la escena. Vertical: sólo
+    // mueve la cámara — mirar desde más arriba no es una propiedad del músico.
+    if (dx && selected >= 0) {
+      let yaw = Math.round(MeshFit.spec(scene.stems[selected].mesh).yawDeg + dx * 0.6);
+      yaw = ((yaw % 360) + 360) % 360; if (yaw > 180) yaw -= 360;
+      setStemMesh(selected, { yawDeg: yaw });
+      $('selMeshYaw').value = yaw;
+      mvYaw(yaw);
+    }
+    if (dy) { meshView.pitch = mvClamp(meshView.pitch - dy * 0.005, -0.12, 1.2); mvCamera(); mvRender(); }
+  });
+  const stop = e => { if (last) { last = null; try { cv.releasePointerCapture(e.pointerId); } catch (_) {} } };
+  cv.addEventListener('pointerup', stop);
+  cv.addEventListener('pointercancel', stop);
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    meshView.dist = mvClamp(meshView.dist * (1 + Math.sign(e.deltaY) * 0.12), 1.2, 16);
+    mvCamera(); mvRender();
+  }, { passive: false });
+}
+
+// El yaw gira lo ya montado y no vuelve a cargar ni a ajustar nada: el ajuste
+// centra el modelo sobre su propio eje, así que girar es exactamente esto. Es lo
+// que permite arrastrar a 60 fps en vez de reconstruir la escena por cada píxel.
+function mvYaw(yawDeg) {
+  const a = (yawDeg || 0) * Math.PI / 180;
+  if (meshView.wrap) meshView.wrap.rotation.y = a;
+  if (meshView.arrow) meshView.arrow.rotation.y = a;
+  mvRender();
+}
+
+function mvMeasure(info) {
+  const u = info.raw, n = v => v >= 100 ? v.toFixed(0) : v.toFixed(2);
+  // La medida en crudo es la que explica el 99% de los sustos: un modelo en
+  // centímetros y otro en metros se ven igual aquí, y sólo esta línea dice por
+  // qué uno lleva un ×0.01 y el otro un ×1.
+  let t = `raw ${n(u.x)} × ${n(u.y)} × ${n(u.z)} units  →  ×${info.scale.toPrecision(3)}  →  ` +
+          `${info.heightM.toFixed(2)} m tall · ${info.spanM.toFixed(2)} m wide`;
+  // Un fichero que ya viene en metros del mundo real —una batería mide 1,13 m, no
+  // 1,70— se INFLA al normalizarlo a altura de persona: la de prueba se iba a 4,2 m
+  // de ancho. El aviso no cambia nada solo, dice qué número escribir para arreglarlo.
+  if (u.y >= 0.3 && u.y <= 4 && Math.abs(info.scale - 1) > 0.05)
+    t += `
+· its own units already look like metres (${u.y.toFixed(2)} m tall). ` +
+         `Put ${u.y.toFixed(2)} in Mesh height to keep the size it was made at.`;
+  let html = mvEsc(t);
+  for (const w of info.warnings) html += `\n<span class="warn">⚠ ${mvEsc(w)}</span>`;
+  $('meshMeas').innerHTML = html;
+}
+
+function mvClearModel() {
+  if (meshView.wrap) { meshView.scene.remove(meshView.wrap); meshView.wrap = null; }
+  // Sin dispose(): el clon comparte geometrías y materiales con el original que
+  // guarda la caché de MeshFit, y liberarlos aquí vaciaría el siguiente montaje.
+  meshView.key = '';
+}
+
+// Punto de entrada: llámese siempre que cambie la selección o la malla.
+function updateMeshPreview() {
+  const box = $('meshPreview'); if (!box) return;
+  const s = selected >= 0 ? scene.stems[selected] : null;
+  const g = s ? meshSpec(s) : {};
+  if (!g.url) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  if (!mvInit()) {
+    // Sin three (sin red, típicamente) el editor entero sigue funcionando y sólo
+    // falta la vista: decirlo aquí es mejor que dejar un hueco sin explicación.
+    $('meshView').style.display = 'none';
+    $('meshMeas').innerHTML = '<span class="warn">3D preview unavailable: three.js did not load ' +
+                              '(no network?). Everything else on this page still works.</span>';
+    return;
+  }
+  const spec = MeshFit.spec(s.mesh);
+  const key = spec.url + '|' + spec.heightM + '|' + spec.zUp;
+  if (key === meshView.key) { mvYaw(spec.yawDeg); return; }   // sólo ha cambiado el giro
+  const token = ++meshView.token;
+  MeshFit.load(spec.url).then(src => {
+    if (token !== meshView.token) return;      // te fuiste a otro músico mientras bajaba
+    mvClearModel();
+    const wrap = MeshFit.fit(src.clone(true), { ...spec, name: spec.url });
+    meshView.wrap = wrap; meshView.key = key;
+    meshView.scene.add(wrap);
+    mvMeasure(wrap.userData.fit);
+    mvFrame(wrap.userData.fit);
+    mvYaw(spec.yawDeg);
+  }).catch(e => {
+    if (token !== meshView.token) return;
+    mvClearModel();
+    $('meshMeas').innerHTML = '<span class="warn">' + mvEsc(spec.url + ' — ' + (e.message || e)) + '</span>';
+    mvRender();
+  });
+}
+
 function renderStems() {
   const live = mode==='live';
   $('stems').innerHTML = scene.stems.map((s,i)=>`
@@ -592,6 +936,16 @@ function syncSelPanel() {
   $('selName').value = s.name||''; $('selAz').value = Math.round(s.azimuthDeg); $('selEl').value = Math.round(s.elevationDeg||0);
   $('selH').value = hOfEl(s.elevationDeg||0).toFixed(2);
   $('selGain').value = s.gainDb || 0;
+  // La lista se reconstruye en cada sync porque puede haber crecido con una subida.
+  const g = meshSpec(s);
+  $('selMesh').innerHTML = meshOptionsHTML(g.url || '');
+  $('selMesh').value = g.url || '';
+  // En blanco, no a 1.70/0: el hueco vacío con su placeholder dice "el player pone
+  // el suyo", que es distinto de haber elegido ese número a mano.
+  $('selMeshH').value   = g.heightM != null ? g.heightM : '';
+  $('selMeshYaw').value = g.yawDeg  != null ? g.yawDeg  : '';
+  $('selMeshZUp').checked = !!g.zUp;
+  updateMeshPreview();
 }
 
 // The three AR boxes show the room point of whoever is selected — the stored one,

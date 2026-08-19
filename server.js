@@ -7,6 +7,7 @@ const { spawn, execFile } = require('child_process');
 const PORT = process.env.PORT || 60000;
 const ROOT = __dirname;
 const MEDIA_DIR = path.join(ROOT, 'media');
+const MESH_DIR = path.join(ROOT, 'meshes');
 const SCENE_FILE = path.join(ROOT, 'scene.json');
 
 const MIME = {
@@ -29,6 +30,12 @@ const MIME = {
   '.jpg':  'image/jpeg',
   '.svg':  'image/svg+xml',
   '.ico':  'image/x-icon',
+  // Mallas de los músicos (scene.json → stems[i].mesh). Con octet-stream también
+  // cargarían —GLTFLoader lee el cuerpo como ArrayBuffer y no mira la cabecera—,
+  // pero un tipo correcto es lo que hace que se cacheen y se depuren como es debido.
+  '.glb':  'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.bin':  'application/octet-stream',
 };
 
 const VIDEO_EXT = ['.mp4', '.mov', '.webm', '.mkv', '.m4v'];
@@ -146,6 +153,87 @@ function probeChannels(file) {
   });
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  Mallas de los músicos (scene.json → stems[i].mesh). Viven en meshes/, no en
+//  media/: no son material de la toma, son la representación del músico, y el
+//  editor las lista por separado porque se eligen en otro sitio y otro momento.
+// ════════════════════════════════════════════════════════════════════════════
+const MESH_EXT = ['.glb'];
+const MESH_MAX_BYTES = 64 * 1024 * 1024;
+
+function listMeshes() {
+  let files = [];
+  try { files = fs.readdirSync(MESH_DIR); } catch (_) { /* aún no existe */ }
+  return files
+    .filter(f => !f.startsWith('.') && MESH_EXT.includes(path.extname(f).toLowerCase()))
+    .map(f => {
+      let st; try { st = fs.statSync(path.join(MESH_DIR, f)); } catch (_) { return null; }
+      return st.isFile() ? { file: 'meshes/' + f, name: f, size: st.size } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Nombre de fichero seguro a partir de lo que mande el navegador. Se queda con el
+// basename y tira todo lo que no sea alfanumérico: el nombre viaja en la URL y
+// acaba en una ruta del disco, así que un "../../algo" no puede llegar a fs.
+function safeMeshName(raw) {
+  const base = path.basename(String(raw || '')).replace(/[^\w.-]+/g, '_');
+  const ext = path.extname(base).toLowerCase();
+  if (!MESH_EXT.includes(ext)) return null;
+  const stem = base.slice(0, -ext.length).replace(/^[.]+/, '') || 'mesh';
+  return stem.slice(0, 80) + ext;
+}
+
+// Cuerpo binario a fichero. No usa readBody() a propósito: aquél acumula texto y
+// corta a 5 MB, que es lo correcto para una escena JSON y absurdo para un GLB.
+function saveMeshUpload(req, dest, maxBytes) {
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(MESH_DIR, { recursive: true });
+    const tmp = dest + '.part';                  // el editor lista este directorio:
+    const out = fs.createWriteStream(tmp);       // un fichero a medias no debe aparecer
+    let size = 0, failed = false;
+    // Un WriteStream que falla emite 'error', y sin oyente eso NO es una promesa
+    // rechazada: es un throw que se lleva por delante el proceso entero. El
+    // servidor del player se caería —para todos— por una subida de más.
+    out.on('error', () => { /* ya se está abortando; el fichero se borra abajo */ });
+    const abort = (err, statusCode) => {
+      if (failed) return; failed = true;
+      err.statusCode = statusCode;
+      out.destroy(); fs.unlink(tmp, () => {});
+      // Sin req.destroy(): la petición se sigue drenando hasta 'end' para que la
+      // respuesta de error llegue de verdad al editor. Matar el socket aquí deja
+      // al navegador con una conexión caída y sin motivo que enseñar.
+      reject(err);
+    };
+    req.on('data', c => {
+      if (failed) return;                        // el stream ya no existe: escribir aquí era el crash
+      size += c.length;
+      if (size > maxBytes) return abort(new Error(`la malla pasa de ${Math.round(maxBytes / 1048576)} MB`), 413);
+      out.write(c);
+    });
+    req.on('error', e => abort(e, 400));
+    req.on('end', () => {
+      if (failed) return;
+      out.end(() => {
+        // glTF binario empieza por el magic "glTF". Comprobarlo aquí evita que un
+        // .zip renombrado se quede en el disco y falle luego dentro de las gafas,
+        // que es el peor sitio para enterarse.
+        let head = Buffer.alloc(4);
+        try { const fd = fs.openSync(tmp, 'r'); fs.readSync(fd, head, 0, 4, 0); fs.closeSync(fd); } catch (_) {}
+        if (head.toString('latin1') !== 'glTF') {
+          fs.unlink(tmp, () => {});
+          const e = new Error('no es un .glb (falta la cabecera glTF)');
+          e.statusCode = 415;
+          return reject(e);
+        }
+        fs.renameSync(tmp, dest);
+        resolve(size);
+      });
+    });
+  });
+}
+
 async function listMedia() {
   let files = [];
   try { files = fs.readdirSync(MEDIA_DIR); } catch (_) {}
@@ -240,6 +328,25 @@ async function handleAPI(req, res, pathname) {
     // ── Medios disponibles ──────────────────────────────────────────────────
     if (pathname === '/api/media' && req.method === 'GET') {
       return sendJSON(res, 200, { media: await listMedia() });
+    }
+
+    // ── Mallas de los músicos ───────────────────────────────────────────────
+    if (pathname === '/api/meshes' && req.method === 'GET') {
+      return sendJSON(res, 200, { meshes: listMeshes() });
+    }
+    // Subida cruda: el nombre va en la query y el GLB en el cuerpo. Sin multipart
+    // a propósito — es UN fichero, y parsearlo a mano (o traerse una dependencia)
+    // para envolverlo sería trabajo de más para el mismo resultado.
+    if (pathname === '/api/mesh' && req.method === 'POST') {
+      const name = safeMeshName(new URL(req.url, 'http://x').searchParams.get('name'));
+      if (!name) return sendJSON(res, 400, { error: 'Nombre no válido: se admite .glb' });
+      try {
+        const size = await saveMeshUpload(req, path.join(MESH_DIR, name), MESH_MAX_BYTES);
+        console.log(`[mesh] ${name} (${(size / 1e6).toFixed(1)} MB)`);
+        return sendJSON(res, 200, { ok: true, file: 'meshes/' + name, name, size });
+      } catch (e) {
+        return sendJSON(res, e.statusCode || 400, { error: e.message });
+      }
     }
 
     // ── Dispositivos de captura para LIVE (v4l2 + ALSA) ─────────────────────
@@ -572,7 +679,10 @@ const handler = (req, res) => {
     // Código del player/editor: no cachear, o el navegador sirve una versión
     // vieja tras editar (ya pasó: "sigue igual" = index.html cacheado). Los
     // segmentos de media (.m4s/.webm/.mp4) sí se pueden cachear con normalidad.
-    const noCache = ['.html', '.js', '.mjs', '.css', '.json'].includes(ext);
+    // .glb entra aquí con el código, y no con los segmentos: una malla se sustituye
+    // mientras se ajusta la escena, siempre con el mismo nombre, y un modelo viejo
+    // servido de caché se depura dentro de las gafas creyendo que es el nuevo.
+    const noCache = ['.html', '.js', '.mjs', '.css', '.json', '.glb', '.gltf'].includes(ext);
     const total = stat.size;
     const range = req.headers.range;
     if (range) {
