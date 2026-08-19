@@ -76,6 +76,15 @@ A drum kit is 1.1 m, a double bass 1.9 m, a standing player 1.75 m. The preview
 puts a 1.70 m reference figure beside the model, which is what turns "looks big"
 into "that is two and a half metres tall".
 
+**`Mesh height m` is not `Height m`.** The two sit in the same card and measure
+different things: `Height m` (and `Elevation °`, the same number in degrees) is
+*where the musician is heard*, while `Mesh height m` is *how tall the figure is*.
+They are independent because the model is not placed at the audio point — it hangs
+from it down to the floor. Raising the elevation moves the sound and leaves the
+figure standing on the ground; raising the mesh height grows the figure and leaves
+the sound where it was. A seated drummer is a negative elevation with a 1.1 m
+mesh, and neither number implies the other.
+
 ### Two guards you cannot switch off
 
 - **Footprint clamp.** If the model ends up wider than `3 × heightM`, it is shrunk
@@ -124,13 +133,26 @@ What it measured ends up in `wrap.userData.fit` (`scale`, `heightM`, `spanM`,
 
 ## 3. The editor workflow
 
+Everything about a mesh lives in the **AR room · passthrough (metres)** card, under
+a collapsible **3D model (AR)** section, next to the musician's position in metres.
+It is deliberately not in the 360 sphere card: a mesh is only ever seen in
+passthrough, and having half of AR by the radar and half by the room views meant
+jumping between two cards to place one musician. The 360 card is back to the five
+fields that describe a direction on the sphere.
+
+The section header carries the selected musician's name, because the block is no
+longer inside the selection panel, and its fields grey out — rather than
+disappear — when nothing is selected: a card that shrinks every time you deselect
+moves the room views under the cursor, and the first drag of the day is lost.
+
 1. Select a musician.
 2. **Upload .glb…** — or pick one already on the server from the dropdown. Uploading
    with a musician selected assigns the mesh to them: that is the whole gesture,
    and making you return to the dropdown afterwards would be busywork.
-3. The preview shows the model as the headset will place it, seen from where the
-   audience will be, with the 1.70 m reference figure alongside. Drag sideways to
-   turn it (writes `Yaw`), up and down to change the viewing angle.
+3. Open **Preview** — collapsed by default, since it is a 340 px canvas that pushes
+   the rest of the page down. It shows the model as the headset will place it, seen
+   from where the audience will be, with the 1.70 m reference figure alongside. Drag
+   sideways to turn it (writes `Yaw`), up and down to change the viewing angle.
 4. Adjust **Mesh height m** if the proportions are wrong. Warnings from the fit
    appear under the preview.
 5. Save the scene as usual.
