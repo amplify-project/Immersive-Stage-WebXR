@@ -281,8 +281,10 @@ src/audio/              Reusable immersive-audio engine (ESM)
   OmnitoneFOADecoder.js     Binaural FOA decode (HRTF) via Omnitone
   HOAST*.js / *.js          Cardioid fallback, matrices, axes
 media/                  360 video, FOA bed and stems (Git LFS)
+meshes/                 Musician .glb models for AR (git-ignored but test-figure.glb)
 docs/architecture.md    Dev guide: how the pieces fit + how to extend
 docs/core-api.md        Engine API + AR mode + close-up multi-track reference
+docs/musician-meshes.md 3D models per musician in AR: sizing, editor, upload
 docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 ```
 
@@ -294,6 +296,8 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 | Route | Method | Description |
 |-------|--------|-------------|
 | `/api/media` | GET | List `media/` with type and channel count |
+| `/api/meshes` | GET | List `meshes/` (`.glb` musician models) |
+| `/api/mesh` | POST `?name=` | Upload one `.glb` (raw body, max 64 MB) |
 | `/api/scene` | GET/POST | Read / save `scene.json` |
 | `/api/encode` | POST `{mode}` | Launch `stream.sh` (`vod`\|`live`) |
 | `/api/proxy` | POST `{src,scale}` | Transcode a lightweight 8-bit proxy |
@@ -317,8 +321,14 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
     // the imbalance and fills these in.
     // "elevationDeg" is not decoration: the focus cone is circular around your
     // gaze, so a musician 40° below the camera is 40° off however well you aim.
+    // "mesh" is optional (AR only): the 3D model shown instead of the wireframe
+    // marker. A bare path uses the defaults; the object form tunes them. The size
+    // is NOT the file's own — the model is scaled so it is "heightM" metres tall,
+    // because a .glb's units cannot be trusted. See docs/musician-meshes.md.
     { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0,
-      "gainDb": 0, "closeup": "media/dr_cu.mp4" }
+      "gainDb": 0, "closeup": "media/dr_cu.mp4", "mesh": "meshes/drums.glb" },
+    { "file": "media/SAX - stem - sync.mp3", "name": "SAX", "azimuthDeg": 50, "elevationDeg": 0,
+      "mesh": { "url": "meshes/sax.glb", "heightM": 1.4, "yawDeg": 45, "zUp": false } }
   ],
   // `bedDuck` pulls the FOA bed down as you focus a musician. Without it the
   // spotlight can only add a stem on top of the bed's own copy of that same
@@ -329,7 +339,8 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
   // real room and buries the anchored musicians. `bedDuck` cannot help here — AR
   // runs at zoom 0, so no stem is ever "focused" and the duck never fires.
   // 0.35 ≈ -9 dB. Restored to 1 on leaving AR.
-  "ar": { "bedGain": 0.35 },
+  // "mesh" here is the fallback model for every stem without one of its own.
+  "ar": { "bedGain": 0.35, "mesh": "meshes/generic.glb" },
   // How far the ambisonic mic was turned from the camera when recording. Rotates
   // the FOA bed only, never the stems. Override live with ?ayaw= / ?amirror=.
   "alignment": { "yawOffsetDeg": 0, "mirror": false },
