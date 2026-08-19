@@ -285,6 +285,7 @@ meshes/                 Musician .glb models for AR (git-ignored but test-figure
 docs/architecture.md    Dev guide: how the pieces fit + how to extend
 docs/core-api.md        Engine API + AR mode + close-up multi-track reference
 docs/musician-meshes.md 3D models per musician in AR: sizing, editor, upload
+tools/docs-bundle.sh    Concatenate every doc into one file (for NotebookLM etc.)
 docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 ```
 

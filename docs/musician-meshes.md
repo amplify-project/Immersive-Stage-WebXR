@@ -254,7 +254,21 @@ heavy models (3.9 MB guitarist, 6.1 MB drum kit).
   `attachMeshTo` uses a plain `clone(true)`, which does **not** carry a skinned
   mesh's skeleton — animating means moving to `SkeletonUtils.clone` and an
   `AnimationMixer` driven from the render loop.
-- **S3 publishing.** Meshes are served from the local server only; publishing a
-  scene does not upload them yet (partner commitment, July 2026).
+- **S3 publishing.** Meshes are served from the local server only.
+  `upload-s3.sh` syncs `encoded/` — the DASH output — and nothing else, so a
+  player fetching its media from S3/CloudFront gets a `scene.json` pointing at
+  `meshes/*.glb` that are not there. Three things have to be decided before it
+  can be wired up, and only the first is code:
+  - the meshes need their own sync (their own `Content-Type`, and *not* the
+    `immutable` cache-control the segments get — a mesh is replaced under the
+    same name while a scene is being tuned, which is exactly what a year-long
+    immutable cache breaks);
+  - the bucket needs **CORS**, which the segments never needed from that origin:
+    `GLTFLoader` fetches by XHR, and a cross-origin GLB without CORS headers
+    fails where a `<video>` source would not;
+  - and the path in `scene.json` is relative, so it resolves against whatever
+    origin serves the player page. Whether that is the local server or the CDN
+    decides whether the meshes go under the same prefix as the encode output or
+    at their own.
 - **Optional raw `scale`** as described above, if an asset ever has to be shown at
   its authored size.
