@@ -209,7 +209,8 @@ move him to where he really stood. *Unplace* hands him back to the sphere.
 
 The origin (0,0) is not a spectator. It is the room reference the headsets align
 themselves to with the thumbstick calibration, so that a musician sits in the same place
-for everybody. Later the partner's cameras will publish these same coordinates and the
+for everybody. That calibration is done **once per headset** — the player drops a
+persistent WebXR anchor there and restores it on every later launch. Later the partner's cameras will publish these same coordinates and the
 manual placement stops being necessary — the format does not change, only who writes it.
 
 > **If the whole scene is rotated** — every musician equally wrong, the band coherent

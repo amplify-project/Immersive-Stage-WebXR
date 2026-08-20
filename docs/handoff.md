@@ -84,19 +84,52 @@ Nothing is computed today: holding the **grip**, the left stick translates and t
 right stick rotates the room until the wireframe markers sit on the real
 musicians (pressing a stick resets). Rotation is applied **around the head**, not
 around the group origin — otherwise the scene orbits an arbitrary point and
-alignment is impossible. Releasing the grip stores the three numbers in
-`localStorage` under `arCalib:<ar.venue|default>`, so the next session starts
-aligned. Tolerance is generous: the ear resolves ~5-10° off-axis, ~40 cm at 3 m.
+alignment is impossible. Tolerance is generous: the ear resolves ~5-10° off-axis,
+~40 cm at 3 m.
 
 This is the same mechanism Case C drives later — the cameras just set those three
 numbers instead of the hand, and everything downstream is unchanged.
 
+### Persistence: the room anchor
+
+Releasing the grip stores the three numbers in `localStorage` under
+`arCalib:<ar.venue|default>`, but **that alone does not survive a restart**: they
+are measured from the `local-floor` origin, which lands wherever the session
+started. Next launch that origin is somewhere else and the same `{x,z,yaw}` puts
+the room anywhere. They need a *physical* reference to hang off.
+
+The Quest Browser provides one. On releasing the grip the player also calls
+`frame.createAnchor()` at the room transform and `requestPersistentHandle()`,
+storing the returned UUID under `arAnchorId:<ar.venue|default>`. On the next AR
+session `restorePersistentAnchor()` returns an anchor **at the same real-world
+spot** — the headset re-localizes it against its own map of the room (the Space
+Setup the user already did) — and `followRoomAnchor()` drives `roomGroup` from
+its pose. So each headset is aligned by hand **once per room, ever**.
+
+This is also what makes several spectators share one mixed world without talking
+to each other: if every headset anchored once to the same physical spot, they all
+agree on every launch — no shared channel, no server, no cameras. Meta's
+cross-device *shared* spatial anchors are **not** exposed to WebXR; the trick is
+precisely that each headset persists on its own against the same place.
+
+`followRoomAnchor()` runs every frame, which is what absorbs reference-space
+`reset` events (recentering, taking the headset off): those move the session
+origin, not the anchor, so the room stays put instead of jumping. Only X, Z and
+yaw are taken from the anchor — the 4-DoF argument above still holds, and
+inheriting a couple of degrees of anchor tilt would skew the room for nothing.
+
+Runtime limits, all of which fall back to the thumbsticks: **8** persistent
+anchors per site (we use 1), none persist in **private mode**, and clearing the
+browser's site history deletes them. `?noanchor=1` forces the manual path for
+testing.
+
 ### What's missing (partner work)
 
-- **Anchoring to the real world.** Beyond the manual alignment above, the markers
-  are not *tracked* to the room. Add WebXR **hit-test** + **anchors** (and/or
-  **plane / mesh detection**) so each musician sticks to a real surface. If
-  instead the positions come from an external camera rig, see **Case C**.
+- **Per-surface anchoring.** The room as a whole is anchored (see above), but
+  individual markers are not *tracked* to real surfaces. Add WebXR **hit-test**
+  (and/or **plane detection**, which on Quest exposes the Space Setup walls as
+  axis-aligned `XRPlane` rectangles) so each musician sticks to a real surface.
+  If instead the positions come from an external camera rig, see **Case C**.
 - **Interactive placement.** Drag / position *individual* markers (`roomGroup`
   moves them all as a block). `hand-tracking` is requested as an `optionalFeature`
   but is **not used** yet.

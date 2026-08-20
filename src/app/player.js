@@ -1738,7 +1738,8 @@ function rotateRoomAroundUser(dYaw, head) {
 // Un frame de calibración. Solo con el grip apretado, para no descolocar la sala
 // sin querer con el joystick. Izquierdo desplaza, derecho gira, y pulsar el
 // joystick vuelve al punto de partida si uno se pierde.
-function updateARCalib(session, pose) {
+function updateARCalib(frame, refSpace, pose) {
+  const session = frame.session;
   const head = pose.transform.position;
   const q = pose.transform.orientation;
   // Yaw de la cabeza: el bucle de AR no mantiene la global `yaw` (esa es la del
@@ -1768,9 +1769,133 @@ function updateARCalib(session, pose) {
     }
   }
   if (active) roomGroup.updateMatrixWorld(true);   // los panners la leen ya movida
-  // Al soltar el grip se da por buena la posición y se guarda.
-  if (arCalibrating && !active) { saveARCalib(); toast('Calibración guardada'); }
+  // Empezar a mover la sala a mano invalida el ancla anterior: si no,
+  // followRoomAnchor devolvería la sala a su sitio en el frame siguiente y el
+  // joystick no serviría de nada. La sustituye la que se crea al soltar.
+  if (active && !arCalibrating) arAnchor = null;
+  // Al soltar el grip se da por buena la posición: se guarda y se fija como
+  // ancla, que es lo que hace que esto no haya que repetirlo nunca más.
+  if (arCalibrating && !active) { saveARCalib(); saveRoomAnchor(frame, refSpace); }
   arCalibrating = active;
+}
+
+// ══════════════════════════════════════════════════════
+// ANCLA PERSISTENTE DE SALA
+// ══════════════════════════════════════════════════════
+// La calibración de arriba se guarda en localStorage, pero esos tres números
+// están medidos desde el origen de `local-floor`, que cae donde arrancó la
+// sesión: en el arranque siguiente ese origen está en otro sitio y el mismo
+// {x,z,yaw} deja la sala en cualquier parte. Por eso había que recalibrar cada
+// vez — no es falta de precisión, es que el número guardado no significa nada
+// fuera de su sesión.
+//
+// Lo que falta es un punto de referencia FÍSICO al que colgarlo, y el navegador
+// del Quest lo da: createAnchor() crea un ancla, requestPersistentHandle()
+// devuelve un UUID que guardamos nosotros, y en la sesión siguiente
+// restorePersistentAnchor() devuelve un ancla en el mismo sitio real, porque el
+// casco la re-localiza contra su propio mapa de la sala (el Space Setup). Se
+// guarda el UUID en lugar de las coordenadas y la sala vuelve sola.
+//
+// Y de paso resuelve lo de varios espectadores sin que hablen entre ellos: si
+// cada casco ancló una vez al mismo sitio de la sala, todos coinciden en cada
+// arranque sin canal compartido, sin servidor y sin cámaras. Las anclas
+// compartidas entre dispositivos (colocation) NO están expuestas a WebXR; el
+// truco es justo que cada uno persista por su cuenta contra el mismo punto.
+//
+// Límites del runtime: 8 anclas persistentes por sitio (usamos 1), ninguna
+// persiste en modo privado, y borrar el historial del navegador las borra. En
+// todos esos casos se cae a los joysticks de arriba, que siguen siendo además
+// el camino para poner el ancla la primera vez. ?noanchor=1 los fuerza.
+
+let arAnchor        = null;    // XRAnchor de la sala en esta sesión, si lo hay
+let arAnchorPending = false;   // creación en vuelo: no encadenar dos guardados
+
+// Umbral para no repasar el subárbol de la sala por ruido de tracking: el ancla
+// está quieta casi siempre y updateMatrixWorld(true) no es gratis.
+const AR_ANCHOR_EPS_M   = 0.002;    // 2 mm
+const AR_ANCHOR_EPS_RAD = 0.002;    // ~0.1°
+const AR_NO_ANCHOR = new URLSearchParams(location.search).get('noanchor') === '1';
+
+// Un ancla por sala, con la misma clave que la calibración a mano.
+function arAnchorKey() { return 'arAnchorId:' + (arCfg.venue || 'default'); }
+
+// Recupera el ancla al entrar en AR. No coloca nada todavía: leer su pose exige
+// un XRFrame, así que la aplica el bucle en el primer frame que la tenga (ver
+// followRoomAnchor). Hasta entonces vale el {x,z,yaw} guardado.
+async function restoreRoomAnchor(session) {
+  arAnchor = null;
+  if (AR_NO_ANCHOR || !session.restorePersistentAnchor) return;
+  let id = null;
+  try { id = localStorage.getItem(arAnchorKey()); } catch (_) { /* modo privado */ }
+  if (!id) return;
+  let a = null;
+  try { a = await session.restorePersistentAnchor(id); }
+  catch (e) { console.warn('[ar] ancla no restaurada:', e); return; }
+  // Puede resolverse tarde, cuando el usuario ya ha recalibrado a mano y puesto
+  // un ancla nueva: entonces la vieja ya no manda.
+  if (session === arSession && !arAnchor && !arCalibrating) arAnchor = a;
+}
+
+// Coloca `roomGroup` sobre el ancla, en cada frame. Hacerlo por frame sale gratis
+// y absorbe solo lo que un estimador tendría que perseguir: la deriva de
+// `local-floor` y los `reset` del espacio de referencia (recentrar, quitarse las
+// gafas) mueven el origen de la sesión, no el ancla, así que la sala se queda
+// donde está en vez de saltar.
+//
+// Del ancla se toman X, Z y yaw y nada más: los 4 GdL del comentario de arriba
+// siguen valiendo, la Y la pone el suelo de `local-floor` y la vertical la
+// alinea la IMU. Heredar del ancla un par de grados de inclinación torcería la
+// sala sin corregir ningún error real.
+function followRoomAnchor(frame, refSpace) {
+  if (!arAnchor) return;
+  let pose = null;
+  try { pose = frame.getPose(arAnchor.anchorSpace, refSpace); }
+  catch (_) { arAnchor = null; return; }   // borrada a mitad de sesión
+  if (!pose) return;               // sin tracking este frame: se queda donde estaba
+  const p = pose.transform.position, q = pose.transform.orientation;
+  const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
+  // Diferencia de ángulos envuelta: rotation.y viene de acumular giros de
+  // joystick y puede haberse ido de (-π, π].
+  const d = yaw - roomGroup.rotation.y;
+  const dYaw = Math.atan2(Math.sin(d), Math.cos(d));
+  if (Math.abs(p.x - roomGroup.position.x) < AR_ANCHOR_EPS_M &&
+      Math.abs(p.z - roomGroup.position.z) < AR_ANCHOR_EPS_M &&
+      Math.abs(dYaw) < AR_ANCHOR_EPS_RAD) return;
+  applyARCalib({ x: p.x, z: p.z, yaw });
+  roomGroup.updateMatrixWorld(true);     // la leen worldToLocal y los panners
+}
+
+// Fija como ancla persistente la calibración que se acaba de hacer a mano. A
+// partir de aquí esta sala ya no se vuelve a calibrar en este casco.
+async function saveRoomAnchor(frame, refSpace) {
+  if (arAnchorPending) return;
+  if (AR_NO_ANCHOR || !frame.createAnchor) { toast('Calibración guardada'); return; }
+  arAnchorPending = true;
+  const session = frame.session;
+  let old = null;
+  try { old = localStorage.getItem(arAnchorKey()); } catch (_) { /* modo privado */ }
+  try {
+    // Antes del primer await: `frame` solo vale dentro de su callback, y la
+    // llamada a createAnchor tiene que salir de aquí. La promesa ya resuelve
+    // cuando quiera.
+    const yaw = roomGroup.rotation.y;
+    const a = await frame.createAnchor(new XRRigidTransform(
+      { x: roomGroup.position.x, y: 0, z: roomGroup.position.z },
+      { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }), refSpace);
+    const id = await a.requestPersistentHandle();
+    arAnchor = a;
+    try { localStorage.setItem(arAnchorKey(), id); } catch (_) { /* modo privado */ }
+    // Solo con la nueva ya en la mano: son 8 como mucho por sitio, y dejar las
+    // viejas colgando acabaría llenando el cupo.
+    if (old && old !== id && session.deletePersistentAnchor)
+      session.deletePersistentAnchor(old).catch(() => {});
+    toast('Sala anclada');
+  } catch (e) {
+    console.warn('[ar] ancla no creada:', e);
+    toast('Calibración guardada');       // queda el {x,z,yaw} de saveARCalib
+  } finally {
+    arAnchorPending = false;
+  }
 }
 
 // Coloca un objeto por stem alrededor del usuario (usando su az/el) y lo vincula
@@ -1817,7 +1942,10 @@ async function enterAR() {
 
     arSession = await navigator.xr.requestSession('immersive-ar', {
       requiredFeatures: ['local-floor'],
-      optionalFeatures: ['hand-tracking'],
+      // 'anchors': el ancla persistente de sala (ver restoreRoomAnchor). Va en
+      // opcionales para no dejar sin AR a un runtime que no la traiga: sin ella
+      // se cae a la calibración a mano, que sigue entera.
+      optionalFeatures: ['hand-tracking', 'anchors'],
     });
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(arSession);
@@ -1850,6 +1978,10 @@ async function enterAR() {
     // al músico que se estuviera mirando en la anterior.
     loadARFocusCfg();                             // ar.focus de la escena, si lo trae
     resetARFocus();
+    // Sin await: no hay pose de ancla que leer hasta que haya un XRFrame, así
+    // que la sala arranca con el {x,z,yaw} guardado y el bucle la corrige en
+    // cuanto el ancla esté. Un frame en el sitio viejo no lo ve nadie.
+    restoreRoomAnchor(arSession);
     buildARSources();
 
     arSession.addEventListener('end', () => {
@@ -1869,6 +2001,7 @@ async function enterAR() {
       if (sphere) sphere.visible = true;
       if (engine && arPrevSpot) engine.setSpotlightParams(arPrevSpot);
       if (engine && arPrevBed != null) engine.setBedLevel(arPrevBed);
+      arAnchor = null; arAnchorPending = false;   // el XRAnchor muere con la sesión
       arSession = null;
       document.getElementById('ar-btn').textContent = 'AR';
       renderer.setAnimationLoop(null);
@@ -1888,7 +2021,9 @@ async function enterAR() {
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
-          updateARCalib(frame.session, pose);                     // recolocar la sala (grip + joysticks)
+          updateARCalib(frame, refSpace, pose);                   // recolocar la sala (grip + joysticks)
+          // El ancla manda salvo mientras la mano la está moviendo.
+          if (!arCalibrating) followRoomAnchor(frame, refSpace);
           // La sala solo se mueve mientras se calibra, y es entonces cuando su
           // matriz tiene que estar al día en el propio frame: la leen worldToLocal
           // y los panners, que siguen la matrixWorld de los marcadores. El resto
