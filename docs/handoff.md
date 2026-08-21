@@ -132,6 +132,17 @@ persistent anchors**. That clears `localStorage` too, so the room gets aligned o
 more time afterwards. Serving the player from another origin (a different port)
 also gives a fresh quota, at the same cost.
 
+That manual step should never be needed again, because deleting *does* work with
+a valid UUID — the ones we mint ourselves. Every UUID ever persisted is kept in
+`arAnchorIds:<ar.venue|default>`, not just the current one, and a UUID is dropped
+from that list only once the runtime confirms its deletion. So anything this site
+created stays deletable, even if the delete failed the day it was made or the
+session died between creating and replacing. `pruneOwnAnchors()` sweeps the list
+on entering AR and again if the quota ever refuses a new anchor. What cannot be
+recovered is what a *previous* build left behind without recording its UUID: for
+those, clearing the site's history is the only way, since the spec's enumeration
+is the part Quest gets wrong.
+
 This is also what makes several spectators share one mixed world without talking
 to each other: if every headset anchored once to the same physical spot, they all
 agree on every launch — no shared channel, no server, no cameras. Meta's

@@ -1898,6 +1898,55 @@ const AR_RESET_ANCHORS = new URLSearchParams(location.search).get('resetanchors'
 // Un ancla por sala, con la misma clave que la calibración a mano.
 function arAnchorKey() { return 'arAnchorId:' + (arCfg.venue || 'default'); }
 function arOffsetKey() { return 'arAnchorOff:' + (arCfg.venue || 'default'); }
+function arAnchorIdsKey() { return 'arAnchorIds:' + (arCfg.venue || 'default'); }
+
+// TODO el historial de UUID que hemos persistido, no solo el vigente. Borrar es
+// lo único que libera el cupo de 8 y solo funciona con un UUID válido: los de
+// `persistentAnchors` vienen vacíos en el Quest, así que los únicos buenos son
+// los nuestros. Si uno se pierde —un borrado que falla, una sesión que se cierra
+// entre crear y borrar—, esa ancla se queda en el cupo PARA SIEMPRE y la única
+// salida es borrar los datos del sitio a mano. Guardarlos todos hace que siempre
+// se pueda barrer lo nuestro; el vigente se mantiene aparte en arAnchorKey().
+function loadAnchorIds() {
+  try {
+    const v = JSON.parse(localStorage.getItem(arAnchorIdsKey()));
+    if (Array.isArray(v)) return v.filter(x => typeof x === 'string' && x);
+  } catch (_) { /* nada guardado o corrupto */ }
+  return [];
+}
+
+function rememberAnchorId(id) {
+  const ids = loadAnchorIds();
+  if (ids.includes(id)) return;
+  ids.push(id);
+  try { localStorage.setItem(arAnchorIdsKey(), JSON.stringify(ids)); } catch (_) { /* modo privado */ }
+}
+
+// Borra las nuestras menos `keep`, y solo saca de la lista las que el runtime
+// confirma: una que falle hoy se vuelve a intentar en la sesión siguiente, que es
+// justo lo que no pasaba cuando el único registro era el UUID vigente.
+async function pruneOwnAnchors(session, keep) {
+  if (!session.deletePersistentAnchor) return { ok: 0, fail: 0 };
+  const ids = loadAnchorIds();
+  const quedan = [], fallidas = [];
+  let ok = 0;
+  for (const id of ids) {
+    if (id === keep) { quedan.push(id); continue; }
+    try {
+      await session.deletePersistentAnchor(id);
+      ok++;
+      arLogAdd(`own anchor deleted (${id})`);
+      // Si era la vigente, el puntero deja de apuntar a nada: dejarlo haría que
+      // la sesión siguiente intentara restaurar un ancla que ya no existe.
+      try {
+        if (localStorage.getItem(arAnchorKey()) === id) localStorage.removeItem(arAnchorKey());
+      } catch (_) { /* modo privado */ }
+    }
+    catch (e) { quedan.push(id); fallidas.push(id); arLogAdd(`could not delete own anchor (${id})`, e); }
+  }
+  if (ok) { try { localStorage.setItem(arAnchorIdsKey(), JSON.stringify(quedan)); } catch (_) { /* modo privado */ } }
+  return { ok, fail: fallidas.length };
+}
 
 // El ancla marca UN punto físico de la sala; dónde queda la escena respecto a ese
 // punto es otra cosa, y es la que cambia al recalibrar. Guardarlas juntas —un
@@ -1976,7 +2025,12 @@ async function restoreRoomAnchor(session) {
   // esperar a que el fallo aparezca a mitad de una calibración. Sin await: la
   // sala no depende de esto. Sin `id` guardado no hay ninguna que salvar — sin su
   // UUID un ancla ya no se puede recuperar, así que caen todas.
-  if (session.persistentAnchors && session.persistentAnchors.length > (id ? 1 : 0))
+  // Las NUESTRAS primero, que son las únicas con UUID bueno. La lista del runtime
+  // solo sirve donde sí devuelva UUID, así que queda de refuerzo para otros
+  // visores, no para el Quest.
+  if (loadAnchorIds().length > (id ? 1 : 0))
+    pruneOwnAnchors(session, id).then(({ ok }) => ok && console.log('[ar] anclas propias borradas:', ok));
+  else if (session.persistentAnchors && session.persistentAnchors.length > (id ? 1 : 0))
     pruneOrphanAnchors(session, id).then(({ ok }) => ok && console.log('[ar] anclas huérfanas borradas:', ok));
   if (!id) return arNotice(`No anchor saved (${n} on this site): align and release the grip`);
   let a = null;
@@ -2117,6 +2171,7 @@ async function saveRoomAnchor(frame, refSpace) {
     arRoomOff = { dx: 0, dz: 0, dyaw: 0 };
     try { localStorage.setItem(arOffsetKey(), JSON.stringify(arRoomOff)); } catch (_) { /* modo privado */ }
     try { localStorage.setItem(arAnchorKey(), id); } catch (_) { /* modo privado */ }
+    rememberAnchorId(id);
     // Solo con la nueva ya en la mano: son 8 como mucho por sitio, y dejar las
     // viejas colgando acabaría llenando el cupo. Este es el ÚNICO borrado que se
     // hace con un UUID bueno —el que guardamos al persistir— porque los de
@@ -2124,7 +2179,11 @@ async function saveRoomAnchor(frame, refSpace) {
     // que se acumularan nueve sin que nadie se enterara.
     if (old && old !== id && session.deletePersistentAnchor)
       session.deletePersistentAnchor(old)
-        .then(() => arLogAdd(`previous anchor deleted (${old})`))
+        .then(() => {
+          arLogAdd(`previous anchor deleted (${old})`);
+          const ids = loadAnchorIds().filter(x => x !== old);
+          try { localStorage.setItem(arAnchorIdsKey(), JSON.stringify(ids)); } catch (_) { /* modo privado */ }
+        })
         .catch(e => arLogAdd(`could not delete the previous one (${old})`, e));
     arNotice('Room anchored: no need to do this again');
   } catch (e) {
@@ -2144,11 +2203,17 @@ async function saveRoomAnchor(frame, refSpace) {
     // otra y repetir solo taparía el error de verdad.
     if (step === 'persist the anchor' && !arAnchorPruned) {
       arAnchorPruned = true;
-      // Sin `keep`: aquí no hay ancla nuestra que salvar, la creación acaba de
-      // fallar. Pero el UUID guardado NO se borra —es el único identificador
-      // válido que existe, porque la lista del runtime los devuelve vacíos, y
-      // tirarlo deja esa ancla dentro del cupo para siempre.
-      const { ok, fail, why, err } = await pruneOrphanAnchors(session, null);
+      // Sin `keep`: la creación acaba de fallar, así que no hay ancla nueva que
+      // proteger y todo lo nuestro sobra. Las nuestras primero porque con el cupo
+      // lleno son las únicas que se pueden liberar de verdad — las de la lista
+      // del runtime vienen sin UUID. Un UUID solo se olvida cuando el runtime
+      // confirma el borrado: tirarlo antes deja esa ancla en el cupo para
+      // siempre, sin nadie que sepa ya su identificador.
+      const propias = await pruneOwnAnchors(session, null);
+      const { ok: ajenas, fail, why, err } = propias.ok
+        ? { ok: 0, fail: 0, why: '', err: '' }
+        : await pruneOrphanAnchors(session, null);
+      const ok = propias.ok + ajenas;
       if (ok) { arAnchorRedo = true; arNotice(`Quota full (${n}): ${ok} deleted, retrying`); }
       else arNotice(`Could not ${step}: ${name} · ${n} anchors · delete: ${why || err || fail + ' failures'}`);
     } else {
