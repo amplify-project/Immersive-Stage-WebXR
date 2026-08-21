@@ -216,6 +216,40 @@ function arPerfPanelClear() {
   arPerfPanel = null;
 }
 
+// El mismo problema que el informe, para los avisos sueltos: `toast()` escribe
+// en el DOM de la página, que en sesión inmersiva no se compone, así que dentro
+// de las gafas no se ve NADA de lo que diga. Los avisos del ancla —que son justo
+// los que hay que leer mientras se calibra— van por el sprite de arriba. Es el
+// mismo panel a propósito: dos carteles delante de la cara no caben.
+const AR_NOTICE_MS   = 4000;
+const AR_NOTICE_COLS = 32;      // caben ~34 chars a 30px monospace en 640 px
+let   arNoticeUntil  = 0;
+
+// Lo que se lee dentro de las gafas cabe en cuatro segundos y en 32 columnas, y
+// el error de verdad —nombre Y mensaje— no cabe. Se guarda cada paso aquí y se
+// vuelca en la página al salir de AR, que es donde hay teclado para copiarlo.
+const arLog = [];
+function arLogAdd(msg, e) {
+  const t = arSession ? (performance.now() / 1000).toFixed(1) + 's' : '—';
+  arLog.push(`${t.padStart(7)}  ${msg}` +
+    (e ? `\n         ${e.name || 'error'}: ${e.message || String(e)}` : ''));
+}
+
+function arNotice(msg) {
+  console.log('[ar]', msg);
+  arLogAdd(msg);
+  if (!arSession) { toast(msg); return; }      // fuera de sesión sí hay página
+  const lines = [];
+  let line = '';
+  for (const w of msg.split(' ')) {
+    if (line && (line + ' ' + w).length > AR_NOTICE_COLS) { lines.push(line); line = w; }
+    else line = line ? line + ' ' + w : w;
+  }
+  if (line) lines.push(line);
+  arPerfPanelDraw(lines);
+  arNoticeUntil = performance.now() + AR_NOTICE_MS;
+}
+
 function arPerfReport(now) {
   // La ventana arranca en el primer frame; sin esto, t0=0 contra un
   // performance.now() de varios segundos suelta un informe de 1 frame al entrar.
@@ -229,7 +263,8 @@ function arPerfReport(now) {
     console.log(`[arperf] ${_perf.n} frames · medio ${avg} ms · peor ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})` +
       ` · audio ${(_perf.audio / _perf.n).toFixed(2)} · foco ${(_perf.focus / _perf.n).toFixed(2)}` +
       ` · render ${(_perf.render / _perf.n).toFixed(2)} · vídeo decodificado ${vfps} fps`);
-    arPerfPanelDraw([
+    // Un aviso vivo manda sobre el informe: el informe vuelve en 2 s, el aviso no.
+    if (!arNoticeUntil) arPerfPanelDraw([
       `${_perf.n} frames · medio ${avg} ms`,
       `peor ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})`,
       `audio ${(_perf.audio / _perf.n).toFixed(2)} · render ${(_perf.render / _perf.n).toFixed(2)}`,
@@ -247,6 +282,37 @@ function arPerfReport(now) {
 
 // Volcado en la propia página al salir de AR. El toast dura 3 s y se lo come el
 // tiempo de quitarse las gafas; esto se queda hasta que se recarga.
+function arLogDump() {
+  if (!arLog.length) return;
+  let el = document.getElementById('arlog-dump');
+  if (!el) {
+    el = document.createElement('pre');
+    el.id = 'arlog-dump';
+    el.style.cssText = 'position:fixed;left:8px;top:8px;z-index:9999;margin:0;max-height:80vh;' +
+      'overflow:auto;padding:10px 12px;background:rgba(0,0,0,.82);color:#7fd;border-radius:6px;' +
+      'font:12px/1.4 monospace;white-space:pre-wrap;max-width:46vw';
+    el.addEventListener('click', () => el.remove());
+    document.body.appendChild(el);
+  }
+  el.textContent = '[ar] registro del ancla   (toca aquí para cerrar)\n\n' + arLog.join('\n');
+  arLogSend();
+}
+
+// Al terminal del PC, que es donde hay teclado para copiarlo: la página vive en
+// el navegador del casco y leerla ahí obliga a transcribir a mano. Se manda dos
+// veces —al entrar en AR y al salir— porque la de entrada llega en cuanto te
+// pones las gafas y ya dice si el casco está ejecutando este código; esperar a
+// la de salida deja la duda abierta toda la sesión. Si el player se sirve desde
+// otro sitio (S3) no hay a quién mandarlo, y el fallo se queda en el registro.
+function arLogSend() {
+  if (!arLog.length) return;
+  fetch('/api/arlog', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ log: arLog.join('\n') }),
+  }).catch(e => arLogAdd('POST /api/arlog falló', e));
+}
+
 function arPerfDump() {
   const w = window.__arperf;
   if (!w || !w.length) return;
@@ -1769,13 +1835,16 @@ function updateARCalib(frame, refSpace, pose) {
     }
   }
   if (active) roomGroup.updateMatrixWorld(true);   // los panners la leen ya movida
-  // Empezar a mover la sala a mano invalida el ancla anterior: si no,
-  // followRoomAnchor devolvería la sala a su sitio en el frame siguiente y el
-  // joystick no serviría de nada. La sustituye la que se crea al soltar.
-  if (active && !arCalibrating) arAnchor = null;
+  // El ancla NO se suelta al empezar a mover: el bucle ya deja de seguirla
+  // mientras `arCalibrating` esté puesto, y soltarla obligaba a crear otra al
+  // terminar. Lo que cambia con el joystick es el desfase de la sala respecto al
+  // ancla, no el ancla, que es un punto físico de la sala y no se mueve.
   // Al soltar el grip se da por buena la posición: se guarda y se fija como
   // ancla, que es lo que hace que esto no haya que repetirlo nunca más.
   if (arCalibrating && !active) { saveARCalib(); saveRoomAnchor(frame, refSpace); }
+  // Reintento tras barrer el cupo (ver saveRoomAnchor): necesita este `frame`,
+  // vivo, y que no se esté moviendo la sala otra vez.
+  else if (arAnchorRedo && !active) { arAnchorRedo = false; saveRoomAnchor(frame, refSpace); }
   arCalibrating = active;
 }
 
@@ -1809,31 +1878,114 @@ function updateARCalib(frame, refSpace, pose) {
 
 let arAnchor        = null;    // XRAnchor de la sala en esta sesión, si lo hay
 let arAnchorPending = false;   // creación en vuelo: no encadenar dos guardados
+let arAnchorPruned  = false;   // el barrido del cupo, una vez por sesión
+let arAnchorRedo    = false;   // reintento pendiente: lo lanza el frame siguiente
+let arAnchorTries   = 0;      // reintentos gastados, para no repetir sin fin
+let arAnchorLogged  = false;  // la primera colocación de la sesión, ya registrada
+const AR_ANCHOR_TRIES = 30;   // ~medio segundo de frames buscando pose del ancla
 
 // Umbral para no repasar el subárbol de la sala por ruido de tracking: el ancla
 // está quieta casi siempre y updateMatrixWorld(true) no es gratis.
 const AR_ANCHOR_EPS_M   = 0.002;    // 2 mm
 const AR_ANCHOR_EPS_RAD = 0.002;    // ~0.1°
 const AR_NO_ANCHOR = new URLSearchParams(location.search).get('noanchor') === '1';
+// Salida manual por si el cupo se llena de una forma que el barrido automático
+// de saveRoomAnchor no cubre: entra con ?resetanchors=1, borra todas las anclas
+// del sitio y alinea una vez más. Vale también para empezar de cero en una sala
+// nueva sin bucear en el almacenamiento del navegador.
+const AR_RESET_ANCHORS = new URLSearchParams(location.search).get('resetanchors') === '1';
 
 // Un ancla por sala, con la misma clave que la calibración a mano.
 function arAnchorKey() { return 'arAnchorId:' + (arCfg.venue || 'default'); }
+function arOffsetKey() { return 'arAnchorOff:' + (arCfg.venue || 'default'); }
+
+// El ancla marca UN punto físico de la sala; dónde queda la escena respecto a ese
+// punto es otra cosa, y es la que cambia al recalibrar. Guardarlas juntas —un
+// ancla nueva por cada suelta de grip— agota en una tarde de pruebas el cupo de 8
+// anclas por sitio, y cuando se llena, persistir falla con "Maximum number of
+// anchors reached!" y ya no hay forma de arreglarlo desde la página: el runtime
+// enumera las anclas pero devuelve sus UUID vacíos, así que no se pueden borrar.
+// Con el desfase aparte se ancla UNA vez y las recalibraciones son tres números
+// en localStorage, que no tienen cupo.
+let arRoomOff = { dx: 0, dz: 0, dyaw: 0 };
+
+function loadRoomOffset() {
+  arRoomOff = { dx: 0, dz: 0, dyaw: 0 };
+  try {
+    const o = JSON.parse(localStorage.getItem(arOffsetKey()));
+    if (o && isFinite(o.dx) && isFinite(o.dz) && isFinite(o.dyaw)) arRoomOff = o;
+  } catch (_) { /* nada guardado o corrupto → sala sobre el ancla */ }
+}
+
+// Yaw de una pose alrededor de Y, que es el único giro que se hereda del ancla.
+function poseYaw(q) {
+  return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
+}
+
+// Desfase = la posición actual de la sala LEÍDA DESDE el ancla, para que deje de
+// depender del origen de la sesión igual que el ancla. Es la inversa exacta de la
+// composición que hace followRoomAnchor.
+function saveRoomOffset(pose) {
+  const p = pose.transform.position;
+  const ayaw = poseYaw(pose.transform.orientation);
+  const c = Math.cos(ayaw), s = Math.sin(ayaw);
+  const ex = roomGroup.position.x - p.x, ez = roomGroup.position.z - p.z;
+  arRoomOff = { dx: ex * c - ez * s, dz: ex * s + ez * c, dyaw: roomGroup.rotation.y - ayaw };
+  try { localStorage.setItem(arOffsetKey(), JSON.stringify(arRoomOff)); } catch (_) { /* modo privado */ }
+  arLogAdd(`desfase guardado  dx=${arRoomOff.dx.toFixed(2)} dz=${arRoomOff.dz.toFixed(2)}` +
+           ` dyaw=${(arRoomOff.dyaw * 180 / Math.PI).toFixed(1)}°` +
+           `  · ancla en x=${p.x.toFixed(2)} z=${p.z.toFixed(2)} yaw=${(ayaw * 180 / Math.PI).toFixed(1)}°`);
+}
 
 // Recupera el ancla al entrar en AR. No coloca nada todavía: leer su pose exige
 // un XRFrame, así que la aplica el bucle en el primer frame que la tenga (ver
 // followRoomAnchor). Hasta entonces vale el {x,z,yaw} guardado.
 async function restoreRoomAnchor(session) {
   arAnchor = null;
-  if (AR_NO_ANCHOR || !session.restorePersistentAnchor) return;
+  if (AR_NO_ANCHOR) return;
+  // Cada salida de aquí deja la sala en el {x,z,yaw} viejo, o sea EN CUALQUIER
+  // PARTE, que desde dentro de las gafas se lee igual en los cuatro casos. Sin
+  // decir cuál ha sido no hay forma de distinguir "no se guardó" de "no se
+  // recuperó", así que ninguna se va callando.
+  if (!session.restorePersistentAnchor) return arNotice('Este visor no trae anclas: hay que alinear en cada sesión');
+  // La pregunta de fondo cuando nada de esto funciona, y no hay consola dentro de
+  // las gafas para responderla: ¿concedió el runtime 'anchors'?
+  const feats = session.enabledFeatures ? Array.from(session.enabledFeatures) : null;
+  const n = session.persistentAnchors ? session.persistentAnchors.length : '?';
+  const lista = session.persistentAnchors ? Array.from(session.persistentAnchors) : null;
+  console.log('[ar] features:', feats || 'no expuestas', '· anclas persistentes:', lista || 'no expuestas');
+  arLogAdd(`features: ${feats ? feats.join(' ') : 'no expuestas'}`);
+  arLogAdd(`persistentAnchors: ${lista ? lista.length + ' · ' + (typeof lista[0]) + ' ' + lista[0] : 'no expuestas'}`);
+  arLogAdd(`métodos: create=${typeof (window.XRFrame && XRFrame.prototype.createAnchor)}` +
+           ` restore=${typeof session.restorePersistentAnchor}` +
+           ` delete=${typeof session.deletePersistentAnchor}`);
+  arLogSend();      // el entorno ya está: que llegue sin esperar a salir de AR
+  if (feats && !feats.includes('anchors'))
+    return arNotice(`Sin 'anchors' concedida: la sala no se puede guardar`);
+  if (AR_RESET_ANCHORS) {
+    const { ok, fail, why, err } = await pruneOrphanAnchors(session, null);
+    try { localStorage.removeItem(arAnchorKey()); } catch (_) { /* modo privado */ }
+    return arNotice(why ? `No se pueden borrar las anclas: ${why}`
+                        : `${ok} borradas${fail ? `, ${fail} fallaron: ${err}` : ''}`);
+  }
   let id = null;
   try { id = localStorage.getItem(arAnchorKey()); } catch (_) { /* modo privado */ }
-  if (!id) return;
+  // Este sitio usa UNA ancla: cualquier otra es un resto de una recalibración
+  // cuyo borrado se perdió, y son las que llenan el cupo de 8 hasta que persistir
+  // deja de funcionar. Se barren al entrar, que es cuando sobra tiempo, en vez de
+  // esperar a que el fallo aparezca a mitad de una calibración. Sin await: la
+  // sala no depende de esto. Sin `id` guardado no hay ninguna que salvar — sin su
+  // UUID un ancla ya no se puede recuperar, así que caen todas.
+  if (session.persistentAnchors && session.persistentAnchors.length > (id ? 1 : 0))
+    pruneOrphanAnchors(session, id).then(({ ok }) => ok && console.log('[ar] anclas huérfanas borradas:', ok));
+  if (!id) return arNotice(`Sin ancla guardada (${n} en el sitio): alinea y suelta el grip`);
   let a = null;
   try { a = await session.restorePersistentAnchor(id); }
-  catch (e) { console.warn('[ar] ancla no restaurada:', e); return; }
+  catch (e) { arLogAdd('restorePersistentAnchor', e); console.warn('[ar] ancla no restaurada:', e); return arNotice(`El visor no reconoce el ancla · ${n} en el sitio`); }
   // Puede resolverse tarde, cuando el usuario ya ha recalibrado a mano y puesto
   // un ancla nueva: entonces la vieja ya no manda.
-  if (session === arSession && !arAnchor && !arCalibrating) arAnchor = a;
+  loadRoomOffset();
+  if (session === arSession && !arAnchor && !arCalibrating) { arAnchor = a; arNotice(`Sala recuperada del ancla · ${n} en el sitio`); }
 }
 
 // Coloca `roomGroup` sobre el ancla, en cada frame. Hacerlo por frame sale gratis
@@ -1852,28 +2004,104 @@ function followRoomAnchor(frame, refSpace) {
   try { pose = frame.getPose(arAnchor.anchorSpace, refSpace); }
   catch (_) { arAnchor = null; return; }   // borrada a mitad de sesión
   if (!pose) return;               // sin tracking este frame: se queda donde estaba
-  const p = pose.transform.position, q = pose.transform.orientation;
-  const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
+  const p = pose.transform.position;
+  const ayaw = poseYaw(pose.transform.orientation);
+  // La sala cuelga del ancla: su sitio es el del ancla más el desfase, girado por
+  // el yaw del ancla para que el desfase se lea en el marco de la propia ancla.
+  const c = Math.cos(ayaw), s = Math.sin(ayaw);
+  const x = p.x + arRoomOff.dx * c + arRoomOff.dz * s;
+  const z = p.z - arRoomOff.dx * s + arRoomOff.dz * c;
+  const yaw = ayaw + arRoomOff.dyaw;
   // Diferencia de ángulos envuelta: rotation.y viene de acumular giros de
   // joystick y puede haberse ido de (-π, π].
   const d = yaw - roomGroup.rotation.y;
   const dYaw = Math.atan2(Math.sin(d), Math.cos(d));
-  if (Math.abs(p.x - roomGroup.position.x) < AR_ANCHOR_EPS_M &&
-      Math.abs(p.z - roomGroup.position.z) < AR_ANCHOR_EPS_M &&
+  if (Math.abs(x - roomGroup.position.x) < AR_ANCHOR_EPS_M &&
+      Math.abs(z - roomGroup.position.z) < AR_ANCHOR_EPS_M &&
       Math.abs(dYaw) < AR_ANCHOR_EPS_RAD) return;
-  applyARCalib({ x: p.x, z: p.z, yaw });
+  if (!arAnchorLogged) {
+    arAnchorLogged = true;
+    arLogAdd(`ancla colocada  ancla x=${p.x.toFixed(2)} z=${p.z.toFixed(2)} yaw=${(ayaw * 180 / Math.PI).toFixed(1)}°` +
+             `  · desfase dx=${arRoomOff.dx.toFixed(2)} dz=${arRoomOff.dz.toFixed(2)} dyaw=${(arRoomOff.dyaw * 180 / Math.PI).toFixed(1)}°` +
+             `  → sala x=${x.toFixed(2)} z=${z.toFixed(2)} yaw=${(yaw * 180 / Math.PI).toFixed(1)}°`);
+  }
+  applyARCalib({ x, z, yaw });
   roomGroup.updateMatrixWorld(true);     // la leen worldToLocal y los panners
+}
+
+// La cuota del runtime son 8 anclas persistentes por sitio y nosotros usamos
+// una: las demás son restos de recalibraciones cuyo borrado falló (va con
+// `.catch()` vacío) o de sesiones que se cerraron entre crear y borrar. Con el
+// cupo lleno, persistir la siguiente falla con InvalidStateError y desde dentro
+// de las gafas eso se lee como "el ancla no funciona" — cuando lo que pasa es
+// que sobran. Aquí no hay ancla de nadie más, así que todo lo que no sea `keep`
+// se puede borrar.
+async function pruneOrphanAnchors(session, keep) {
+  const list = session.persistentAnchors ? Array.from(session.persistentAnchors) : null;
+  // Las tres salidas de aquí son distintas y hay que poder contarlas: no hay API
+  // para listar, no hay API para borrar, o el borrado falla ancla por ancla.
+  if (!list) return { ok: 0, fail: 0, why: 'sin lista', err: '' };
+  if (!session.deletePersistentAnchor) return { ok: 0, fail: 0, why: 'sin borrado', err: '' };
+  // El runtime del Quest enumera las anclas pero devuelve sus UUID VACÍOS, y sin
+  // identificador no hay nada que borrar: `deletePersistentAnchor('')` contesta
+  // OperationError tantas veces como anclas haya. Se detecta aquí en vez de
+  // gastar una llamada por ancla para acabar en el mismo sitio, y sobre todo para
+  // poder decirlo: con el cupo lleno y sin UUID, esto no se arregla desde la
+  // página. Los únicos UUID buenos son los que guardamos nosotros al persistir.
+  if (list.length && !list.some(u => u))
+    return { ok: 0, fail: 0, why: 'el visor no da sus UUID', err: '' };
+  console.log('[ar] a borrar:', list.length, 'entradas, la primera es', typeof list[0], list[0]);
+  let ok = 0, fail = 0, err = '';
+  for (const uuid of list) {
+    if (!uuid || uuid === keep) continue;
+    try { await session.deletePersistentAnchor(uuid); ok++; }
+    catch (e) {
+      fail++;
+      // El primero basta: nueve rechazos del mismo runtime son el mismo motivo,
+      // y ese motivo es lo único que no sabemos todavía.
+      if (!err) err = (e && (e.name || e.message)) ? (e.name || e.message) : String(e);
+      if (fail === 1) arLogAdd(`deletePersistentAnchor(${uuid})`, e);
+      console.warn('[ar] no se pudo borrar el ancla', uuid, e);
+    }
+  }
+  return { ok, fail, why: '', err };
 }
 
 // Fija como ancla persistente la calibración que se acaba de hacer a mano. A
 // partir de aquí esta sala ya no se vuelve a calibrar en este casco.
 async function saveRoomAnchor(frame, refSpace) {
   if (arAnchorPending) return;
-  if (AR_NO_ANCHOR || !frame.createAnchor) { toast('Calibración guardada'); return; }
+  if (AR_NO_ANCHOR) { arNotice('Calibración guardada (?noanchor=1)'); return; }
+  if (!frame.createAnchor) { arNotice('Guardada solo en esta sesión: sin anclas'); return; }
+  // Con un ancla ya puesta —recién restaurada o creada en esta sesión— no se crea
+  // ninguna: lo que ha cambiado es dónde está la sala respecto a ella. Este es el
+  // camino normal de toda recalibración a partir de la primera, y el que hace que
+  // el cupo de 8 no se vuelva a tocar.
+  if (arAnchor) {
+    let pose = null;
+    try { pose = frame.getPose(arAnchor.anchorSpace, refSpace); } catch (_) { /* ancla borrada */ }
+    if (pose) { arAnchorTries = 0; saveRoomOffset(pose); arNotice('Alineación guardada sobre el ancla'); return; }
+    // Sin pose del ancla en ESTE frame no hay desde dónde medir. Se reintenta en
+    // el siguiente en vez de crear otra ancla, que es lo que llenó el cupo. Con
+    // tope: reintentar sin fin repintaría el cartel en cada frame, y media
+    // segundo sin pose ya no es un hueco de tracking sino un ancla perdida.
+    if (arAnchorTries++ < AR_ANCHOR_TRIES) { arAnchorRedo = true; return; }
+    arNotice('El ancla no da posición: vuelve a alinear');
+    return;
+  }
   arAnchorPending = true;
   const session = frame.session;
+  // Aquí se crea ancla nueva: o es la primera de este sitio, o la guardada no se
+  // ha podido restaurar. Lo segundo, repetido, es lo que llena el cupo, y como
+  // las ajenas no se pueden borrar conviene decirlo antes de que no quepa
+  // ninguna, no cuando ya falle.
+  const usadas = session.persistentAnchors ? session.persistentAnchors.length : 0;
+  if (usadas >= 6) arLogAdd(`ATENCIÓN: ${usadas} anclas en el sitio y el cupo es 8`);
   let old = null;
   try { old = localStorage.getItem(arAnchorKey()); } catch (_) { /* modo privado */ }
+  // Los dos pasos fallan distinto y hasta ahora se veían igual: crear el ancla
+  // es cosa del frame, persistirla es cosa de la cuota del sitio.
+  let step = 'crear';
   try {
     // Antes del primer await: `frame` solo vale dentro de su callback, y la
     // llamada a createAnchor tiene que salir de aquí. La promesa ya resuelve
@@ -1882,17 +2110,50 @@ async function saveRoomAnchor(frame, refSpace) {
     const a = await frame.createAnchor(new XRRigidTransform(
       { x: roomGroup.position.x, y: 0, z: roomGroup.position.z },
       { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }), refSpace);
+    step = 'persistir';
     const id = await a.requestPersistentHandle();
     arAnchor = a;
+    // Se ha creado EN la posición de la sala, así que no hay desfase todavía.
+    arRoomOff = { dx: 0, dz: 0, dyaw: 0 };
+    try { localStorage.setItem(arOffsetKey(), JSON.stringify(arRoomOff)); } catch (_) { /* modo privado */ }
     try { localStorage.setItem(arAnchorKey(), id); } catch (_) { /* modo privado */ }
     // Solo con la nueva ya en la mano: son 8 como mucho por sitio, y dejar las
-    // viejas colgando acabaría llenando el cupo.
+    // viejas colgando acabaría llenando el cupo. Este es el ÚNICO borrado que se
+    // hace con un UUID bueno —el que guardamos al persistir— porque los de
+    // `persistentAnchors` vienen vacíos; que fallara en silencio es lo que dejó
+    // que se acumularan nueve sin que nadie se enterara.
     if (old && old !== id && session.deletePersistentAnchor)
-      session.deletePersistentAnchor(old).catch(() => {});
-    toast('Sala anclada');
+      session.deletePersistentAnchor(old)
+        .then(() => arLogAdd(`ancla anterior borrada (${old})`))
+        .catch(e => arLogAdd(`no se pudo borrar la anterior (${old})`, e));
+    arNotice('Sala anclada: ya no hay que repetirlo');
   } catch (e) {
-    console.warn('[ar] ancla no creada:', e);
-    toast('Calibración guardada');       // queda el {x,z,yaw} de saveARCalib
+    const name = (e && (e.name || e.message)) ? (e.name || e.message) : String(e);
+    const n = session.persistentAnchors ? session.persistentAnchors.length : '?';
+    arLogAdd(`fallo al ${step} el ancla, ${n} persistentes`, e);
+    console.warn(`[ar] fallo al ${step} el ancla (${n} persistentes):`, e);
+    // Cupo lleno: se barren las anclas del sitio y se reintenta. No se mira QUÉ
+    // error fue: el runtime lo llama InvalidStateError, pero atar la limpieza a
+    // ese nombre exacto ya falló una vez —basta con que la excepción no traiga
+    // `name`— y el barrido no estropea nada si la causa era otra, porque el
+    // reintento vuelve a crear la única ancla que este sitio usa.
+    //
+    // El reintento no puede ser aquí: tras el await `frame` ya está muerto y
+    // createAnchor exige uno vivo, así que lo recoge el bucle en el frame
+    // siguiente. Una vez por sesión: si tras limpiar sigue fallando, la causa es
+    // otra y repetir solo taparía el error de verdad.
+    if (step === 'persistir' && !arAnchorPruned) {
+      arAnchorPruned = true;
+      // Sin `keep`: aquí no hay ancla nuestra que salvar, la creación acaba de
+      // fallar. Pero el UUID guardado NO se borra —es el único identificador
+      // válido que existe, porque la lista del runtime los devuelve vacíos, y
+      // tirarlo deja esa ancla dentro del cupo para siempre.
+      const { ok, fail, why, err } = await pruneOrphanAnchors(session, null);
+      if (ok) { arAnchorRedo = true; arNotice(`Cupo lleno (${n}): ${ok} borradas, reintentando`); }
+      else arNotice(`No se pudo ${step}: ${name} · ${n} anclas · borrar: ${why || err || fail + ' fallos'}`);
+    } else {
+      arNotice(`No se pudo ${step}: ${name} · ${n} anclas`);
+    }
   } finally {
     arAnchorPending = false;
   }
@@ -1947,6 +2208,11 @@ async function enterAR() {
       // se cae a la calibración a mano, que sigue entera.
       optionalFeatures: ['hand-tracking', 'anchors'],
     });
+    // Lo primero a descartar cuando la sala no vuelve a su sitio: sin 'anchors'
+    // concedida no hay nada que persistir, y como va en optionalFeatures la
+    // sesión arranca igual sin decir ni pío.
+    const arFeats = arSession.enabledFeatures ? Array.from(arSession.enabledFeatures) : null;
+    console.log('[ar] features:', arFeats ? arFeats.join(' ') : 'no expuestas');
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(arSession);
     // 'room': mismo marco que stem.ar y que las posiciones que publicarán las cámaras.
@@ -1986,8 +2252,11 @@ async function enterAR() {
 
     arSession.addEventListener('end', () => {
       // ?arperf=1: el resumen se enseña aquí, que es cuando vuelve a haber pantalla.
+      // Salir con un aviso en pantalla dejaría el sprite colgado en el 360.
+      arNoticeUntil = 0;
+      arPerfPanelClear();
+      arLogDump();       // sin depender de ?arperf=1: esto es lo que hay que leer
       if (ARPERF) {
-        arPerfPanelClear();
         arPerfDump();
         console.log('[arperf] ventanas:', window.__arperf);
       }
@@ -2002,6 +2271,7 @@ async function enterAR() {
       if (engine && arPrevSpot) engine.setSpotlightParams(arPrevSpot);
       if (engine && arPrevBed != null) engine.setBedLevel(arPrevBed);
       arAnchor = null; arAnchorPending = false;   // el XRAnchor muere con la sesión
+      arAnchorPruned = false; arAnchorRedo = false; arAnchorTries = 0; arAnchorLogged = false;
       arSession = null;
       document.getElementById('ar-btn').textContent = 'AR';
       renderer.setAnimationLoop(null);
@@ -2040,7 +2310,13 @@ async function enterAR() {
           telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
           if (ARPERF) {
             _perf.audio += _p1 - _p0; _perf.focus += performance.now() - _p1;
-            arPerfPanelPlace(pose);      // el panel sigue a la cabeza
+          }
+          // El panel sigue a la cabeza mientras haya algo que enseñar: el
+          // informe de ?arperf=1, o un aviso hasta que caduque.
+          if (ARPERF || arNoticeUntil) arPerfPanelPlace(pose);
+          if (arNoticeUntil && performance.now() > arNoticeUntil) {
+            arNoticeUntil = 0;
+            if (!ARPERF) arPerfPanelClear();   // con ?arperf=1 el panel se queda
           }
         }
       }

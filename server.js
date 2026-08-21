@@ -349,6 +349,19 @@ async function handleAPI(req, res, pathname) {
       }
     }
 
+    // ── Registro del ancla de AR ────────────────────────────────────────────
+    // El player lo manda al salir de AR. Dentro del casco el error se lee en un
+    // cartel de 32 columnas que dura 4 s, y la consola del navegador del Quest
+    // solo se alcanza por chrome://inspect: sacarlo por aquí lo pone en el
+    // terminal del PC, que es donde se está mirando de todas formas.
+    if (pathname === '/api/arlog' && req.method === 'POST') {
+      const { log } = await readBody(req);
+      console.log('\n[arlog] ── registro del ancla ' + '─'.repeat(40));
+      console.log(String(log || '').split('\n').map(l => '[arlog] ' + l).join('\n'));
+      console.log('[arlog] ' + '─'.repeat(58) + '\n');
+      return sendJSON(res, 200, { ok: true });
+    }
+
     // ── Dispositivos de captura para LIVE (v4l2 + ALSA) ─────────────────────
     if (pathname === '/api/devices' && req.method === 'GET') {
       const [video, audio] = await Promise.all([listVideoDevices(), listAudioDevices()]);
