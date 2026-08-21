@@ -124,7 +124,7 @@ delete and answers `OperationError` once per anchor. The [spec][anchors-spec]
 requires that list to carry the keys of the persistent-anchor map, so this looks
 like a browser bug — and note that [Meta's own documentation][meta-mr] documents
 neither of those two members, only `createAnchor`, `requestPersistentHandle` and
-`restorePersistentAnchor`. The only UUID that is ever usable is the one we stored
+`restorePersistentAnchor`. The only usable UUIDs are the ones we stored
 ourselves when persisting.
 
 Recovery is documented by Meta: **clearing the site's history deletes the
@@ -160,6 +160,13 @@ headset re-localizes the anchor against a map of the room it rebuilds every time
 and that map is not identical twice — light changes, furniture moves, people walk
 in. WebXR exposes nothing to sharpen it; it is the precision the runtime gives.
 Nudging it back is cheap, though, since a re-alignment only rewrites the offset.
+
+**State, as of 2026-08-21.** Verified on the headset: the room comes back on a
+reload, on a new session and after closing the browser, landing within a few
+centimetres. Re-aligning no longer creates an anchor. Not yet seen with our own
+eyes: `deletePersistentAnchor()` succeeding with a valid UUID — nothing has
+needed replacing since the sweep was written. The log says which it was, so
+whoever hits it first will know without going looking.
 
 Runtime limits, all of which fall back to the thumbsticks: **8** persistent
 anchors per site (we now create exactly 1, ever), none persist in **private
