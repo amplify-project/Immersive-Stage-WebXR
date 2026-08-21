@@ -356,7 +356,7 @@ async function handleAPI(req, res, pathname) {
     // terminal del PC, que es donde se está mirando de todas formas.
     if (pathname === '/api/arlog' && req.method === 'POST') {
       const { log } = await readBody(req);
-      console.log('\n[arlog] ── registro del ancla ' + '─'.repeat(40));
+      console.log('\n[arlog] ── anchor log ' + '─'.repeat(46));
       console.log(String(log || '').split('\n').map(l => '[arlog] ' + l).join('\n'));
       console.log('[arlog] ' + '─'.repeat(58) + '\n');
       return sendJSON(res, 200, { ok: true });
