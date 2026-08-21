@@ -98,13 +98,39 @@ are measured from the `local-floor` origin, which lands wherever the session
 started. Next launch that origin is somewhere else and the same `{x,z,yaw}` puts
 the room anywhere. They need a *physical* reference to hang off.
 
-The Quest Browser provides one. On releasing the grip the player also calls
-`frame.createAnchor()` at the room transform and `requestPersistentHandle()`,
+The Quest Browser provides one. The **first** time a room is aligned the player
+calls `frame.createAnchor()` at the room transform and `requestPersistentHandle()`,
 storing the returned UUID under `arAnchorId:<ar.venue|default>`. On the next AR
 session `restorePersistentAnchor()` returns an anchor **at the same real-world
 spot** — the headset re-localizes it against its own map of the room (the Space
 Setup the user already did) — and `followRoomAnchor()` drives `roomGroup` from
 its pose. So each headset is aligned by hand **once per room, ever**.
+
+The anchor is a *physical point of the room*, not the alignment. Where the scene
+sits with respect to that point is a separate thing, and it is the one that
+changes on every re-alignment: releasing the grip with an anchor already in place
+does **not** create another one, it recomputes the offset `{dx,dz,dyaw}` — the
+room read *from* the anchor — and stores it under `arAnchorOff:<ar.venue|default>`.
+`followRoomAnchor()` composes anchor ∘ offset every frame and `saveRoomOffset()`
+is its exact inverse, so re-aligning costs three numbers in `localStorage`.
+
+Keeping the two apart is not tidiness, it is what makes this usable at all. A site
+may hold **8 persistent anchors**, and one anchor per grip release burns that in a
+single afternoon of testing. With the quota full `requestPersistentHandle()` fails
+with `InvalidStateError: Maximum number of anchors reached!` and **the page cannot
+dig itself out**: on Quest `XRSession.persistentAnchors` returns the right number
+of entries with **empty UUIDs**, so `deletePersistentAnchor()` has nothing to
+delete and answers `OperationError` once per anchor. The [spec][anchors-spec]
+requires that list to carry the keys of the persistent-anchor map, so this looks
+like a browser bug — and note that [Meta's own documentation][meta-mr] documents
+neither of those two members, only `createAnchor`, `requestPersistentHandle` and
+`restorePersistentAnchor`. The only UUID that is ever usable is the one we stored
+ourselves when persisting.
+
+Recovery is documented by Meta: **clearing the site's history deletes the
+persistent anchors**. That clears `localStorage` too, so the room gets aligned one
+more time afterwards. Serving the player from another origin (a different port)
+also gives a fresh quota, at the same cost.
 
 This is also what makes several spectators share one mixed world without talking
 to each other: if every headset anchored once to the same physical spot, they all
@@ -118,10 +144,28 @@ origin, not the anchor, so the room stays put instead of jumping. Only X, Z and
 yaw are taken from the anchor — the 4-DoF argument above still holds, and
 inheriting a couple of degrees of anchor tilt would skew the room for nothing.
 
+Expect the room to land a few centimetres off from one session to the next. The
+headset re-localizes the anchor against a map of the room it rebuilds every time,
+and that map is not identical twice — light changes, furniture moves, people walk
+in. WebXR exposes nothing to sharpen it; it is the precision the runtime gives.
+Nudging it back is cheap, though, since a re-alignment only rewrites the offset.
+
 Runtime limits, all of which fall back to the thumbsticks: **8** persistent
-anchors per site (we use 1), none persist in **private mode**, and clearing the
-browser's site history deletes them. `?noanchor=1` forces the manual path for
-testing.
+anchors per site (we now create exactly 1, ever), none persist in **private
+mode**, and clearing the browser's site history deletes them. `?noanchor=1` forces
+the manual path for testing; `?resetanchors=1` deletes the site's anchors on
+entering AR — those with a usable UUID, which per the bug above may be none.
+
+**Reading what happened.** None of this is visible from inside the headset:
+`toast()` writes to the DOM and an immersive session does not compose the flat
+page, and there is no console either — which is why the first version of this
+feature reported every outcome to nobody. Each anchor step now goes to a sprite
+panel in front of the user (`arNotice()`, 4 s, reusing the `?arperf=1` panel) and
+to a log that is dumped into the page on exiting AR *and* POSTed to
+`/api/arlog`, which prints it in the terminal running `server.js`: granted
+features, the anchor list, the anchor pose, the offset and the full exception
+behind every failure. That is the loop that turned "it doesn't persist" into a
+one-line runtime bug.
 
 ### What's missing (partner work)
 
@@ -383,3 +427,6 @@ engine.setSourceParams({ distanceModel: 'inverse', refDistance: 1,
 engine.unbindStem('violin');
 ```
 | Player | `setupCloseups()` / `closeupRepByStem` and `shakaCloseup` are the multi-track + single-decoder pattern to build on. |
+
+[anchors-spec]: https://immersive-web.github.io/anchors/
+[meta-mr]: https://developers.meta.com/horizon/documentation/web/webxr-mixed-reality/
