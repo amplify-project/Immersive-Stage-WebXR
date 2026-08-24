@@ -20,6 +20,10 @@ let curManifestSrc = null;           // fuente en curso (recarga al entrar/salir
 let shakaAudio = null;
 let shakaCloseup = null;             // 3ª instancia Shaka: pista de close-up
 let shakaCfg   = null;               // config compartida (la fija loadDualShaka)
+// ¿Sabe el navegador avisar de cada fotograma nuevo? Chrome y el de la Quest sí.
+const HAS_RVFC = typeof HTMLVideoElement !== 'undefined' &&
+                 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+
 // RepresentationID del 360 en los manifests de stream.sh: mapea `-map 0:v:0`
 // primero, así que la esfera es siempre la 0 y los close-ups van del 1 en
 // adelante (ver "AdaptationSets dinámicos" en stream.sh).
@@ -156,7 +160,7 @@ function renderLoop() {
     applyRotation();
   }
   if (videoEl && videoEl.readyState >= 2) {
-    if (videoTexture) videoTexture.needsUpdate = true;
+    if (videoTexture && !HAS_RVFC) videoTexture.needsUpdate = true;
     updateProgress();
   }
   updateCloseupAnim();
@@ -785,11 +789,37 @@ async function loadDualShaka(src) {
   }
 }
 
+// Textura de vídeo que se sube SOLO cuando hay fotograma nuevo.
+//
+// El three que usamos es la r128, anterior a que VideoTexture conociera
+// requestVideoFrameCallback: su `update()` marca `needsUpdate` en CADA render
+// mientras el elemento tenga datos. Con un 360 de 24 fps eso significa subir a la
+// GPU la MISMA imagen de 8 Mpx 60 veces por segundo en escritorio y 90 dentro de
+// las gafas — más del doble del trabajo necesario, y todo en el hilo principal.
+//
+// Una Texture normal no se auto-marca, así que la marcamos nosotros desde rVFC,
+// que dispara exactamente una vez por fotograma presentado. Sin rVFC volvemos al
+// comportamiento de antes (lo marcan los bucles de render).
+function makeVideoTexture(el) {
+  const tex = new THREE.Texture(el);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;   // 8 Mpx: generar mipmaps por fotograma, ni de broma
+  tex.needsUpdate = true;
+  if (HAS_RVFC) {
+    const tick = () => {
+      if (tex.__stop) return;    // textura ya reemplazada: no resucitarla
+      tex.needsUpdate = true;
+      el.requestVideoFrameCallback(tick);
+    };
+    el.requestVideoFrameCallback(tick);
+  }
+  return tex;
+}
+
 function attachVideoTexture() {
-  if (videoTexture) videoTexture.dispose();
-  videoTexture = new THREE.VideoTexture(videoEl);
-  videoTexture.minFilter = THREE.LinearFilter;
-  videoTexture.magFilter = THREE.LinearFilter;
+  if (videoTexture) { videoTexture.__stop = true; videoTexture.dispose(); }
+  videoTexture = makeVideoTexture(videoEl);
   videoTexture.format = THREE.RGBFormat;
   sphere.material = new THREE.MeshBasicMaterial({ map: videoTexture });
 }
@@ -994,9 +1024,7 @@ async function setupCloseups(src) {
       console.warn('[closeup] este build de Shaka ignora manifest.disableAudio: ' +
                    'la 2ª instancia se bajará el Opus multicanal para tirarlo');
 
-    closeupTexture = new THREE.VideoTexture(closeupEl);
-    closeupTexture.minFilter = THREE.LinearFilter;
-    closeupTexture.magFilter = THREE.LinearFilter;
+    closeupTexture = makeVideoTexture(closeupEl);
     closeupMesh.material.map = closeupTexture;
     closeupMesh.material.needsUpdate = true;
 
@@ -1112,7 +1140,7 @@ function updateCloseupAnim() {
   const e = closeupFade * closeupFade * (3 - 2 * closeupFade);   // smoothstep
   closeupMesh.material.opacity = e;
   closeupMesh.scale.setScalar(CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e);
-  if (closeupTexture) closeupTexture.needsUpdate = true;
+  if (closeupTexture && !HAS_RVFC) closeupTexture.needsUpdate = true;
 }
 
 // Deja el close-up a cero de golpe, sin transición: cambio de manifest o entrada
@@ -1453,7 +1481,7 @@ async function enterXR() {
 
       // ── Actualizar textura vídeo ──────────────────
       if (videoEl && videoEl.readyState >= 2) {
-        if (videoTexture) videoTexture.needsUpdate = true;
+        if (videoTexture && !HAS_RVFC) videoTexture.needsUpdate = true;
       }
       updateCloseupAnim();
 
