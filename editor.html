@@ -47,6 +47,21 @@
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   a{color:var(--accent)}
   .small{font-size:11px;color:var(--muted)}
+  /* Explorador de ficheros del servidor */
+  .backdrop{position:fixed;inset:0;background:#000000cc;z-index:60;display:flex;align-items:center;justify-content:center;padding:20px}
+  .browser{background:var(--surface);border:1px solid #ffffff22;border-radius:10px;width:min(680px,100%);
+       max-height:min(560px,90vh);display:flex;flex-direction:column;overflow:hidden}
+  .browser header{padding:14px 16px;border-bottom:1px solid #ffffff12}
+  .browser .cwd{font-family:var(--mono);font-size:12px;color:var(--accent);word-break:break-all;margin-top:6px}
+  .browser .list{overflow:auto;flex:1;padding:6px}
+  .browser .it{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;cursor:pointer;
+       font-family:var(--mono);font-size:12px}
+  .browser .it:hover{background:var(--surface2)}
+  .browser .it .ic{width:16px;flex:none;text-align:center;color:var(--muted)}
+  .browser .it .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .browser .it .sz{flex:none;color:var(--muted);font-size:11px}
+  .browser .it.dir .nm{color:var(--text)} .browser .it.file .nm{color:var(--accent)}
+  .browser footer{padding:12px 16px;border-top:1px solid #ffffff12;display:flex;gap:10px;align-items:center}
 </style>
 </head>
 <body>
@@ -67,7 +82,12 @@
   <div class="card" id="vodSources">
     <h2>Sources (files)</h2>
     <label>360 video (equirectangular)</label>
-    <select id="video"></select>
+    <div class="row">
+      <select id="video"></select>
+      <button class="ghost" style="flex:0 0 auto"
+              title="Pick a file anywhere on the machine running the server and copy it into media/"
+              onclick="openBrowser()">Browse…</button>
+    </div>
     <div class="row">
       <div>
         <label>Ambisonic bed (FOA · 4 channels)</label>
@@ -269,6 +289,24 @@
   </div>
 </div>
 
+<div class="backdrop" id="browser" style="display:none" onclick="if(event.target===this)closeBrowser()">
+  <div class="browser">
+    <header>
+      <b style="font-size:13px">Pick a 360 video</b>
+      <p class="small" style="margin-top:4px">Files on the machine running the server. The one you pick is copied into <code>media/</code>.</p>
+      <div class="cwd" id="brCwd">…</div>
+    </header>
+    <div class="list" id="brList"></div>
+    <footer>
+      <button class="ghost" id="brUp" onclick="browseTo(brParent)">↑ Up</button>
+      <button class="ghost" onclick="browseTo(brHome)">Home</button>
+      <button class="ghost" onclick="browseTo(brMediaDir)">media/</button>
+      <span class="small" id="brNote" style="flex:1;text-align:right"></span>
+      <button class="ghost" onclick="closeBrowser()">Cancel</button>
+    </footer>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -345,6 +383,91 @@ function setMode(m) {
     ? 'Each musician maps to a channel of the multichannel audio. The order = output channel order; set the position on the radar.'
     : 'Drag the dots on the radar to place each musician. Optionally pick a close-up video per musician (extra video track, synced).';
   renderStems();
+}
+
+// ── Explorador de ficheros del servidor ──────────────────────────────────────
+//
+// El desplegable solo ofrece lo que hay en media/, que es donde el server busca
+// y lo único que una escena sabe nombrar. Esto permite señalar un fichero de
+// cualquier sitio y traérselo.
+//
+// No es un <input type="file"> a propósito: ese elige en la máquina del
+// NAVEGADOR, y como el vídeo tiene que acabar donde está ffmpeg, habría que
+// subir 300 MB por HTTP para dejarlos en la carpeta de al lado. Aquí solo viaja
+// la ruta, y la copia la hace quien ya tiene el fichero delante — que además es
+// coherente con los dispositivos de captura, que también se enumeran allí.
+let brParent = null, brHome = null, brMediaDir = null, brBusy = false;
+
+function openBrowser() {
+  $('browser').style.display = 'flex';
+  browseTo(null);                        // sin ruta: el server arranca en $HOME
+}
+function closeBrowser() { $('browser').style.display = 'none'; }
+
+// Los nombres vienen del disco: un fichero puede llamarse `a<b> & c.mp4` y sin
+// escapar rompería la lista. La ruta va por JSON.stringify, que ya cita y escapa
+// lo suyo, y luego &quot; para que sobreviva dentro del atributo.
+const brEsc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const brArg = p => JSON.stringify(p).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+const brSize = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB'
+                  : b >= 1e6 ? (b / 1e6).toFixed(0) + ' MB'
+                  : (b / 1e3).toFixed(0) + ' kB';
+
+async function browseTo(dir) {
+  if (brBusy) return;
+  const list = $('brList');
+  list.innerHTML = '<p class="small" style="padding:10px">Reading…</p>';
+  let d;
+  try {
+    d = await fetch('/api/browse' + (dir ? '?dir=' + encodeURIComponent(dir) : ''))
+              .then(r => r.json());
+  } catch (e) { d = { error: e.message }; }
+  if (d.error) {
+    list.innerHTML = `<p class="small" style="padding:10px;color:var(--bad)">${brEsc(d.error)}</p>`;
+    return;
+  }
+  brParent = d.parent; brHome = d.home; brMediaDir = d.mediaDir;
+  $('brCwd').textContent = d.path;
+  $('brUp').disabled = !d.parent;
+  $('brNote').textContent = d.truncated ? 'showing the first 500' : '';
+
+  // Solo vídeos: el bed y los stems se eligen en sus propios desplegables, y
+  // ofrecer aquí un .wav solo sirve para que alguien lo elija por error.
+  const vids = (d.files || []).filter(f => f.kind === 'video');
+  const rows = (d.dirs || []).map(x =>
+      `<div class="it dir" onclick="browseTo(${brArg(x.path)})">` +
+      `<span class="ic">▸</span><span class="nm">${brEsc(x.name)}</span></div>`)
+    .concat(vids.map(f =>
+      `<div class="it file" onclick="importFile(${brArg(f.path)})">` +
+      `<span class="ic">▪</span><span class="nm">${brEsc(f.name)}</span>` +
+      `<span class="sz">${brSize(f.size)}</span></div>`));
+  list.innerHTML = rows.join('') ||
+    '<p class="small" style="padding:10px">Nothing here — no subfolders and no video files.</p>';
+}
+
+// Copiar y quedarse con él. La copia puede tardar (son gigabytes), así que la
+// lista se bloquea mientras tanto en vez de dejar pinchar otro fichero encima.
+async function importFile(src) {
+  if (brBusy) return;
+  brBusy = true;
+  $('brList').innerHTML = '<p class="small" style="padding:10px">Copying into media/…</p>';
+  let r;
+  try {
+    r = await fetch('/api/media/import', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                           body: JSON.stringify({ src }) }).then(x => x.json());
+  } catch (e) { r = { error: e.message }; }
+  brBusy = false;
+  if (r.error) { toast('Could not copy: ' + r.error); browseTo(brParent || null); return; }
+
+  // Releer media/ para que el fichero nuevo exista en TODOS los desplegables,
+  // no solo en el del 360: el mismo vídeo puede acabar siendo un close-up.
+  const m = await fetch('/api/media').then(x => x.json()).catch(() => ({ media: [] }));
+  media = m.media || [];
+  scene.video = r.file;
+  buildSelectors();
+  closeBrowser();
+  toast(r.copied ? `Copied to ${r.file}` : `Already in media/: ${r.file}`);
 }
 
 function buildSelectors() {

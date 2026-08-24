@@ -1,6 +1,7 @@
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn, execFile } = require('child_process');
 
@@ -146,6 +147,30 @@ function probeChannels(file) {
   });
 }
 
+// Cuántas entradas devuelve /api/browse por carpeta. Un directorio con miles de
+// ficheros no se navega en un desplegable, y mandarlo entero solo sirve para
+// hacer esperar al navegador.
+const BROWSE_MAX = 500;
+
+// Destino libre dentro de media/ para un fichero llamado `base`.
+//
+// Si ya hay uno con ese nombre y el MISMO tamaño damos por hecho que es el mismo
+// fichero y se reutiliza: la alternativa es duplicar medios de gigabytes cada vez
+// que alguien vuelve a elegir el mismo vídeo. Si el tamaño no cuadra es OTRO
+// fichero que se llama igual, y entonces se numera — machacar un medio que ya
+// está en una escena sería estropear el trabajo de alguien sin preguntar.
+function destInMedia(base, size) {
+  const ext  = path.extname(base);
+  const stem = base.slice(0, base.length - ext.length);
+  for (let n = 1; n < 1000; n++) {
+    const name = n === 1 ? base : `${stem}-${n}${ext}`;
+    const full = path.join(MEDIA_DIR, name);
+    let st; try { st = fs.statSync(full); } catch (_) { return { full, name, exists: false }; }
+    if (st.isFile() && st.size === size) return { full, name, exists: true };
+  }
+  throw new Error(`demasiados ficheros llamados ${base} en media/`);
+}
+
 async function listMedia() {
   let files = [];
   try { files = fs.readdirSync(MEDIA_DIR); } catch (_) {}
@@ -235,6 +260,97 @@ async function handleAPI(req, res, pathname) {
     // ── Medios disponibles ──────────────────────────────────────────────────
     if (pathname === '/api/media' && req.method === 'GET') {
       return sendJSON(res, 200, { media: await listMedia() });
+    }
+
+    // ── Explorador de ficheros DE LA MÁQUINA DEL SERVER ─────────────────────
+    //  Mismo principio que /api/devices: el editor puede estar en otro equipo,
+    //  pero lo que se va a encodear tiene que estar donde está ffmpeg. Un
+    //  <input type="file"> elige en la máquina del NAVEGADOR, así que para dejar
+    //  un vídeo en la carpeta de al lado habría que subirlo entero por HTTP;
+    //  aquí solo viaja la ruta y la copia la hace quien tiene el fichero al lado.
+    //
+    //  Esto enseña el árbol de directorios a quien alcance el editor. Es el mismo
+    //  trato que ya hay con /api/encode (que lanza ffmpeg) y /api/devices: este
+    //  backend asume una red de confianza y no debe exponerse a internet.
+    if (pathname === '/api/browse' && req.method === 'GET') {
+      const q = new URL(req.url, 'http://x').searchParams.get('dir');
+      const dir = q ? path.resolve(q) : os.homedir();
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch (e) { return sendJSON(res, 400, { error: `No se puede leer ${dir}: ${e.code || e.message}` }); }
+
+      const dirs = [], files = [];
+      for (const d of entries) {
+        if (d.name.startsWith('.')) continue;
+        const full = path.join(dir, d.name);
+        // Por stat y no por dirent: un enlace simbólico dice "symlink", no si
+        // lleva a una carpeta o a un vídeo. Lo que no se pueda mirar (roto, sin
+        // permiso) simplemente no aparece, que es mejor que romper el listado.
+        let st; try { st = fs.statSync(full); } catch (_) { continue; }
+        if (st.isDirectory()) { dirs.push({ name: d.name, path: full }); continue; }
+        if (!st.isFile()) continue;
+        const ext = path.extname(d.name).toLowerCase();
+        const kind = VIDEO_EXT.includes(ext) ? 'video' : AUDIO_EXT.includes(ext) ? 'audio' : null;
+        if (!kind) continue;              // solo medios: lo demás no se puede encodear
+        files.push({ name: d.name, path: full, kind, size: st.size });
+      }
+      const cmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
+      dirs.sort(cmp); files.sort(cmp);
+
+      const parent = path.dirname(dir);
+      return sendJSON(res, 200, {
+        path: dir,
+        parent: parent === dir ? null : parent,   // en la raíz no hay "subir"
+        home: os.homedir(),
+        mediaDir: MEDIA_DIR,
+        dirs: dirs.slice(0, BROWSE_MAX),
+        files: files.slice(0, BROWSE_MAX),
+        truncated: dirs.length > BROWSE_MAX || files.length > BROWSE_MAX,
+      });
+    }
+
+    // ── Traerse un medio a media/ ───────────────────────────────────────────
+    //  Se elige de cualquier sitio, pero solo se escribe aquí: es la carpeta que
+    //  lee listMedia() y la única ruta que las escenas saben nombrar.
+    if (pathname === '/api/media/import' && req.method === 'POST') {
+      const { src } = await readBody(req);
+      if (!src) return sendJSON(res, 400, { error: 'Falta src' });
+      const from = path.resolve(src);
+
+      let st; try { st = fs.statSync(from); }
+      catch (_) { return sendJSON(res, 404, { error: `No existe: ${from}` }); }
+      if (!st.isFile()) return sendJSON(res, 400, { error: 'No es un fichero' });
+
+      const ext = path.extname(from).toLowerCase();
+      if (!VIDEO_EXT.includes(ext) && !AUDIO_EXT.includes(ext))
+        return sendJSON(res, 400, { error: `Extensión no admitida: ${ext || '(sin extensión)'}` });
+
+      // Ya está dentro: no se copia nada. Pasa en cuanto alguien navega hasta la
+      // propia media/ desde el explorador, que es lo más natural del mundo.
+      if (from.startsWith(MEDIA_DIR + path.sep)) {
+        const name = path.basename(from);
+        return sendJSON(res, 200, { ok: true, file: 'media/' + name, name, size: st.size, copied: false });
+      }
+
+      // El nombre sale del origen, pero limpio: sin separadores (no queremos que
+      // el nombre invente subcarpetas) y sin puntos delante (listMedia() los
+      // salta, así que el fichero se copiaría para no aparecer luego en la lista).
+      const base = path.basename(from).replace(/[/\\]/g, '_').replace(/^\.+/, '') || ('media' + ext);
+      try {
+        const dest = destInMedia(base, st.size);
+        if (!dest.exists) {
+          fs.mkdirSync(MEDIA_DIR, { recursive: true });
+          // COPYFILE_FICLONE: en Btrfs/XFS esto es un reflink —instantáneo y sin
+          // ocupar el doble— y en el resto degrada a una copia normal.
+          await fs.promises.copyFile(from, dest.full, fs.constants.COPYFILE_FICLONE);
+        }
+        console.log(`[media] ${dest.exists ? 'ya estaba' : 'copiado'}: ${from} → media/${dest.name}` +
+                    ` (${(st.size / 1e6).toFixed(1)} MB)`);
+        return sendJSON(res, 200, { ok: true, file: 'media/' + dest.name, name: dest.name,
+                                    size: st.size, copied: !dest.exists });
+      } catch (e) {
+        return sendJSON(res, 500, { error: `No se pudo copiar: ${e.message}` });
+      }
     }
 
     // ── Dispositivos de captura para LIVE (v4l2 + ALSA) ─────────────────────

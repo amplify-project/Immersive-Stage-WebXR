@@ -76,6 +76,13 @@ Open in the browser:
 
 1. **Sources**: pick the 360 video, the FOA bed (4 channels) and its format
    (*FuMa* or *AmbiX*).
+   The dropdown only offers what is in `media/`, which is the folder the server
+   reads and the only path a scene can name. **Browse…** next to the 360 video
+   opens the filesystem *of the machine running the server*, and whatever you
+   pick is copied into `media/` — it is not a browser file picker, because the
+   video has to end up where ffmpeg is, and uploading 300 MB over HTTP to land it
+   in the folder next door would be absurd. On Btrfs/XFS the copy is a reflink,
+   so it is instant and takes no extra space.
    The bed must have **exactly 4 channels**, and channel *i* must be ambisonic
    component *i* — nothing downstream can tell otherwise. Video editors happily
    export a B-format take as 7.1 with every channel duplicated. Check and extract
@@ -284,6 +291,8 @@ docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 | Route | Method | Description |
 |-------|--------|-------------|
 | `/api/media` | GET | List `media/` with type and channel count |
+| `/api/browse` | GET `?dir=` | List one directory **on the machine running the server** — subfolders and media files only. Defaults to `$HOME`, capped at 500 entries per kind |
+| `/api/media/import` | POST `{src}` | Copy a media file from anywhere on that machine into `media/`. Same name and size → reuses it; same name, different size → numbers it; already inside `media/` → no copy |
 | `/api/scene` | GET/POST | Read / save `scene.json` |
 | `/api/encode` | POST `{mode}` | Launch `stream.sh` (`vod`\|`live`) |
 | `/api/proxy` | POST `{src,scale}` | Transcode a lightweight 8-bit proxy |
