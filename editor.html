@@ -86,12 +86,16 @@
       <select id="video"></select>
       <button class="ghost" style="flex:0 0 auto"
               title="Pick a file anywhere on the machine running the server and copy it into media/"
-              onclick="openBrowser()">Browse…</button>
+              onclick="openBrowser('video')">Browse…</button>
     </div>
     <div class="row">
       <div>
         <label>Ambisonic bed (FOA · 4 channels)</label>
-        <select id="bed"></select>
+        <div class="row">
+          <select id="bed"></select>
+          <button class="ghost" style="flex:0 0 auto" title="Pick a bed from anywhere on the server machine"
+                  onclick="openBrowser('bed')">Browse…</button>
+        </div>
       </div>
       <div style="flex:0 0 130px">
         <label>Format</label>
@@ -205,6 +209,8 @@
     <div class="row" id="addStemRow">
       <select id="addStem"><option value="">+ add stem…</option></select>
       <button class="ghost" style="flex:0 0 auto" onclick="addSelectedStem()">Add</button>
+      <button class="ghost" style="flex:0 0 auto" title="Pick a stem from anywhere on the server machine and add it"
+              onclick="openBrowser('stem')">Browse…</button>
     </div>
     <button class="ghost" id="addMusicianBtn" style="display:none;width:100%" onclick="addLiveStem()">+ add musician (next channel)</button>
     <div id="stems" style="margin-top:10px"></div>
@@ -272,7 +278,12 @@
     <h2>Light proxy (for real-time live)</h2>
     <p class="hint">If the source is 4K/HEVC, live won't reach 1×. Create an 8-bit proxy that decodes cheaply.</p>
     <div class="row">
-      <div><label>Source</label><select id="proxySrc"></select></div>
+      <div><label>Source</label>
+        <div class="row">
+          <select id="proxySrc"></select>
+          <button class="ghost" style="flex:0 0 auto" onclick="openBrowser('proxy')">Browse…</button>
+        </div>
+      </div>
       <div style="flex:0 0 120px"><label>Scale</label><input type="text" id="proxyScale" value="1920:960"></div>
     </div>
     <button class="alt" style="margin-top:10px" onclick="makeProxy()">Create proxy</button>
@@ -292,7 +303,7 @@
 <div class="backdrop" id="browser" style="display:none" onclick="if(event.target===this)closeBrowser()">
   <div class="browser">
     <header>
-      <b style="font-size:13px">Pick a 360 video</b>
+      <b style="font-size:13px" id="brTitle">Pick a file</b>
       <p class="small" style="margin-top:4px">Files on the machine running the server. The one you pick is copied into <code>media/</code>.</p>
       <div class="cwd" id="brCwd">…</div>
     </header>
@@ -396,9 +407,28 @@ function setMode(m) {
 // subir 300 MB por HTTP para dejarlos en la carpeta de al lado. Aquí solo viaja
 // la ruta, y la copia la hace quien ya tiene el fichero delante — que además es
 // coherente con los dispositivos de captura, que también se enumeran allí.
+//
+// Cada botón nombra un DESTINO en vez de pasar una función: los del 360, el bed
+// y el proxy son estáticos, pero el del close-up vive dentro de la fila del
+// músico, que se genera con una plantilla — meter ahí una función suelta sería
+// escapar comillas dentro de un onclick dentro de un template string.
+const BROWSE = {
+  video:   { kind: 'video', title: 'Pick a 360 video',        apply: f => { scene.video = f; } },
+  bed:     { kind: 'audio', title: 'Pick an ambisonic bed',   apply: f => { scene.bed = f; } },
+  stem:    { kind: 'audio', title: 'Pick a stem',             apply: f => addStemFile(f) },
+  // El proxy es el único que no vive en la escena: es un campo del formulario, y
+  // buildSelectors() lo repone a scene.video cada vez que corre. Por eso se
+  // escribe DESPUÉS de repoblar, o la elección se pisaría a sí misma.
+  proxy:   { kind: 'video', title: 'Pick a source video',     after: f => { $('proxySrc').value = f; } },
+  closeup: { kind: 'video', title: 'Pick a close-up video',
+             apply: (f, i) => { scene.stems[i].closeup = f; renderStems(); } },
+};
 let brParent = null, brHome = null, brMediaDir = null, brBusy = false;
+let brTarget = null, brArgv = null;
 
-function openBrowser() {
+function openBrowser(target, arg) {
+  brTarget = BROWSE[target]; brArgv = arg;
+  $('brTitle').textContent = brTarget.title;
   $('browser').style.display = 'flex';
   browseTo(null);                        // sin ruta: el server arranca en $HOME
 }
@@ -432,9 +462,9 @@ async function browseTo(dir) {
   $('brUp').disabled = !d.parent;
   $('brNote').textContent = d.truncated ? 'showing the first 500' : '';
 
-  // Solo vídeos: el bed y los stems se eligen en sus propios desplegables, y
-  // ofrecer aquí un .wav solo sirve para que alguien lo elija por error.
-  const vids = (d.files || []).filter(f => f.kind === 'video');
+  // Solo el tipo que pide quien ha abierto el explorador: ofrecer un .wav donde
+  // se busca un vídeo solo sirve para que alguien lo elija por error.
+  const vids = (d.files || []).filter(f => f.kind === brTarget.kind);
   const rows = (d.dirs || []).map(x =>
       `<div class="it dir" onclick="browseTo(${brArg(x.path)})">` +
       `<span class="ic">▸</span><span class="nm">${brEsc(x.name)}</span></div>`)
@@ -460,12 +490,15 @@ async function importFile(src) {
   brBusy = false;
   if (r.error) { toast('Could not copy: ' + r.error); browseTo(brParent || null); return; }
 
-  // Releer media/ para que el fichero nuevo exista en TODOS los desplegables,
-  // no solo en el del 360: el mismo vídeo puede acabar siendo un close-up.
+  // Releer media/ ANTES de aplicar: addStemFile() busca el fichero en `media`
+  // para sacarle el nombre, y acaba de llegar. Y así el fichero nuevo aparece en
+  // TODOS los desplegables, no solo en el que lo pidió — el mismo vídeo puede
+  // acabar siendo el 360 de una escena y el close-up de otra.
   const m = await fetch('/api/media').then(x => x.json()).catch(() => ({ media: [] }));
   media = m.media || [];
-  scene.video = r.file;
-  buildSelectors();
+  brTarget.apply?.(r.file, brArgv);   // el modelo, antes de repoblar
+  buildSelectors();                   // los desplegables, desde el media/ nuevo
+  brTarget.after?.(r.file, brArgv);   // y lo que repoblar acabe de pisar
   closeBrowser();
   toast(r.copied ? `Copied to ${r.file}` : `Already in media/: ${r.file}`);
 }
@@ -589,13 +622,18 @@ function bindControls() {
 // ── Stems ───────────────────────────────────────────────────────────────────
 function addSelectedStem() {
   const file = $('addStem').value; if (!file) return;
+  addStemFile(file);
+  $('addStem').value = '';
+}
+
+// Añadir un stem por su ruta en media/, venga del desplegable o del explorador.
+function addStemFile(file) {
   const m = media.find(x=>x.file===file);
   const name = (m?m.name:'stem').replace(/\.[^.]+$/,'').split(/[\s_-]/)[0].toUpperCase();
   // default azimuth: spread across the front
   const n = scene.stems.length;
   const az = Math.round(-50 + (n*20));
   scene.stems.push({ file, name, azimuthDeg: Math.max(-160,Math.min(160,az)), elevationDeg: 0 });
-  $('addStem').value = '';
   selected = scene.stems.length-1;
   renderStems(); drawRadar(); syncSelPanel();
 }
@@ -638,7 +676,9 @@ function renderStems() {
              onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=+this.value">` : ''}
       ${!live ? `<select title="Close-up video (Case B)" style="flex:0 0 130px"
              onclick="event.stopPropagation()"
-             onchange="scene.stems[${i}].closeup=this.value||undefined">${videoOptionsHTML(s.closeup)}</select>` : ''}
+             onchange="scene.stems[${i}].closeup=this.value||undefined">${videoOptionsHTML(s.closeup)}</select>
+      <button class="ghost" style="flex:0 0 auto;padding:4px 8px" title="Pick a close-up from anywhere on the server machine"
+             onclick="event.stopPropagation();openBrowser('closeup',${i})">…</button>` : ''}
       <span class="az">${Math.round(s.azimuthDeg)}°/${Math.round(s.elevationDeg||0)}°</span>
       <span class="x" onclick="event.stopPropagation();removeStem(${i})">✕</span>
     </div>`).join('') || '<p class="small">No stems. Add musicians above.</p>';

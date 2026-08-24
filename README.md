@@ -76,13 +76,16 @@ Open in the browser:
 
 1. **Sources**: pick the 360 video, the FOA bed (4 channels) and its format
    (*FuMa* or *AmbiX*).
-   The dropdown only offers what is in `media/`, which is the folder the server
-   reads and the only path a scene can name. **Browse…** next to the 360 video
-   opens the filesystem *of the machine running the server*, and whatever you
-   pick is copied into `media/` — it is not a browser file picker, because the
-   video has to end up where ffmpeg is, and uploading 300 MB over HTTP to land it
-   in the folder next door would be absurd. On Btrfs/XFS the copy is a reflink,
-   so it is instant and takes no extra space.
+   The dropdowns only offer what is in `media/`, which is the folder the server
+   reads and the only path a scene can name. **Browse…** opens the filesystem *of
+   the machine running the server*, and whatever you pick is copied into `media/`
+   — it is not a browser file picker, because the file has to end up where ffmpeg
+   is, and uploading 300 MB over HTTP to land it in the folder next door would be
+   absurd. On Btrfs/XFS the copy is a reflink, so it is instant and takes no extra
+   space. There is one next to every source: the **360 video**, the **bed**, the
+   **stem** adder (it browses audio and adds the musician in one go), the
+   **proxy** source, and a compact `…` on each musician row for their
+   **close-up**. Each one only lists the kind it can use.
    The bed must have **exactly 4 channels**, and channel *i* must be ambisonic
    component *i* — nothing downstream can tell otherwise. Video editors happily
    export a B-format take as 7.1 with every channel duplicated. Check and extract
@@ -262,6 +265,11 @@ musician + zoom in**, their stem appears from its position.
   over MSE (default 10, from `encoded10/`). Handy to validate a Quest.
 - **`make-channel-test.sh`** / **`make-stem-demo.sh`** — generate test manifests
   (audio-only N-channel / video + FOA + tones).
+- **`tools/browse-targets.test.mjs`** — checks the editor's *Browse…* buttons
+  without a browser or a server: that every button names a real target, that each
+  one lists only the kind it can use, and what each leaves behind once the file
+  has been copied. It lifts the functions out of `editor.html` by text, so it
+  cannot drift from what ships: `node tools/browse-targets.test.mjs`.
 
 ---
 
