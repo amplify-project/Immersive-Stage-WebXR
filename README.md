@@ -255,6 +255,11 @@ musician + zoom in**, their stem appears from its position.
   over MSE (default 10, from `encoded10/`). Handy to validate a Quest.
 - **`make-channel-test.sh`** / **`make-stem-demo.sh`** — generate test manifests
   (audio-only N-channel / video + FOA + tones).
+- **`tools/closeup-transition.test.mjs`** / **`tools/sphere-track.test.mjs`** —
+  run the close-up logic without a headset or a browser. They lift the real
+  functions out of `player.js` by text, so they cannot drift from what ships:
+  `node tools/closeup-transition.test.mjs`. The second one checks track selection
+  against the manifest actually sitting in `encoded/`.
 
 ### Debug flags (player URL)
 
@@ -285,6 +290,7 @@ meshes/                 Musician .glb models for AR (git-ignored but test-figure
 docs/architecture.md    Dev guide: how the pieces fit + how to extend
 docs/core-api.md        Engine API + AR mode + close-up multi-track reference
 docs/musician-meshes.md 3D models per musician in AR: sizing, editor, upload
+docs/closeup-panel.md   Close-up panel: transition, preload, sphere-track trap
 tools/docs-bundle.sh    Concatenate every doc into one file (for NotebookLM etc.)
 docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 ```

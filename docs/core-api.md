@@ -244,15 +244,23 @@ The `/api/encode` VOD path collects `scene.stems[*].closeup` (in order) into the
 
 - A **third Shaka instance** (`shakaCloseup`) loads the same manifest and plays
   the selected close-up track onto a **floating plane** in front of the camera
-  (works on desktop and in XR; the plane is a child of the camera).
+  (works on desktop and in XR; the plane is a child of the camera). It runs with
+  `manifest.disableAudio` and pinned to a close-up track, so it neither
+  re-downloads the multichannel Opus nor risks decoding the 4K a second time.
 - `setupCloseups()` detects the extra video tracks and builds the
   **stem → `RepresentationID`** map (stems with a close-up get `1..N` in order,
   matching `stream.sh`).
-- Each frame, `updateCloseupFocus()` calls `engine.getFocusedStem()` and shows
-  the focused musician's close-up (look + zoom). It's hidden in AR mode.
+- `updateCloseupFocus()` picks the musician from `engine.getFocusedStem()` (look
+  + zoom) and `updateCloseupAnim()`, once per rendered frame, brings the panel in
+  and out. It is hidden in AR mode.
 - The close-up element is kept in sync via `currentTime`/`playbackRate` like the
   audio element. Fully **backward-compatible**: a manifest with no close-up tracks
   does nothing.
+
+> ⚠️ Extra video `AdaptationSet`s change how Shaka chooses the **sphere's** track:
+> it picks by bandwidth even with ABR off, and the 4K loses. `pinSphereTrack()`
+> has to run after every manifest load. That, the transition, the preload and the
+> thresholds are all in **[`closeup-panel.md`](closeup-panel.md)**.
 
 ### `scene.json` additions
 

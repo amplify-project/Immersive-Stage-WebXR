@@ -26,6 +26,7 @@ DOCS=(
   docs/architecture.md
   docs/core-api.md
   docs/musician-meshes.md
+  docs/closeup-panel.md
   docs/telemetry.md
   docs/live-editor-tutorial.md
   docs/produccion-hardware.md
