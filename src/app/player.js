@@ -23,8 +23,35 @@ let shakaCfg   = null;               // config compartida (la fija loadDualShaka
 // Close-ups (Caso B): plano flotante con el vídeo del músico enfocado.
 let closeupTexture = null, closeupMesh = null;
 let closeupReady = false;            // hay pistas de close-up en el manifest
-let closeupStem  = -1;               // stem mostrado ahora (-1 = ninguno)
+let closeupStem  = -1;               // stem cuya PISTA está seleccionada (-1 = ninguna)
+let closeupWant  = -1;               // stem que pide el foco: destino de la transición
+let closeupArmed = -1;               // stem precargado: decodificando pero aún sin verse
+let closeupArmCand = -1;             // candidato a precargar, aún sin cumplir la espera
+let closeupArmSince = 0;             // desde cuándo es el candidato (performance.now)
+let closeupFade  = 0;                // 0..1, cuánto ha entrado el panel
+let closeupLastT = 0;                // reloj de la transición (performance.now, ms)
 let closeupRepByStem = {};           // índice de stem → RepresentationID del MPD
+
+// Transición del close-up: ni aparece ni desaparece de golpe. Entra subiendo
+// opacidad y escala a la vez —el panel "se acerca" en vez de encenderse— y sale
+// por el mismo camino. Un cuarto de segundo es suficiente para que no dé un
+// respingo y poco para que no llegue tarde a lo que estás mirando.
+const CLOSEUP_FADE_S   = 0.25;
+const CLOSEUP_SCALE_IN = 0.92;       // escala con la que entra y a la que se va
+
+// Histéresis del foco: hace falta un peso de ENTER para sacar el panel, pero
+// basta EXIT para mantenerlo. Con un solo umbral, un peso que oscile alrededor
+// de él enciende y apaga el close-up cada pocos frames, y la mirada oscila
+// siempre: nadie sostiene la cabeza tan quieta.
+const CLOSEUP_ENTER = 0.35;
+const CLOSEUP_EXIT  = 0.20;
+
+// Y el candidato a PRECARGAR no se acepta hasta que se sostiene. La mirada roza
+// el umbral sin parar, y cada cambio de armado es un pause/play sobre el
+// elemento de vídeo —y, si la pista llevaba parada más de medio segundo, además
+// un salto de currentTime, que vacía el decodificador. A 60 Hz eso no es
+// precargar: es una tormenta que tira la reproducción entera.
+const CLOSEUP_ARM_DWELL_S = 0.4;
 let engine     = null;               // ImmersiveAudioEngine (motor de audio)
 let audioCtx   = null, gainNode = null;  // referencias derivadas del engine
 let xrSession  = null;
@@ -95,7 +122,7 @@ function initThree() {
   // hasta que se enfoca a un músico que tenga close-up.
   closeupMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(2.0, 1.125),
-    new THREE.MeshBasicMaterial({ transparent: true, depthTest: false }));
+    new THREE.MeshBasicMaterial({ transparent: true, depthTest: false, opacity: 0 }));
   closeupMesh.position.set(0, 0, -2.5);
   closeupMesh.renderOrder = 999;       // por encima de la esfera 360
   closeupMesh.visible = false;
@@ -127,7 +154,7 @@ function renderLoop() {
     if (videoTexture) videoTexture.needsUpdate = true;
     updateProgress();
   }
-  if (closeupReady && closeupMesh.visible && closeupTexture) closeupTexture.needsUpdate = true;
+  updateCloseupAnim();
   updateAmbiViz();
   updateSpotLog();
   renderer.render(scene, camera);
@@ -432,8 +459,8 @@ async function startManifest(src) {
   if (shakaVideo) { try { await shakaVideo.destroy(); } catch(e){} shakaVideo = null; }
   if (shakaAudio) { try { await shakaAudio.destroy(); } catch(e){} shakaAudio = null; }
   if (shakaCloseup) { try { await shakaCloseup.destroy(); } catch(e){} shakaCloseup = null; }
-  closeupReady = false; closeupStem = -1; closeupRepByStem = {};
-  if (closeupMesh) closeupMesh.visible = false;
+  closeupReady = false; closeupRepByStem = {};
+  resetCloseup();
 
   videoEl.pause();
   audioEl.pause();
@@ -944,28 +971,118 @@ async function setupCloseups(src) {
   }
 }
 
-// Muestra el close-up del stem `idx` (o lo oculta con idx<0). Cambia la pista de
-// vídeo de shakaCloseup; al ser el mismo manifest, sigue sincronizado.
+// ¿Tiene este stem una pista de close-up? Mira solo el mapa, no el manifest: se
+// pregunta en cada frame y `getVariantTracks()` construye un array cada vez.
+function closeupCanShow(idx) {
+  return idx >= 0 && closeupReady && closeupRepByStem[idx] != null;
+}
+
+// Pide el close-up del stem `idx` (o pide ocultarlo con idx<0). Aquí no se
+// conmuta nada: solo se deja el destino, y la transición lo alcanza en
+// updateCloseupAnim(). Un stem sin pista en el manifest equivale a no pedir nada.
 function showCloseup(idx) {
-  if (idx === closeupStem) return;          // sin cambios
-  closeupStem = idx;
-  const hide = () => { closeupMesh.visible = false; closeupEl.pause(); };
-  if (idx < 0 || !closeupReady) return hide();
+  closeupWant = closeupCanShow(idx) ? idx : -1;
+}
+
+// Conmuta la pista de vídeo de shakaCloseup al stem `idx`; al ser el mismo
+// manifest que el 360, sigue sincronizado. Solo se llama con el panel a cero:
+// cambiar el contenido a media opacidad se vería como un corte.
+function selectCloseupTrack(idx) {
+  closeupStem = -1;
+  if (!closeupCanShow(idx)) return closeupEl.pause();
   const repId = closeupRepByStem[idx];
-  if (repId == null) return hide();
   const v = shakaCloseup.getVariantTracks().find(t => t.originalVideoId === repId);
-  if (!v) return hide();
-  shakaCloseup.selectVariantTrack(v, /*clearBuffer*/ true);
-  closeupEl.currentTime = videoEl.currentTime;
+  if (!v) {
+    // No debería pasar: el mapa se construye a partir del propio manifest. Si
+    // pasa, hay que borrarlo o lo reintentaríamos en CADA frame para siempre.
+    console.warn(`[closeup] el stem ${idx} apunta a la Representation ${repId}, ` +
+                 'que no está en el manifest');
+    delete closeupRepByStem[idx];
+    return closeupEl.pause();
+  }
+  // Reseleccionar la pista que ya está activa cuesta un `clearBuffer` y volver a
+  // bajarse el segmento: justo lo que estamos intentando ahorrar.
+  if (!v.active) shakaCloseup.selectVariantTrack(v, /*clearBuffer*/ true);
+  // Y saltar cuando ya se está en el sitio deja al elemento en `seeking` y para
+  // la imagen sin necesidad. Mismo margen que el lazo de sync.
+  if (Math.abs(closeupEl.currentTime - videoEl.currentTime) > 0.5)
+    closeupEl.currentTime = videoEl.currentTime;
   closeupEl.play().catch(() => {});
-  closeupMesh.visible = true;
+  closeupStem = idx;
+}
+
+// Avanza la transición un frame y refresca la textura. Vive en los DOS bucles de
+// render, no en el foco: el panel tiene que terminar de irse aunque el foco deje
+// de actualizarse —al entrar en AR, o cuando no hay pose— y no quedarse
+// congelado a medio fundido delante de la cara.
+function updateCloseupAnim() {
+  if (!closeupMesh) return;
+  const now = performance.now();
+  // Un dt sin tope convierte cualquier pausa (pestaña de fondo, carga larga) en
+  // un salto: mejor que la transición se coma un frame largo a que se salte.
+  const dt = closeupLastT ? Math.min((now - closeupLastT) / 1000, 0.1) : 0;
+  closeupLastT = now;
+
+  // La pista que queremos DECODIFICANDO no es la que queremos ver. Con el panel
+  // fuera cargamos ya la del candidato —el que la mirada roza pero todavía no ha
+  // ganado—, para que cuando gane no empiece por bajarse un segmento entero. Con
+  // segmentos de 6 s esa descarga es la mayor parte de lo que se tarda en
+  // aparecer, y sucede justo mientras el espectador sigue haciendo zoom.
+  const load = closeupWant >= 0 ? closeupWant : closeupArmed;
+  if (closeupFade <= 0 && closeupStem !== load) selectCloseupTrack(load);
+
+  // Si la pista está parada, que siga parada FUERA de cámara. El elemento se
+  // queda en pausa más a menudo de lo que parece: el salto de `currentTime`
+  // aborta el `play()` anterior, y Shaka no da imagen hasta llenar su colchón.
+  if (closeupStem >= 0 && closeupEl.paused && !videoEl.paused)
+    closeupEl.play().catch(() => {});
+
+  // No empezar a entrar hasta que la pista nueva tenga imagen Y esté corriendo:
+  // selectVariantTrack con clearBuffer más el salto de currentTime dejan unos
+  // frames sin decodificar, y el panel entraría con el fotograma congelado del
+  // músico ANTERIOR, que es justo el corte que este fundido viene a evitar. Solo
+  // condiciona el arranque: una vez dentro, un rebuffer no lo echa fuera y lo
+  // vuelve a meter, que se vería peor que un parón de medio segundo.
+  const fresh  = closeupEl.readyState >= 3 && !closeupEl.seeking && !closeupEl.paused;
+  const want   = closeupStem >= 0 && closeupStem === closeupWant;
+  const target = (want && (closeupFade > 0 || fresh)) ? 1 : 0;
+  const step   = dt / CLOSEUP_FADE_S;
+  closeupFade  = target > closeupFade ? Math.min(target, closeupFade + step)
+                                      : Math.max(target, closeupFade - step);
+
+  closeupMesh.visible = closeupFade > 0.001;
+  if (!closeupMesh.visible) return;
+  const e = closeupFade * closeupFade * (3 - 2 * closeupFade);   // smoothstep
+  closeupMesh.material.opacity = e;
+  closeupMesh.scale.setScalar(CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e);
+  if (closeupTexture) closeupTexture.needsUpdate = true;
+}
+
+// Deja el close-up a cero de golpe, sin transición: cambio de manifest o entrada
+// en AR, donde no hay nada que fundir porque la escena entera desaparece.
+function resetCloseup() {
+  closeupStem = -1; closeupWant = -1; closeupFade = 0;
+  closeupArmed = closeupArmCand = -1; closeupArmSince = 0;
+  if (closeupMesh) { closeupMesh.visible = false; closeupMesh.material.opacity = 0; }
 }
 
 // Selecciona el close-up del músico enfocado (mirada × zoom) o lo oculta. No
-// actúa en AR (allí ya te acercas al objeto 3D real). Barato: solo conmuta.
+// actúa en AR (allí ya te acercas al objeto 3D real). Barato: dos barridos de
+// los stems y una asignación; el trabajo de verdad lo hace la transición.
 function updateCloseupFocus() {
-  if (!closeupReady || arSession) return;
-  showCloseup(engine ? engine.getFocusedStem(0.3) : -1);
+  if (!closeupReady || arSession || !engine) { closeupArmed = -1; return showCloseup(-1); }
+  const enter = engine.getFocusedStem(CLOSEUP_ENTER);   // quién se lo gana de sobra
+  const stay  = engine.getFocusedStem(CLOSEUP_EXIT);    // quién manda con el listón bajo
+  // Cruzar EXIT no saca el panel, pero sí manda ir cargando esa pista... si el
+  // candidato se sostiene CLOSEUP_ARM_DWELL_S. Ver el comentario de la constante.
+  const cand = closeupCanShow(stay) ? stay : -1;
+  const now = performance.now();
+  if (cand !== closeupArmCand) { closeupArmCand = cand; closeupArmSince = now; }
+  if (closeupArmed !== cand && now - closeupArmSince >= CLOSEUP_ARM_DWELL_S * 1000)
+    closeupArmed = cand;
+  if (closeupWant < 0)                          showCloseup(enter);
+  else if (enter >= 0 && enter !== closeupWant) showCloseup(enter);   // otro se lo gana
+  else                                          showCloseup(stay === closeupWant ? closeupWant : -1);
 }
 
 // ══════════════════════════════════════════════════════
@@ -1281,7 +1398,7 @@ async function enterXR() {
       if (videoEl && videoEl.readyState >= 2) {
         if (videoTexture) videoTexture.needsUpdate = true;
       }
-      if (closeupReady && closeupMesh.visible && closeupTexture) closeupTexture.needsUpdate = true;
+      updateCloseupAnim();
 
       let hasPose = false;
       let yawDeg = 0;
@@ -2286,7 +2403,7 @@ async function enterAR() {
     document.getElementById('ar-btn').textContent = 'EXIT AR';
 
     if (sphere) sphere.visible = false;           // el mundo real sustituye al 360
-    if (closeupMesh) { closeupMesh.visible = false; closeupStem = -1; }   // sin close-ups en AR
+    resetCloseup();                               // sin close-ups en AR
 
     // En AR cada fuente debe oírse desde su sitio (no solo al "mirar + zoom"):
     // subimos restGain a tope y anulamos el boost por zoom; la espacialización y
