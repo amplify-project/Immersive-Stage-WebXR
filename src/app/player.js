@@ -20,6 +20,11 @@ let curManifestSrc = null;           // fuente en curso (recarga al entrar/salir
 let shakaAudio = null;
 let shakaCloseup = null;             // 3ª instancia Shaka: pista de close-up
 let shakaCfg   = null;               // config compartida (la fija loadDualShaka)
+// RepresentationID del 360 en los manifests de stream.sh: mapea `-map 0:v:0`
+// primero, así que la esfera es siempre la 0 y los close-ups van del 1 en
+// adelante (ver "AdaptationSets dinámicos" en stream.sh).
+const SPHERE_REP = '0';
+
 // Close-ups (Caso B): plano flotante con el vídeo del músico enfocado.
 let closeupTexture = null, closeupMesh = null;
 let closeupReady = false;            // hay pistas de close-up en el manifest
@@ -532,13 +537,23 @@ async function loadDualShaka(src) {
     shakaVideo.configure(shakaConfig);
     await shakaVideo.load(src);
 
+    // Con close-ups el manifest trae VARIAS AdaptationSets de vídeo y ninguna
+    // dice "yo soy el 360". La variante de arranque la elige Shaka por ancho de
+    // banda —también con ABR apagado—, y el 4K (26 Mbps) no cabe en la
+    // estimación inicial (5 Mbps): se quedaba con un close-up de 1,8 Mbps y la
+    // esfera mostraba a un músico en primer plano como si fuera la escena
+    // entera. La esfera se pide por su Representation, no por su bitrate.
+    const _sv = pinSphereTrack();
+
     // Tope de resolución de vídeo (diagnóstico de saturación de decodificado): con
     // ABR off, elegimos a mano la variante de mayor altura ≤ maxh. Si la imagen se
     // retrasa del audio por drops (decoder 4K no llega / throttling térmico),
     // ?maxh=1440 ó ?maxh=1080 lo confirma en vivo. Sin efecto si solo hay 4K.
+    // Solo entre las variantes del 360: un close-up "cabe" en cualquier tope y
+    // sería la forma más tonta de acabar otra vez con la esfera equivocada.
     const _maxh = parseInt(new URLSearchParams(location.search).get('maxh') || '0', 10);
     if (_maxh > 0) {
-      const _vt = shakaVideo.getVariantTracks()
+      const _vt = _sv
         .filter(t => (t.height || 0) <= _maxh)
         .sort((a, b) => (b.height || 0) - (a.height || 0));
       if (_vt.length) { shakaVideo.selectVariantTrack(_vt[0], /*clearBuffer*/ true); toast('vídeo ≤ ' + _maxh + 'p (' + (_vt[0].height || '?') + 'p)'); }
@@ -953,9 +968,31 @@ async function setupCloseups(src) {
 
   try {
     shakaCloseup = new shaka.Player(closeupEl);
-    shakaCloseup.configure(shakaCfg);
+    // El audio de este manifest es el Opus multicanal del motor: que la segunda
+    // instancia no se lo descargue otra vez para tirarlo (va muteada).
+    // Colchón corto: a esta instancia se le pide arrancar pronto, no aguantar.
+    // El 360 no puede permitirse un corte —es toda la escena— pero un close-up
+    // que se atasca está casi siempre oculto, y el fundido ya espera a que haya
+    // imagen. Con el colchón de 2 s del 360, el panel llegaba tarde siempre.
+    shakaCloseup.configure({ ...shakaCfg,
+      streaming: { ...shakaCfg.streaming, rebufferingGoal: 0.5, bufferingGoal: 4 },
+      manifest: { ...shakaCfg.manifest, disableAudio: true } });
     await shakaCloseup.load(src);
     closeupEl.muted = true;   // el audio sale del motor FOA, no de aquí
+
+    // Clavarla en un close-up desde el principio. Si la dejamos elegir, puede
+    // quedarse con el 360 y estaríamos decodificando el 4K DOS veces sin que se
+    // vea: el mismo agujero de rendimiento que ya nos comió los frames en AR.
+    const firstRep = Object.values(closeupRepByStem)[0];
+    const firstV = shakaCloseup.getVariantTracks().find(t => t.originalVideoId === firstRep);
+    if (firstV) shakaCloseup.selectVariantTrack(firstV, /*clearBuffer*/ true);
+    closeupEl.pause();        // no se ve nada hasta que el foco lo pida
+
+    // Mismo cuidado que con disableVideo: si el build lo ignora, que se sepa por
+    // consola y no en la factura de ancho de banda.
+    if (shakaCloseup.getConfiguration().manifest.disableAudio !== true)
+      console.warn('[closeup] este build de Shaka ignora manifest.disableAudio: ' +
+                   'la 2ª instancia se bajará el Opus multicanal para tirarlo');
 
     closeupTexture = new THREE.VideoTexture(closeupEl);
     closeupTexture.minFilter = THREE.LinearFilter;
@@ -969,6 +1006,26 @@ async function setupCloseups(src) {
     console.warn('[closeup] no disponible:', e.message);
     closeupReady = false;
   }
+}
+
+// Variantes del 360 (las que NO son close-up), de mayor a menor altura. Un
+// manifest sin close-ups tiene una sola AdaptationSet de vídeo y entonces valen
+// todas: así esto no cambia nada en las escenas de siempre.
+function sphereVariants() {
+  const all = shakaVideo ? shakaVideo.getVariantTracks() : [];
+  const own = all.filter(t => t.originalVideoId === SPHERE_REP);
+  return (own.length ? own : all).sort((a, b) => (b.height || 0) - (a.height || 0));
+}
+
+// Clava la esfera en su Representation. Hay que llamarlo DESPUÉS DE CADA carga
+// del manifest —son dos caminos, la carga inicial y la recarga al salir de AR—
+// porque cada una vuelve a elegir variante por ancho de banda. Devuelve las
+// variantes del 360 para quien quiera seguir filtrando entre ellas.
+function pinSphereTrack() {
+  const sv = sphereVariants();
+  if (sv.length && !sv.some(t => t.active))
+    shakaVideo.selectVariantTrack(sv[0], /*clearBuffer*/ true);
+  return sv;
 }
 
 // ¿Tiene este stem una pista de close-up? Mira solo el mapa, no el manifest: se
@@ -1853,8 +1910,10 @@ async function setVideoDisabled(off) {
   videoDisabled = off;
   // Al recuperar el vídeo hay pista nueva: la textura vieja apunta al mismo
   // elemento, pero re-crearla es barato y evita quedarse con el último fotograma
-  // congelado de antes de entrar en AR.
-  if (!off) attachVideoTexture();
+  // congelado de antes de entrar en AR. Y hay que volver a clavar la esfera: esta
+  // recarga elige variante igual que la carga inicial, así que sin esto se vuelve
+  // del passthrough con un close-up envolviendo la escena.
+  if (!off) { pinSphereTrack(); attachVideoTexture(); }
   if (wasPlaying) videoEl.play().catch(() => {});
   if (audioEl && audioEl !== videoEl && wasPlaying) audioEl.play().catch(() => {});
 }
