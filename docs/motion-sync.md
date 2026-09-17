@@ -50,6 +50,25 @@ served over HTTPS and a page like that cannot open a cleartext socket. That mean
 mounting the timing endpoint on our own server the way the relay already mounts
 `/ingest` and `/consume` — one origin, one certificate, nothing extra to accept.
 
+## You cannot test this with two players on one machine
+
+While a player is **actively playing in another tab**, a second player never
+loads: Shaka sits in `load()` with no network request and no error — not a slow
+load, a silent stall. Close the playing tab and the same page loads instantly.
+Reproduced deterministically; two Shaka instances in the *same* tab coexist fine
+as long as neither is playing, which points at the decoder rather than at tab
+count.
+
+The manifest offers a single representation — 2560×1440 H.264, no lighter
+rendition — so there is nothing to fall back to and `?maxh` cannot dodge it.
+
+This is the test rig, not the product: on two machines, or a machine and a
+headset, it does not arise. But it will eat an afternoon if you meet it without
+knowing, because it looks exactly like the synchronisation being broken. The
+ten-second check that tells them apart: create a bare `shaka.Player` on a new
+`<video>`, call `load()` with a timeout, and look at
+`performance.getEntriesByType('resource')`. No request means it is this, not us.
+
 ## The Motion server needs a patch
 
 The client and server we have are from different generations and **do not talk to
@@ -101,12 +120,16 @@ So the two settings are coupled the wrong way round: the smoother the correction
 the longer the controller cannot correct. Decoupling them is a small change in the
 library, which is ours.
 
-> **What is not established.** Every post-seek sample above was taken *inside* that
-> blind window — 7 to 12 s of sampling against a 16 s blackout — so these
-> measurements do not show that the residual is never trimmed, only that it is not
-> trimmed while the window is open. Whether the controller closes the gap once the
-> window expires still has to be measured: seek, then sample for 30 s or more. The
-> earlier version of this document claimed the stronger thing; it was wrong.
+**Once the window expires, it does close the gap — measured.** Sampling a late
+joiner for 30 s past the blackout: −360 ms → −194 → −134 → −98 → −72 → −52 → −25 →
++5 → +31, then it turns round and trims the overshoot. The rate stays between 1.006
+and 1.023 throughout, settling at 1.006 — nothing like the ±4.3% flapping of the
+defaults, which also confirms the tuning above does what it was meant to.
+
+So the cost of joining late is not a permanent offset. It is about 16 s blind
+followed by a smooth ~30 s catch-up. (An earlier version of this document claimed
+the residual was never trimmed; every sample behind that claim had been taken
+inside the blind window.)
 
 Two ways forward, neither tried:
 
