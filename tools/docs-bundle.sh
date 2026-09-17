@@ -30,6 +30,7 @@ DOCS=(
   docs/telemetry.md
   docs/live-editor-tutorial.md
   docs/produccion-hardware.md
+  docs/motion-sync.md
   docs/shared-spaces.md
   docs/handoff.md
 )

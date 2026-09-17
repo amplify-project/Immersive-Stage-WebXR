@@ -691,6 +691,32 @@ async function loadDualShaka(src) {
     // ── Close-ups (Caso B): pistas de vídeo extra del mismo manifest ─────────
     await setupCloseups(src);
 
+    // ── Sincronía entre dispositivos (?sync=<sesión>) ────────────────────────
+    // Esclaviza este player a un timing object compartido: una página de control
+    // manda, y todos los que miren a la misma sesión reproducen el mismo instante
+    // —incluido el que llegue tarde—. Se engancha AQUÍ, después de cargar, porque
+    // el servicio quiere la duración y antes no la hay.
+    //
+    // import() dinámico a propósito: sin ?sync no se baja ni una línea de Motion,
+    // igual que una escena sin mallas no gasta una luz. Y el fallo que esperamos
+    // —que el socket no abra— no puede llevarse por delante la reproducción: el
+    // player tiene que seguir funcionando solo, que es como funciona hoy.
+    const _syncSession = new URLSearchParams(location.search).get('sync');
+    if (_syncSession) {
+      try {
+        const q = new URLSearchParams(location.search);
+        const { attachSync } = await import('./sync.js');
+        attachSync(videoEl, {
+          sessionId: _syncSession,
+          url: q.get('timing') || undefined,
+          offsetSec: parseFloat(q.get('syncoffset')) || 0,
+        });
+      } catch (e) {
+        console.warn('[sync] no se pudo enganchar:', e.message || e);
+        toast('Sincronía no disponible');
+      }
+    }
+
     // ── Watchdog live edge ──────────────────────────
     setInterval(() => {
       if (videoEl.paused || videoEl.seeking || videoEl.buffered.length === 0) return;
