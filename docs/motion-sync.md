@@ -85,30 +85,47 @@ inaudible, with the error still inside 50 ms. *(Reasoned from the constants and 
 measured behaviour; not yet re-measured in isolation, because every run since has
 involved a seek — see below.)*
 
-**The finding that blocks the partner's case: after a seek, the residual is never
-trimmed.** A late joiner does jump to the session position — that part works — but
-it lands 0.6 to 0.8 s late, because the seek costs a buffer flush and a fresh 6 s
-segment, and then it holds that offset for ever at rate 1.0. Measured three times:
-−810 ms, −630 ms, and one run that ended up −14.5 s adrift after a pause/play.
+**After a seek, there is a window where nothing is corrected at all.** A late
+joiner does jump to the session position — that part works — but it lands 0.6 to
+0.8 s late, because the seek costs a buffer flush and a fresh 6 s segment, and it
+then holds that offset, at rate 1.0, for a while. Measured at −810 ms and −630 ms,
+and once at −14.5 s after a pause/play.
 
-The cause looks structural rather than a tuning value: the controller compares its
-own projected vector against the timing object, and only re-reads the element's
-real `currentTime` at particular moments. A seek that lands late creates a gap
-between model and reality that nothing measures again. In one code path the drift
-rate is even a hard-coded `0.002`.
+The cause is `amortPeriod`, doing a second job its name does not admit. After a
+seek or a play, `controlElements()` returns immediately for `amortPeriod × 2000`
+milliseconds — no correction of any kind. At the default that is 2 s. At the 8 s we
+ask for, **sixteen**.
 
-Two ways out, neither tried:
+So the two settings are coupled the wrong way round: the smoother the correction,
+the longer the controller cannot correct. Decoupling them is a small change in the
+library, which is ours.
 
-- **In the library**: after the amortization period that follows a seek, re-read
-  `element.currentTime` into the wrapped vector, so the next cycle sees the real
-  error. This is the right fix and it is our library.
-- **From outside**: watch `syncDiag().errMs` and, when it sits outside the dead
-  band with the rate at 1, nudge the rate ourselves. A workaround, and it would be
-  a second controller fighting the first.
+> **What is not established.** Every post-seek sample above was taken *inside* that
+> blind window — 7 to 12 s of sampling against a 16 s blackout — so these
+> measurements do not show that the residual is never trimmed, only that it is not
+> trimmed while the window is open. Whether the controller closes the gap once the
+> window expires still has to be measured: seek, then sample for 30 s or more. The
+> earlier version of this document claimed the stronger thing; it was wrong.
 
-Until one of them exists, "join late and land with everyone else" lands *about a
-second* behind everyone else. Whether that matters is the partner's call: for
-pointing at the same musician it is fine, for clapping together it is not.
+Two ways forward, neither tried:
+
+- **In the library**: give the blind window its own constant instead of deriving it
+  from `amortPeriod`, so smoothness and responsiveness stop trading against each
+  other. Then re-measure the residual.
+- **From outside**: watch `syncDiag().errMs` and nudge when it sits outside the
+  dead band with the rate at 1. A workaround, and a second controller fighting the
+  first.
+
+Whether a late joiner landing ~0.7 s behind for ~16 s matters is the partner's
+call: for pointing at the same musician it is nothing, for clapping together it is
+not.
+
+## One more trap: the offset is in milliseconds
+
+`addMediaElement(element, offset)` stores `offset / 1000`, so despite the name —
+and despite everything else in the API being seconds — it wants milliseconds.
+`sync.js` multiplies. A per-device correction of 0.5 s passed as `0.5` would
+otherwise be half a millisecond, i.e. nothing at all, silently.
 
 ## What this does not need
 

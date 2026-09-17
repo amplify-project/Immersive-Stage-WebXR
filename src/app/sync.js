@@ -80,15 +80,28 @@ export function attachSync(el, { sessionId, url, offsetSec = 0, duration } = {})
   // The arithmetic is just minDiff / amortPeriod. Closing 50 ms over 8 s asks
   // for 0.6%, which is inaudible, and the error still never exceeds the 50 ms
   // band — which is itself far inside what the ear resolves for placement
-  // (~5-10° off-axis, some 40 cm at 3 m). Slower correction, same sync, no
-  // wobble. maxDelay stays where it is: beyond that a seek is the honest answer,
-  // and a seek here costs a buffer flush and a fresh 6 s segment.
+  // (~5-10° off-axis, some 40 cm at 3 m). maxDelay stays where it is: beyond
+  // that a seek is the honest answer, and a seek here costs a buffer flush and a
+  // fresh 6 s segment.
+  //
+  // But amortPeriod is doing a second job that its name does not admit: after a
+  // seek or a play the controller stops correcting entirely for amortPeriod ×
+  // 2000 ms, because controlElements() returns immediately while that timer is
+  // alive. Default 1 s → 2 s blind. Ours, 8 s → SIXTEEN seconds blind, during
+  // which a late joiner sits wherever its seek happened to land.
+  //
+  // So the two are coupled the wrong way round: the smoother we make the
+  // correction, the longer we cannot correct at all. Decoupling them is a
+  // one-line change in the library, which is ours — until then this number is a
+  // compromise and 8 is the smooth end of it, not a measured optimum.
   const controller = new TimingMediaController(timing, {
     minDiff: 0.05,       // dead band: below this, leave the rate alone
     amortPeriod: 8.0,    // close the gap over this long → 0.05/8 = 0.6%
     maxDelay: 0.8,       // above this, stop nudging and seek
   });
-  controller.addMediaElement(el, offsetSec);
+  // Ojo con las unidades: addMediaElement divide entre 1000, o sea que espera
+  // MILISEGUNDOS pese a llamarse offset y a que todo lo demás va en segundos.
+  controller.addMediaElement(el, offsetSec * 1000);
 
   // Deliberately loud while this is a spike: the failure we expect is the socket
   // never opening (wrong port, cleartext from an https page, a firewall), and
