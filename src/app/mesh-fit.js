@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════════════
- *  Musician meshes: loading and fitting. Shared by the player and the editor.
+ *  Musician meshes: loading, fitting, and the light they are seen under.
+ *  Shared by the player and the editor.
  *
  *  A classic script (window.MeshFit), not an ES module, on purpose. The player
  *  is ESM but already takes THREE and GLTFLoader as globals from index.html,
@@ -140,6 +141,115 @@
     return wrap;
   }
 
+
+  // ── Colour ────────────────────────────────────────────────────────────────
+  // three lights the scene in linear light and then has to write a frame for a
+  // display that speaks sRGB. `outputEncoding` is that last step, and r128
+  // defaults to LinearEncoding: the linear number goes out raw and the panel
+  // reads it as sRGB, so mid grey (0.5 linear, which should be written as 0.73)
+  // arrives as 0.21. Everything looks dark and flat, and a GLB looks nothing
+  // like it did in Blender — GLTFLoader marks colour textures as sRGB, so the
+  // model is decoded on the way in and never encoded on the way out.
+  //
+  // The catch is that this is a RENDERER-wide switch. A texture that already
+  // holds sRGB pixels and does not say so gets encoded without ever having been
+  // decoded: the 360 video would turn milky, blacks and all. srgb() is how a
+  // texture says so, and decode + encode then cancel out.
+  //
+  // Same for a colour written as a hex literal, which is a colour picked in
+  // sRGB: colour() puts it in the linear space the shader works in. (r152 and
+  // later do all of this by themselves — hence every tutorial that does not
+  // mention it.)
+  function setupRenderer(r) {
+    if (r && THREE.sRGBEncoding !== undefined) r.outputEncoding = THREE.sRGBEncoding;
+    return r;
+  }
+
+  function srgb(tex) {
+    if (tex && THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    return tex;
+  }
+
+  function colour(hex) {
+    var c = new THREE.Color(hex);
+    return c.convertSRGBToLinear ? c.convertSRGBToLinear() : c;
+  }
+
+  // ── Environment ───────────────────────────────────────────────────────────
+  // A metallic/roughness material has almost no diffuse response: nearly all of
+  // what you see is reflection. With nothing to reflect it renders BLACK however
+  // many lights are in the scene — which is why the lit drums came out fine and
+  // the trumpet came out a silhouette. Lights do not fix a metal; an environment
+  // does.
+  //
+  // It is painted here instead of shipped as an .hdr: a studio gradient with
+  // three soft lamps is enough to read metal as metal, it costs no download onto
+  // a headset on someone else's wifi, and it leaves no asset to keep next to the
+  // scene. A venue that wants its own room can point at a real map later; this
+  // is the floor, not the ceiling.
+  //
+  // In AR we are guessing, and worth being honest about it: the real room's
+  // light is not known to us, so a reflection is plausible rather than true.
+  //
+  // One PMREM per renderer, cached. Call it OUTSIDE an XR session — the player
+  // warms it when the scene declares meshes, before anyone enters AR — because
+  // rendering to an off-screen target mid-session means arguing with the XR
+  // framebuffer for nothing.
+  var ENV_W = 512, ENV_H = 256;
+
+  function envLamp(cx, x, y, r, a) {
+    var g = cx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, 'rgba(255,255,255,' + a + ')');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    cx.fillStyle = g;
+    cx.fillRect(x - r, y - r, 2 * r, 2 * r);
+  }
+
+  function paintEnvironment(cx) {
+    var g = cx.createLinearGradient(0, 0, 0, ENV_H);
+    g.addColorStop(0.00, '#e9eff6');   // zenith
+    g.addColorStop(0.46, '#a8b5c2');
+    g.addColorStop(0.50, '#6c7681');   // horizon: the floor starts darker
+    g.addColorStop(1.00, '#20242a');   // nadir
+    cx.fillStyle = g;
+    cx.fillRect(0, 0, ENV_W, ENV_H);
+    // Three lamps above the horizon, none of them centred. A bare gradient is
+    // reflected as a gradient — smooth, even, and unreadable as metal. What says
+    // "polished" is a highlight with an edge, and the fact that it travels when
+    // you move your head.
+    envLamp(cx, 0.17 * ENV_W, 0.24 * ENV_H, 0.14 * ENV_W, 1.00);
+    envLamp(cx, 0.55 * ENV_W, 0.16 * ENV_H, 0.09 * ENV_W, 0.85);
+    envLamp(cx, 0.84 * ENV_W, 0.33 * ENV_H, 0.12 * ENV_W, 0.60);
+  }
+
+  var _env = new WeakMap();          // renderer -> PMREM texture (or null)
+
+  function environment(renderer) {
+    if (!renderer) return null;
+    if (_env.has(renderer)) return _env.get(renderer);
+    var tex = null;
+    try {
+      var c = document.createElement('canvas');
+      c.width = ENV_W; c.height = ENV_H;
+      paintEnvironment(c.getContext('2d'));
+      var src = new THREE.CanvasTexture(c);
+      src.mapping = THREE.EquirectangularReflectionMapping;
+      srgb(src);
+      var pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader();
+      tex = pmrem.fromEquirectangular(src).texture;
+      pmrem.dispose();
+      src.dispose();
+    } catch (e) {
+      // Without an environment a metal is black; without a player there is
+      // nothing at all. This is not worth taking the session down for.
+      console.warn('[mesh] no environment: ' + ((e && e.message) || e));
+      tex = null;
+    }
+    _env.set(renderer, tex);
+    return tex;
+  }
+
   global.MeshFit = {
     AR_MESH_HEIGHT: AR_MESH_HEIGHT,
     AR_MESH_MAX_SPAN: AR_MESH_MAX_SPAN,
@@ -147,5 +257,9 @@
     invalidate: invalidate,
     spec: spec,
     fit: fitMeshToRoom,
+    setupRenderer: setupRenderer,
+    environment: environment,
+    srgb: srgb,
+    colour: colour,
   };
 })(window);

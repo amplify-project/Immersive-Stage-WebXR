@@ -98,6 +98,11 @@ function initThree() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
+  // Espacio de color de salida (ver src/app/mesh-fit.js → Colour). Va aquí y no
+  // en las mallas porque es del renderer entero: a partir de esta línea TODA
+  // textura que lleve píxeles sRGB tiene que declararlo, o sale codificada dos
+  // veces. Las nuestras son el vídeo (makeVideoTexture) y los canvas de texto.
+  MeshFit.setupRenderer(renderer);
 
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
@@ -116,7 +121,7 @@ function initThree() {
   // vídeo, audio) coinciden. Se hornea en la geometría porque en XR el bucle de
   // render reposiciona la malla cada frame y podría pisar sphere.rotation.
   geo.rotateY(-Math.PI / 2);
-  sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x111111 }));
+  sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: MeshFit.colour(0x111111) }));
   sphere.position.set(0, 0, 0);  // centrada en el origen
   scene.add(sphere);
 
@@ -206,7 +211,7 @@ function arPerfPanelDraw(lines) {
   if (!arPerfPanel) {
     const c = document.createElement('canvas');
     c.width = AR_PERF_PANEL_W; c.height = AR_PERF_PANEL_H;
-    const tex = new THREE.CanvasTexture(c);
+    const tex = MeshFit.srgb(new THREE.CanvasTexture(c));
     tex.minFilter = THREE.LinearFilter;
     arPerfPanel = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
     // Un sprite siempre mira a la cámara, así que basta con colocarlo: 40 cm de
@@ -802,6 +807,10 @@ async function loadDualShaka(src) {
 // comportamiento de antes (lo marcan los bucles de render).
 function makeVideoTexture(el) {
   const tex = new THREE.Texture(el);
+  // El vídeo YA viene en sRGB. Sin decirlo, con outputEncoding puesto se
+  // codificaría a la salida sin haberse decodificado nunca: 360 lavado y negros
+  // lechosos. Diciéndolo, decodificar y codificar se cancelan y pasa intacto.
+  MeshFit.srgb(tex);
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = false;   // 8 Mpx: generar mipmaps por fotograma, ni de broma
@@ -884,6 +893,14 @@ async function setupFOA() {
     }
     if (!_stems) _stems = DEFAULT_STEMS;
     stemDefs = _stems;   // el modo AR ancla un objeto 3D por stem con su az/el
+
+    // Entorno de las mallas (MeshFit.environment), calentado AQUÍ y no al colgar
+    // la primera: construirlo es un pase PMREM a un render target, y hacer eso
+    // con una sesión inmersiva en marcha es discutirle el framebuffer al
+    // compositor sin ninguna necesidad. Queda cacheado por renderer, así que
+    // ensureARLights() ya sólo lo asigna. Sólo si la escena declara mallas: una
+    // que no las tiene sigue sin gastar nada.
+    if (_stems.some(s => s.mesh) || arCfg.mesh) MeshFit.environment(renderer);
 
     // ?chmap=identity desactiva el remapeo de canales del decodificador Opus
     // (ver VORBIS_SRC_TO_OUT). Útil si un navegador NO reordena: compruébalo con
@@ -1370,7 +1387,7 @@ function initDebugPanel() {
   debugCanvas.width = 512;
   debugCanvas.height = 256;
 
-  debugTexture = new THREE.CanvasTexture(debugCanvas);
+  debugTexture = MeshFit.srgb(new THREE.CanvasTexture(debugCanvas));
 
   const geo = new THREE.PlaneGeometry(1.2, 0.6);
   const mat = new THREE.MeshBasicMaterial({
@@ -1675,7 +1692,7 @@ function makeLabelSprite(text) {
   cx.fillStyle = '#00d4ff';
   cx.textBaseline = 'middle';
   cx.fillText(text || '', pad, c.height / 2);
-  const tex = new THREE.CanvasTexture(c);
+  const tex = MeshFit.srgb(new THREE.CanvasTexture(c));
   tex.minFilter = THREE.LinearFilter;
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
   sp.scale.set((c.width / c.height) * 0.16, 0.16, 1);   // ~16 cm de alto
@@ -1692,7 +1709,7 @@ function makeSourceMarker(name) {
   g.add(new THREE.Mesh(
     new THREE.IcosahedronGeometry(0.08, 1),
     // Material por marcador (no compartido): el realce del foco pinta solo uno.
-    new THREE.MeshBasicMaterial({ color: AR_MARK_IDLE, wireframe: true })));
+    new THREE.MeshBasicMaterial({ color: MeshFit.colour(AR_MARK_IDLE), wireframe: true })));
   g.add(makeLabelSprite(name));
   return g;
 }
@@ -1725,7 +1742,7 @@ function makeSourceMarker(name) {
 function makeFocusRing() {
   const r = new THREE.Mesh(
     new THREE.RingGeometry(0.34, 0.42, 32),
-    new THREE.MeshBasicMaterial({ color: AR_MARK_IDLE, side: THREE.DoubleSide,
+    new THREE.MeshBasicMaterial({ color: MeshFit.colour(AR_MARK_IDLE), side: THREE.DoubleSide,
                                   transparent: true, opacity: 0.75, depthWrite: false }));
   r.rotation.x = -Math.PI / 2;
   // Un centímetro por encima del suelo, y no en y=0: ahí la base de la malla es
@@ -1744,14 +1761,20 @@ function makeFocusRing() {
 // deja ninguna cara a oscuras (en AR no hay escenario que iluminar, hay una sala
 // real cuya luz no conocemos), y la segunda marca volumen para que una figura no
 // se lea como una silueta plana. Sin sombras: cuestan y aquí no aportan.
+//
+// Y el entorno, que no es un adorno de las luces sino lo único que ilumina un
+// metal: un material metálico no tiene difuso que iluminar, así que con luces y
+// sin entorno sale negro igual. La hemisférica baja a la mitad al entrar el
+// entorno, que ya hace el ambiente; con las dos a tope la malla se lava.
 let arLights = null;
 function ensureARLights() {
   if (arLights) return arLights;
   arLights = new THREE.Group();
-  arLights.add(new THREE.HemisphereLight(0xffffff, 0x707070, 1.1));
-  const key = new THREE.DirectionalLight(0xffffff, 0.55);
+  arLights.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5));
+  const key = new THREE.DirectionalLight(0xffffff, 0.5);
   key.position.set(1, 3, 2);
   arLights.add(key);
+  scene.environment = MeshFit.environment(renderer);
   return arLights;
 }
 
@@ -1890,7 +1913,7 @@ function paintARFocus() {
     // Con malla manda el aro del suelo; sin ella, la esfera de alambre. Nunca las
     // dos: la esfera está oculta en cuanto hay músico que mirar.
     const mark = m.userData.focusRing || m.children[0];
-    if (mark && mark.material) mark.material.color.setHex(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE);
+    if (mark && mark.material) mark.material.color.copy(MeshFit.colour(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE));
   });
 }
 
@@ -2456,8 +2479,9 @@ function clearARSources() {
   for (const m of arSources) roomGroup.remove(m);
   arSources = [];
   // Fuera las luces con las mallas: en el 360 no hay nada que iluminar y una luz
-  // de más es trabajo del shader por cada fotograma que nadie ve.
-  if (arLights) scene.remove(arLights);
+  // de más es trabajo del shader por cada fotograma que nadie ve. El entorno se
+  // suelta igual (la textura sigue cacheada: volver a AR no la reconstruye).
+  if (arLights) { scene.remove(arLights); scene.environment = null; }
   // El foco indexa este array: dejarlo vivo señalaría a un músico que ya no está.
   resetARFocus();
   // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,

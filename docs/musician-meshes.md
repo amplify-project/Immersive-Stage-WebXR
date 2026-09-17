@@ -226,6 +226,28 @@ is what keeps the panner unaware that a figure was added at all.
   in the middle of the passthrough. A hemisphere light (no face left dark; the room
   is real and its lighting unknown) plus a soft directional key for volume. No
   shadows: they cost, and here they add nothing.
+- **An environment, because lights alone do not light a metal** (`MeshFit.environment`).
+  A metallic/roughness material has almost no diffuse response: nearly all of it is
+  reflection, so with nothing to reflect it stays black however many lights are in
+  the scene. That is why an unlit model came back fine from the partner's test and
+  one with metal/roughness maps came back a silhouette. The environment is painted
+  in code — a studio gradient with three soft lamps — so there is no asset to
+  download onto a headset or to keep next to the scene, and it is built through
+  PMREM **outside** any XR session (warmed at scene load when the scene declares
+  meshes) rather than mid-session against the XR framebuffer. The hemisphere light
+  drops to 0.5 when it comes in, since the environment now does the ambient work.
+- **The renderer writes sRGB** (`MeshFit.setupRenderer`). three lights in linear
+  light and r128 defaults to writing that linear value raw, which a display reads
+  as sRGB: mid grey lands at 0.21 instead of 0.5, and a GLB looks nothing like it
+  did in Blender, since GLTFLoader decodes its colour textures on the way in and
+  nothing encoded them on the way out. It is a renderer-wide switch, so every
+  texture that already holds sRGB pixels has to say so (`MeshFit.srgb`: the 360
+  video, the close-up, the text canvases) or it gets encoded without ever having
+  been decoded — measured, an unmarked grey 128 comes out 188. Same for colours
+  written as hex literals (`MeshFit.colour`). The one exception is
+  `scene.background`, which three paints as a clear colour straight into the
+  framebuffer, bypassing the shader: converting that one turned the editor's
+  background from 10,14,20 into 1,1,2.
 - **`?nomesh=1`** brings the wireframe spheres back, to separate a mesh problem
   from a passthrough problem without editing the scene and re-entering.
 

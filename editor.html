@@ -910,7 +910,7 @@ const mvEsc = t => String(t).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>'
 // Es lo único que convierte "se ve grande" en "mide dos metros y medio".
 function mvScaleFigure() {
   const g = new THREE.Group();
-  const mat = new THREE.MeshLambertMaterial({ color: 0x8fa6b8, transparent: true, opacity: 0.4 });
+  const mat = new THREE.MeshLambertMaterial({ color: MeshFit.colour(0x8fa6b8), transparent: true, opacity: 0.4 });
   const put = (geo, y) => { const m = new THREE.Mesh(geo, mat); m.position.y = y; g.add(m); };
   put(new THREE.CylinderGeometry(0.10, 0.13, 0.85, 12), 0.425);   // piernas: 0 → 0.85
   put(new THREE.CylinderGeometry(0.17, 0.15, 0.62, 12), 1.16);    // tronco:  0.85 → 1.47
@@ -924,7 +924,7 @@ function mvScaleFigure() {
 // heurística que acierta el 70% de las veces es peor que ninguna.
 function mvYawArrow() {
   const g = new THREE.Group();
-  const mat = new THREE.MeshBasicMaterial({ color: 0xffd24a, transparent: true, opacity: 0.9 });
+  const mat = new THREE.MeshBasicMaterial({ color: MeshFit.colour(0xffd24a), transparent: true, opacity: 0.9 });
   const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.004, 0.55), mat);
   shaft.position.set(0, 0.012, 0.42);
   const head = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.20, 16), mat);
@@ -941,21 +941,30 @@ function mvInit() {
   const r = new THREE.WebGLRenderer({ canvas: cv, antialias: true });
   r.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
   r.setSize(cv.width, cv.height, false);   // false: el CSS ya lo estira a la columna
+  MeshFit.setupRenderer(r);                // mismo espacio de color que el player
   const sc = new THREE.Scene();
+  // El fondo NO se convierte, al revés que todo lo demás: three lo pinta como
+  // clear color, que se escribe en el framebuffer sin pasar por el shader ni,
+  // por tanto, por outputEncoding. Convertido salía casi negro (medido: 1,1,2
+  // en vez de 10,14,20).
   sc.background = new THREE.Color(0x0a0e14);
-  // Las mismas luces que el player monta en AR, y con los mismos valores: un GLB
-  // es PBR, así que la luz decide cómo se ve. Con otra iluminación aquí, ajustar
-  // el modelo mirando esta vista sería ajustarlo para una escena que no existe.
-  sc.add(new THREE.HemisphereLight(0xffffff, 0x707070, 1.1));
-  const key = new THREE.DirectionalLight(0xffffff, 0.55);
+  // Las mismas luces y el mismo entorno que el player monta en AR, y con los
+  // mismos valores: un GLB es PBR, así que la luz decide cómo se ve. Con otra
+  // iluminación aquí, ajustar el modelo mirando esta vista sería ajustarlo para
+  // una escena que no existe. El entorno además es lo ÚNICO que ilumina un
+  // metal, así que sin él la vista previa enseñaría negro un modelo que en las
+  // gafas se ve — que es exactamente la mentira que este fichero evita.
+  sc.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5));
+  const key = new THREE.DirectionalLight(0xffffff, 0.5);
   key.position.set(1, 3, 2); sc.add(key);
-  const grid = new THREE.GridHelper(8, 16, 0x33506a, 0x18222c);
+  sc.environment = MeshFit.environment(r);
+  const grid = new THREE.GridHelper(8, 16, MeshFit.colour(0x33506a), MeshFit.colour(0x18222c));
   sc.add(grid);
   meshView.figure = mvScaleFigure(); sc.add(meshView.figure);
   // Aro a los pies: el mismo que marca el foco dentro de las gafas, y de paso
   // enseña qué huella ocupa el músico en el suelo de la sala.
   const ring = new THREE.Mesh(new THREE.RingGeometry(0.34, 0.42, 32),
-    new THREE.MeshBasicMaterial({ color: 0x00d4ff, side: THREE.DoubleSide,
+    new THREE.MeshBasicMaterial({ color: MeshFit.colour(0x00d4ff), side: THREE.DoubleSide,
                                   transparent: true, opacity: 0.6, depthWrite: false }));
   ring.rotation.x = -Math.PI / 2; ring.position.y = 0.01; sc.add(ring);
   meshView.arrow = mvYawArrow(); sc.add(meshView.arrow);
