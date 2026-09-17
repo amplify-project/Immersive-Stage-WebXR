@@ -90,6 +90,12 @@ alignment is impossible. Tolerance is generous: the ear resolves ~5-10° off-axi
 This is the same mechanism Case C drives later — the cameras just set those three
 numbers instead of the hand, and everything downstream is unchanged.
 
+For **two spectators in the same room** this is as good as two people eyeballing
+the same floor mark, and no better: each headset still measures from its own
+origin. The way out of that is a shared coordinate system from the runtime, which
+the Quest browser offers experimentally — researched, untested, and written up with
+its traps in [`shared-spaces.md`](shared-spaces.md).
+
 ### Persistence: the room anchor
 
 Releasing the grip stores the three numbers in `localStorage` under

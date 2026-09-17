@@ -307,6 +307,7 @@ docs/core-api.md        Engine API + AR mode + close-up multi-track reference
 docs/musician-meshes.md 3D models per musician in AR: sizing, editor, upload
 docs/closeup-panel.md   Close-up panel: transition, preload, sphere-track trap
 tools/docs-bundle.sh    Concatenate every doc into one file (for NotebookLM etc.)
+docs/shared-spaces.md   One origin for two headsets: what Quest offers, and its traps
 docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 ```
 
