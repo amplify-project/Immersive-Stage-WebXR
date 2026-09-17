@@ -103,6 +103,37 @@ export function attachSync(el, { sessionId, url, offsetSec = 0, duration } = {})
   // MILISEGUNDOS pese a llamarse offset y a que todo lo demás va en segundos.
   controller.addMediaElement(el, offsetSec * 1000);
 
+  // ── Watchdog: the controller can be asleep ──────────────────────────────
+  //
+  // TimingObject only starts its `timeupdate` heartbeat inside its change
+  // listener, and the heartbeat is the only thing that drives the media
+  // controller. A client that joins a session that already exists is told about
+  // it with `info`, not with `change` — so nobody starts the heartbeat, the
+  // controller never runs, and our player, which autoplays as soon as it has
+  // loaded, plays happily against a clock that is stopped. That is not a corner
+  // case: it is what every late joiner sees, which is the whole feature.
+  //
+  // This only rescues the case where the controller is demonstrably not doing
+  // its job — the session is parked and we are playing anyway. It deliberately
+  // does NOT try to start playback or chase the position when the session is
+  // running: there the controller does wake up (a running session sends changes)
+  // and two things steering one element is worse than either.
+  //
+  // The real fix belongs in the library: start the heartbeat whenever the vector
+  // has velocity, however it arrived, rather than only on a change event.
+  const WATCHDOG_MS = 1000;
+  const watchdog = setInterval(() => {
+    if (timing.readyState !== 'open') return;
+    let v; try { v = timing.query(); } catch (_) { return; }
+    if (v.velocity === 0 && !el.paused) {
+      console.warn(`[sync] the session is parked at ${v.position.toFixed(2)}s and we were playing — pausing`);
+      el.pause();
+      // Land where the session is, not where we happened to get to.
+      if (Math.abs(el.currentTime + offsetSec - v.position) > 0.05)
+        el.currentTime = Math.max(0, v.position - offsetSec);
+    }
+  }, WATCHDOG_MS);
+
   // Deliberately loud while this is a spike: the failure we expect is the socket
   // never opening (wrong port, cleartext from an https page, a firewall), and
   // that failure is otherwise completely silent — the video just plays on its
@@ -125,6 +156,9 @@ export function attachSync(el, { sessionId, url, offsetSec = 0, duration } = {})
 
   return {
     timing, controller, diag,
-    close() { try { provider.close(); } catch (_) { /* already gone */ } },
+    close() {
+      clearInterval(watchdog);
+      try { provider.close(); } catch (_) { /* already gone */ }
+    },
   };
 }

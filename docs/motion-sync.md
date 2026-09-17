@@ -144,6 +144,29 @@ Whether a late joiner landing ~0.7 s behind for ~16 s matters is the partner's
 call: for pointing at the same musician it is nothing, for clapping together it is
 not.
 
+## The controller can be asleep, and a late joiner is exactly when
+
+The player would start playing against a session that was parked. Not a race:
+`TimingObject` starts its `timeupdate` heartbeat **only inside its change
+listener**, and that heartbeat is the only thing that drives the media controller.
+A client joining a session that already exists is told about it with `info`, not
+with `change` — so nothing starts the heartbeat, the controller never runs, and our
+player, which autoplays as soon as it has loaded, plays on against a stopped clock
+until somebody presses a button on the manager.
+
+That is every late joiner, which is the feature.
+
+`sync.js` carries a 1 Hz watchdog for exactly the case where the controller is
+demonstrably not doing its job — the session is parked and we are playing anyway —
+and it pauses us and lands us where the session is. It deliberately does not chase
+a *running* session: there the controller does wake up, and two things steering one
+element is worse than either. Verified: join a parked session and the player stops
+at the session's position; press Play and it follows normally; press Pause and it
+stops with it.
+
+The real fix is in the library: start the heartbeat whenever the vector has
+velocity, however that vector arrived.
+
 ## One more trap: the offset is in milliseconds
 
 `addMediaElement(element, offset)` stores `offset / 1000`, so despite the name —
