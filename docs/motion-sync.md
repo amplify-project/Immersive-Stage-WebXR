@@ -1,7 +1,8 @@
 # Synchronised playback across devices (Motion) — spike
 
-**Status: a spike that works, with one finding that blocks the partner's exact use
-case.** Measured on the desktop, two tabs, September 2026. Not tried on a headset.
+**Status: a spike that works end to end, with two things to fix before it is a
+feature and one measurement still owed.** Desktop, two tabs, September 2026.
+Nothing tried on a headset.
 
 The partner wants a session manager: a desktop page with play / pause / stop /
 restart, a list of connected headsets, and a player that, when someone joins late,
