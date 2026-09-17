@@ -29,18 +29,20 @@ import { TimingObject } from '../vendor/motion/TimingObject.js';
 import { SocketTimingProvider } from '../vendor/motion/SocketTimingProvider.js';
 import { TimingMediaController } from '../vendor/motion/TimingMediaController.js';
 
-// The timing service. Not our relay: Motion brings its own clock and its own
-// channel, and mixing the two would tie the playback clock to the telemetry
-// path for no reason. See docs/motion-sync.md for where this should live once
-// it stops being a spike (mounted on our own server, one origin, one cert).
-export const DEFAULT_TIMING_PORT = 8099;
+// The timing service, mounted on the page's own server (telemetry/timing.js).
+// Same origin, same port, same certificate the headset already accepted to load
+// the player: an https:// page cannot open a cleartext ws://, and a service on
+// its own port would mean accepting a second self-signed certificate — a failure
+// that shows up as nothing at all.
+//
+// It is still not our relay. Motion brings its own clock and its own channel,
+// and tying the playback clock to the telemetry path would buy nothing.
+// ?timing=<url> points somewhere else, e.g. a real motion-server.
+export const TIMING_PATH = '/timing';
 
 function timingUrl(override) {
   if (override) return override;
-  // ws:// while this is a desktop spike. From a headset the player is served
-  // over HTTPS and a page like that cannot open a cleartext socket, so this
-  // has to become wss:// on our own origin before it leaves the desktop.
-  return `ws://${location.hostname}:${DEFAULT_TIMING_PORT}`;
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${TIMING_PATH}`;
 }
 
 /**

@@ -39,16 +39,21 @@ and close-up with it. Nothing is synchronised twice.
 ## Running it
 
 ```
-PORT=8099 node server/server.js          # the Motion server, patched — see below
+node server.js                           # that is all: the timing service is in it
 https://<host>:60000/timing.html         # the manager: connect, then Play
 https://<host>:60000/index.html?sync=1   # each player
 ```
 
-`ws://` to localhost is allowed from an `https://` page, so the desktop spike needs
-no TLS. **A headset will need `wss://` from our own origin**, because the player is
-served over HTTPS and a page like that cannot open a cleartext socket. That means
-mounting the timing endpoint on our own server the way the relay already mounts
-`/ingest` and `/consume` — one origin, one certificate, nothing extra to accept.
+The service is mounted on the player's own server at `wss://<host>:60000/timing`
+(`telemetry/timing.js`), for the same reason `/ingest` and `/consume` are: WebXR
+forces the player over HTTPS, an https:// page cannot open a cleartext `ws://`, and
+a service on its own port would mean the headset accepting a second self-signed
+certificate — a failure that shows up as nothing at all. One process, one origin,
+one certificate.
+
+`?timing=<url>` on the player, or the field on the manager, points somewhere else —
+a real motion-server, for instance. Nothing in the client had to change for this:
+the service speaks the same wire protocol.
 
 ## You cannot test this with two players on one machine
 
@@ -69,7 +74,7 @@ ten-second check that tells them apart: create a bare `shaka.Player` on a new
 `<video>`, call `load()` with a timeout, and look at
 `performance.getEntriesByType('resource')`. No request means it is this, not us.
 
-## The Motion server needs a patch
+## Why the Motion server is not what we run
 
 The client and server we have are from different generations and **do not talk to
 each other as shipped**. The client tags every frame with a `timerId` (which timing
@@ -86,7 +91,12 @@ several independent sessions on one service:
 3. include `timerId` in the `change` broadcast, and send it to *that* timing
    object's connections rather than to a module-global `connections` array.
 
-Worth raising with the Motion maintainers rather than carrying a patch.
+Rather than carry a patch to somebody else's repository, the four messages that
+matter — `info`, `sync`, `update`, `change` — are implemented in
+`telemetry/timing.js`, with `timerId` done properly from the start so one service
+hosts as many sessions as you like. The hard half of Motion, the client with its
+clock and its convergence, is untouched and still theirs. Worth raising the
+mismatch with the maintainers all the same.
 
 ## What the measurements say
 

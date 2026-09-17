@@ -83,7 +83,9 @@ import { TimingObject } from './src/vendor/motion/TimingObject.js';
 import { SocketTimingProvider } from './src/vendor/motion/SocketTimingProvider.js';
 
 const $ = id => document.getElementById(id);
-$('svc').value = `ws://${location.hostname}:8099`;
+// Mismo origen y mismo certificado que esta página: el servicio va montado en
+// el servidor del player (telemetry/timing.js), no en un proceso aparte.
+$('svc').value = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/timing`;
 
 let timing = null, provider = null, tick = null;
 

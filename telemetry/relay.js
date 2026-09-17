@@ -71,13 +71,19 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
   const scheme = secure ? 'wss' : 'ws';
 
   // noServer + our own upgrade listener, so that on a shared server we claim
-  // only these two paths rather than letting ws hijack every upgrade. Node only
-  // auto-destroys upgrades when nobody listens, and we are listening, so an
-  // unknown path has to be closed here or it would hang open.
+  // only these two paths rather than letting ws hijack every upgrade.
+  //
+  // What we do with a path that is not ours depends on whether we are alone.
+  // Standalone, nobody else is listening and Node only auto-destroys an upgrade
+  // when there is no listener at all — so an unknown path would hang open and we
+  // close it. Attached to the player's server we must NOT: another service is
+  // mounted there too (the timing one), its upgrade listener runs after ours,
+  // and destroying the socket first would kill every connection to it. Whoever
+  // attached us closes what nobody claimed.
   const wss = new WebSocketServer({ noServer: true });
   const onUpgrade = (req, socket, head) => {
     const pathname = (req.url || '').split('?')[0];
-    if (!PATHS.includes(pathname)) return socket.destroy();
+    if (!PATHS.includes(pathname)) { if (!attached) socket.destroy(); return; }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   };
   server.on('upgrade', onUpgrade);

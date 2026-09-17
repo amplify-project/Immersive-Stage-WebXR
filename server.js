@@ -873,6 +873,29 @@ if (!/^(0|off|false)$/i.test(process.env.RELAY || '')) {
   }
 }
 
+// ── Servicio de timing (reproducción sincronizada), en ESTE servidor ────
+// Mismo argumento que el relay, y uno más: el reloj compartido es de la sesión,
+// no de un proceso aparte que alguien tenga que acordarse de levantar. Ver
+// telemetry/timing.js y docs/motion-sync.md.
+let timing = null;
+if (relay && !/^(0|off|false)$/i.test(process.env.TIMING || '')) {
+  try {
+    const { createTimingService } = require('./telemetry/timing');
+    timing = createTimingService({ server, log: false });
+  } catch (e) {
+    console.warn(`⚠  Timing desactivado (${e.message}). El player funciona igual, sin sincronía.`);
+  }
+}
+
+// Ni el relay ni el timing cierran un upgrade que no sea suyo: cada uno se
+// desentiende y el siguiente oyente lo mira. Aquí se acaban los oyentes, así que
+// lo que no haya reclamado nadie se cierra ahora — sin esto el socket se queda
+// abierto para siempre.
+const WS_PATHS = ['/ingest', '/consume', ...(timing ? [timing.path] : [])];
+server.on('upgrade', (req, socket) => {
+  if (!WS_PATHS.includes((req.url || '').split('?')[0])) socket.destroy();
+});
+
 // El relay escucha siempre (cuesta nada, y Unity conecta a /consume antes de que
 // entre ningún casco). `telemetry.enabled` de scene.json es cosa del PLAYER: si
 // está a false nadie enviará poses, así que lo decimos aquí en vez de anunciar
@@ -892,6 +915,10 @@ server.listen(PORT, '0.0.0.0', () => {
       : 'scene.json: enabled=false → ningún player enviará (usa ?telemetry=… para probar)';
     console.log(`  telemetry → ${relay.scheme}://<host>:${PORT}/ingest · consume=/consume · health=/telemetry/health`);
     console.log(`              ${note}`);
+  }
+  if (timing) {
+    console.log(`  sync      → ${scheme === 'https' ? 'wss' : 'ws'}://<host>:${PORT}${timing.path}`);
+    console.log(`              manager=${scheme}://<host>:${PORT}/timing.html · player=?sync=<sesión>`);
   }
   if (scheme === 'http') {
     console.warn('⚠  Sin certificados → HTTP. WebXR (VR) NO funciona por IP sin HTTPS.');
