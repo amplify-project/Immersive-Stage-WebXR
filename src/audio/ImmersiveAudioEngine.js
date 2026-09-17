@@ -121,6 +121,14 @@ export class ImmersiveAudioEngine {
     this._zoomMin   = 1;     // factor de zoom a partir del cual empieza el spotlight
     this._zoomMax   = 2.5;   // factor de zoom que da el boost completo
     this._bedDuck   = 0;     // cuánto se agacha el bed al enfocar (0 = nada, 1 = a cero)
+    // Realce del músico enfocado. El spotlight de VR nace del zoom, que en AR no
+    // existe: allí la intención se declara sosteniendo la mirada, y quien mide esa
+    // permanencia es el player (updateARFocus). Aquí solo se recibe el veredicto
+    // —un índice— y se le pone ganancia. Factores, no dB, para multiplicar en el
+    // bucle sin convertir; los dB son la unidad de la API pública.
+    this._focusIdx   = -1;   // stem enfocado, o -1
+    this._focusBoost = 1;    // factor sobre el enfocado  (1 = sin realce)
+    this._focusDuck  = 1;    // factor sobre los demás    (1 = no se les toca)
     this._bedGain   = null;  // GainNode del bed, escrito por el duck (creado en attach)
     this._bedLevel  = null;  // GainNode del bed, estático (setBedLevel)
     this._bedLevelValue = 1; // se guarda aquí para sobrevivir a un attach posterior
@@ -671,9 +679,20 @@ export class ImmersiveAudioEngine {
       const focus = Math.pow(aim, this._focusExp);
       s._weight = focus * zN;                         // 0..1: cuán "enfocada" está
       if (s._weight > maxW) maxW = s._weight;
-      const target = this._restGain + s._weight * this._maxBoost;
+      // Realce por foco sostenido, EN CIMA del spotlight en vez de en su lugar:
+      // en AR el zoom es 0 y el peso también, así que sin esto no habría nada que
+      // multiplicar, y en VR los dos criterios apuntan al mismo músico y se suman.
+      // Sin foco (idx -1) los dos factores valen 1 y esto es la fórmula de antes.
+      let target = this._restGain + s._weight * this._maxBoost;
+      if (this._focusIdx >= 0)
+        target *= (s === this._stems[this._focusIdx]) ? this._focusBoost : this._focusDuck;
       s.gain.gain.setTargetAtTime(target, now, 0.08);
     }
+
+    // Un foco declarado agacha el bed tanto como lo haría un stem mirado de lleno:
+    // en AR maxW es 0 (no hay zoom) y el duck configurado no llegaría a actuar
+    // nunca. Con bedDuck a 0, que es lo de fábrica, esto no cambia nada.
+    if (this._focusIdx >= 0) maxW = 1;
 
     // Duck del bed, gobernado por el peso del stem MÁS enfocado, no por el zoom
     // a secas: acercarse sin mirar a nadie no debe apartar el fondo. Misma rampa
@@ -699,6 +718,107 @@ export class ImmersiveAudioEngine {
       if (w > bw) { bw = w; bi = i; }
     }
     return bi;
+  }
+
+  /**
+   * Stem al que se está MIRANDO, al margen del zoom.
+   *
+   * `getFocusedStem` vale para VR porque allí el peso es puntería × zoom, y el
+   * zoom es la declaración de intención del espectador. En AR no hay zoom —vale
+   * 0 siempre—, así que aquel peso es 0 para todos y no hay foco posible. Aquí
+   * el único dato es la mirada, medida sobre la geometría real: las fuentes
+   * ancladas se miden contra la cabeza, así que al andar por la sala el ángulo
+   * cambia solo, sin ponderar nada a mano.
+   *
+   * A igualdad de ángulo gana el más cercano. Dos músicos en la misma línea de
+   * visión son indistinguibles desde la pose de cabeza, y a 6 m un cono de 12°
+   * abarca 1,3 m —varios músicos caben dentro— mientras que a 2 m abarca 42 cm:
+   * cuanto más lejos, más gente comparte cono, y el de delante es el que tapa al
+   * de detrás y el que suena más fuerte.
+   *
+   * No decide nada por sí solo: quien mira un instante mira a todo. El tiempo de
+   * permanencia y la histéresis los pone quien llama (ver updateARFocus en el
+   * player), que es donde vive esa política.
+   *
+   * @param {object} [o]
+   * @param {number} [o.coneDeg=12]  Semiángulo del cono de mirada.
+   * @param {number} [o.tieAim=0.01] Diferencia de coseno bajo la cual dos
+   *                                 fuentes se consideran igual de centradas.
+   * @returns {number} índice de stem, o -1 si ninguno cae en el cono
+   */
+  getGazedStem({ coneDeg = 12, tieAim = 0.01 } = {}) {
+    if (!this._stems.length) return -1;
+    const f = this._lookForward, lp = this._listenerPos;
+    if (!f) return -1;
+    const minAim = Math.cos(coneDeg * Math.PI / 180);
+    let bi = -1, bAim = -1, bDist = Infinity;
+    for (let i = 0; i < this._stems.length; i++) {
+      const s = this._stems[i];
+      let dx, dy, dz, dist;
+      if (s.anchored) {
+        if (!s.pos) continue;
+        dx = s.pos[0] - lp[0]; dy = s.pos[1] - lp[1]; dz = s.pos[2] - lp[2];
+        dist = Math.hypot(dx, dy, dz) || 1;
+        dx /= dist; dy /= dist; dz /= dist;
+      } else {
+        if (!s.dir) continue;
+        [dx, dy, dz] = s.dir;              // ya unitario, a _stemRadius
+        dist = this._stemRadius;           // igual para todas: el desempate no entra
+      }
+      const aim = dx * f[0] + dy * f[1] + dz * f[2];
+      if (aim < minAim) continue;
+      if (bi < 0 || aim > bAim + tieAim || (Math.abs(aim - bAim) <= tieAim && dist < bDist)) {
+        bi = i; bAim = aim; bDist = dist;
+      }
+    }
+    return bi;
+  }
+
+  /**
+   * Declara qué músico está enfocado, para realzarlo. Quien decide es el player:
+   * el motor sabe hacia dónde mira la cabeza (getGazedStem), pero no cuánto rato
+   * lleva mirando, y sin esa permanencia el realce iría y vendría con cada temblor
+   * de cuello. Ver updateARFocus en el player, que es donde vive esa política.
+   *
+   * Es idempotente y barato: solo hace trabajo cuando el foco cambia de verdad,
+   * y entonces arranca la rampa en el acto en vez de esperar al siguiente
+   * update(), que es justo el instante que se oye.
+   *
+   * @param {number} i  índice de stem, o -1 para soltar el foco
+   */
+  setFocusedStem(i) {
+    const idx = (typeof i === 'number' && i >= 0 && i < this._stems.length) ? i : -1;
+    if (idx === this._focusIdx) return;
+    this._focusIdx = idx;
+    this._updateSpotlight();
+  }
+
+  /** Stem enfocado ahora mismo, o -1. */
+  getFocusedStemIndex() { return this._focusIdx; }
+
+  /**
+   * Cuánto se realza al músico enfocado, en dB.
+   *
+   * @param {object} [o]
+   * @param {number} [o.boostDb]  sube el enfocado (0 = sin realce)
+   * @param {number} [o.duckDb]   baja a los demás; se da en dB de atenuación,
+   *                              positivo hacia abajo (0 = no se les toca)
+   *
+   * Los dos hacen contraste, pero no suenan igual: `boostDb` acerca al músico,
+   * `duckDb` aparta a los otros. Subir solo el boost llega antes al techo de la
+   * mezcla —seis stems ya suenan a la vez— así que para un contraste fuerte sale
+   * mejor repartirlo entre los dos que pedirle 12 dB al boost.
+   */
+  setFocusParams({ boostDb, duckDb } = {}) {
+    if (boostDb != null) this._focusBoost = Math.pow(10, Number(boostDb) / 20);
+    if (duckDb  != null) this._focusDuck  = Math.pow(10, -Math.abs(Number(duckDb)) / 20);
+    this._updateSpotlight();
+  }
+
+  /** Parámetros de realce por foco, en dB (para guardar/restaurar). */
+  getFocusParams() {
+    return { boostDb: 20 * Math.log10(this._focusBoost),
+             duckDb: -20 * Math.log10(this._focusDuck) };
   }
 
   /**
@@ -779,6 +899,11 @@ export class ImmersiveAudioEngine {
     const D = 180 / Math.PI;
     return {
       zoomFactor: this._zoomFactor, zoomMin: lo, zoomMax: hi, zN,
+      // Con qué músico está el realce y cuánto pesa. Un stem que no sube mirándolo
+      // en AR es esto o el dwell del player: aquí se ve de cuál de los dos se trata.
+      focusIdx: this._focusIdx,
+      focusName: this._focusIdx >= 0 ? this._stems[this._focusIdx].name : null,
+      ...this.getFocusParams(),
       gazeAzimuthDeg: Math.atan2(-f[0], -f[2]) * D,
       gazeElevationDeg: Math.asin(Math.max(-1, Math.min(1, f[1]))) * D,
       // El duck y el nivel están en serie: lo que se oye es el producto. Se dan

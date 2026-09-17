@@ -59,6 +59,8 @@ CODEC="${CODEC:-vp9}"
 #      VIDEO_SIZE=3840x1920  VIDEO_FR=30  VIDEO_URL=udp://0.0.0.0:5001
 #      AUDIO_SRC=usb|udp   AUDIO_DEVICE=hw:X32  AUDIO_CHANNELS=32
 #      AUDIO_URL=udp://0.0.0.0:5002
+#      AUDIO_CODEC=pcm_s32le  formato de muestra al abrir ALSA (por defecto; las
+#                          interfaces UAC2 suelen NO aceptar el s16le de ffmpeg)
 #      FOA_CH="0,1,2,3"    canales del FOA dentro del device/stream (orden W,X,Y,Z)
 #      FOA_AFORMAT=0|1     1 → matriz A→B del Rode NT-SF1 antes de FORMAT
 #      STEM_CH="4,5,6,7"   canal de cada stem (mismo orden que la escena)
@@ -364,7 +366,10 @@ build_inputs_capture() {
 
   # — Audio multicanal (un solo input) — Sin wallclock ni -itsoffset (ver arriba).
   case "$AUDIO_SRC" in
-    usb) IN_ARGS+=("${q[@]}" -f alsa -channels "$AUDIO_CHANNELS" -i "$AUDIO_DEVICE") ;;
+    # -acodec: ffmpeg pide pcm_s16le por defecto y muchas interfaces UAC2 (X32 y
+    # similares) sólo aceptan S32_LE → "cannot set sample format ... Invalid
+    # argument" al arrancar. `arecord -D hw:X,0 --dump-hw-params` lista lo admitido.
+    usb) IN_ARGS+=("${q[@]}" -f alsa -acodec "${AUDIO_CODEC:-pcm_s32le}" -channels "$AUDIO_CHANNELS" -i "$AUDIO_DEVICE") ;;
     udp)
       [[ -n "$AUDIO_URL" ]] || { echo "AUDIO_SRC=udp pero AUDIO_URL vacío"; exit 1; }
       IN_ARGS+=("${q[@]}" -fflags nobuffer -i "$AUDIO_URL") ;;

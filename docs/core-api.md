@@ -103,6 +103,7 @@ bound to an `Object3D` (e.g. an AR anchor).
 > `bindStemToObject` anchor them, `unbindStem` releases them.
 | `setStemRadius(r)` | Radius of the static azimuth/elevation placement (default `1`). |
 | `getFocusedStem(minWeight = 0.2)` → `number` | Index of the most-focused source (look × zoom) above the threshold, or `-1`. Reuses the spotlight weight — used to trigger the close-up of the musician you look at. |
+| `getGazedStem({ coneDeg = 12, tieAim = 0.01 })` → `number` | Index of the source being **looked at**, zoom out of the picture, or `-1` if none falls in the cone. Anchored sources are measured head→source, so walking changes the angle by itself; equal angles go to the closer one. This is the AR counterpart of `getFocusedStem`, whose weight is always 0 there (no zoom). It decides nothing on its own — dwell and hysteresis belong to the caller. |
 | `get stemCount` → `number` | Number of spatial sources. |
 
 `ref` accepts a **numeric index** (`0..N-1`, channel order) or the source's
@@ -113,9 +114,13 @@ bound to an `Object3D` (e.g. an AR anchor).
 | Method | Description |
 |--------|-------------|
 | `setStemGainDb(indexOrName, dB)` | Fixed per-stem trim, in dB, applied before the spotlight. Levels the recording: `maxBoost` is the same for every stem, so one recorded 6 dB below the others never lifts off the bed. Its home is `scene.json` → `stems[i].gainDb`. |
-| `getSpotlightState()` | Instantaneous spotlight: zoom factor and range, normalized zoom, gaze azimuth/elevation, `bedGain` (the duck) and `bedLevel` (the static level — what you hear is the **product**), and per stem its direction, how far your gaze is from it in azimuth and elevation, its weight, trim and reached gain. Backs the player's `?spotlog=1` overlay. |
+| `getSpotlightState()` | Instantaneous spotlight: zoom factor and range, normalized zoom, gaze azimuth/elevation, the focused stem (`focusIdx`/`focusName`) with its `boostDb`/`duckDb`, `bedGain` (the duck) and `bedLevel` (the static level — what you hear is the **product**), and per stem its direction, how far your gaze is from it in azimuth and elevation, its weight, trim and reached gain. Backs the player's `?spotlog=1` overlay. |
 | `setSpotlightParams({ restGain, maxBoost, focusExp, zoomMin, zoomMax, bedDuck })` | Tune the spotlight. `restGain` = stem level at rest (0 = only on zoom). `maxBoost` = extra gain when looked at with max zoom. `focusExp` = focus-cone tightness. `zoomMin/zoomMax` = zoom range that maps to the boost. `bedDuck` (0..1) = how far the FOA bed drops when a musician is focused; `0.7` leaves the bed at 30%. |
 | `getSpotlightParams()` → `object` | Current spotlight params (to save/restore, e.g. on entering/leaving AR). |
+| `setFocusedStem(i)` | Declare which musician is focused, to raise them; `-1` releases. The engine knows where the head points, not for how long, and a boost that follows the raw gaze flickers with neck tremor — so the dwell policy stays with the caller (`updateARFocus` in the player) and this takes only its verdict. Cheap and idempotent: work happens on a change, and then the ramp starts at once. |
+| `getFocusedStemIndex()` → `number` | Focused source, or `-1`. |
+| `setFocusParams({ boostDb, duckDb })` | How much focus is worth, in dB. `boostDb` lifts the focused musician, `duckDb` (positive = down) lowers the rest. Both make contrast and they don't sound alike: the boost brings the musician closer, the duck pushes the others away. Boost alone reaches the mix ceiling sooner — six stems already play at once — so a strong contrast splits better between the two than asking 12 dB of the boost. Applied on top of the zoom spotlight, so with no focus declared nothing changes. |
+| `getFocusParams()` → `object` | Current `{ boostDb, duckDb }`. |
 | `setBedLevel(v)` / `getBedLevel()` | Static level of the FOA bed, 0..1, **multiplying** the duck rather than sharing a node with it. Two nodes because `bedDuck` is rewritten on every frame from the gaze, so a level written into it would not survive the next one. Used by AR (`scene.json` → `ar.bedGain`); the duck is left to the spotlight. |
 | `setSourceParams({ distanceModel, refDistance, rolloffFactor, maxDistance, smoothSec })` | Distance-attenuation curve of every source, plus `smoothSec`, the time constant used when an *anchored* position is moved (0 = jump). Applies live to existing panners. In AR this curve, not the spotlight, decides how loud a musician is. |
 | `getSourceParams()` → `object` | Current source params. |
@@ -143,6 +148,27 @@ How it works:
 
 - `renderer` is created with `alpha: true`; on entering AR, `setClearAlpha(0)`
   lets the **passthrough** show through. The 360 sphere is hidden.
+- **The 360 is not decoded in AR.** Hiding the sphere does not stop the decoder:
+  measured on the Quest, the loop ran at 90 fps with 0.52 ms of JavaScript per
+  frame while the browser kept decoding the 4K 360 at its full 24 fps for a
+  texture nobody samples — work done off the main thread, which is why it never
+  showed in a per-section split and still stalled the passthrough compositor when
+  the viewer walked. Entering AR therefore sets `manifest.disableVideo` and
+  **reloads the source** (Shaka only reads that flag at `load()`); leaving AR
+  reloads with video back on and re-attaches the texture. The audio survives the
+  reload because it lives in its own `AdaptationSet` (multichannel Opus in WebM)
+  and the `<video>` element stays the Web Audio source, just without a picture
+  track. Live reloads at the live edge; VOD saves `currentTime` and returns to it.
+  `?arnovideo=0` keeps the old behaviour for an A/B comparison.
+
+  > Verified on the Quest (2026-07-30): the frame rate holds and walking is
+  > smooth. Two caveats before trusting it elsewhere. The reload costs a
+  > **~1–2 s audio gap** on entering AR — it is fired *after* the session starts,
+  > where passthrough is already up and the gap is least annoying. And the
+  > audio's **channel count is re-negotiated** on reload: the
+  > `MediaElementAudioSourceNode` survives, but a silent fall back to stereo
+  > would also look like "smoother", so confirm the stems still come from their
+  > own positions.
 - `buildARSources()` places one marker per stem (using its azimuth/elevation) and
   calls `engine.bindStemToObject(i, marker)`.
 - In AR `restGain` is set to `1` (every source is audible from its real spot;
@@ -218,15 +244,23 @@ The `/api/encode` VOD path collects `scene.stems[*].closeup` (in order) into the
 
 - A **third Shaka instance** (`shakaCloseup`) loads the same manifest and plays
   the selected close-up track onto a **floating plane** in front of the camera
-  (works on desktop and in XR; the plane is a child of the camera).
+  (works on desktop and in XR; the plane is a child of the camera). It runs with
+  `manifest.disableAudio` and pinned to a close-up track, so it neither
+  re-downloads the multichannel Opus nor risks decoding the 4K a second time.
 - `setupCloseups()` detects the extra video tracks and builds the
   **stem → `RepresentationID`** map (stems with a close-up get `1..N` in order,
   matching `stream.sh`).
-- Each frame, `updateCloseupFocus()` calls `engine.getFocusedStem()` and shows
-  the focused musician's close-up (look + zoom). It's hidden in AR mode.
+- `updateCloseupFocus()` picks the musician from `engine.getFocusedStem()` (look
+  + zoom) and `updateCloseupAnim()`, once per rendered frame, brings the panel in
+  and out. It is hidden in AR mode.
 - The close-up element is kept in sync via `currentTime`/`playbackRate` like the
   audio element. Fully **backward-compatible**: a manifest with no close-up tracks
   does nothing.
+
+> ⚠️ Extra video `AdaptationSet`s change how Shaka chooses the **sphere's** track:
+> it picks by bandwidth even with ABR off, and the 4K loses. `pinSphereTrack()`
+> has to run after every manifest load. That, the transition, the preload and the
+> thresholds are all in **[`closeup-panel.md`](closeup-panel.md)**.
 
 ### `scene.json` additions
 
@@ -245,7 +279,7 @@ The `/api/encode` VOD path collects `scene.stems[*].closeup` (in order) into the
 
 | Area | File | Change |
 |------|------|--------|
-| Core | `src/audio/ImmersiveAudioEngine.js` | Stems → spatial sources (`pos`/`object3d`); `setStemPosition`, `bindStemToObject`, `unbindStem`, `update`, `setStemRadius`, `getFocusedStem`, `getSpotlightParams`, `get stemCount`. Listener position from the head matrix. Spotlight uses the live head→source direction. |
+| Core | `src/audio/ImmersiveAudioEngine.js` | Stems → spatial sources (`pos`/`object3d`); `setStemPosition`, `bindStemToObject`, `unbindStem`, `update`, `setStemRadius`, `getFocusedStem`, `getGazedStem`, `getSpotlightParams`, `get stemCount`. Listener position from the head matrix. Spotlight uses the live head→source direction. |
 | Player | `index.html` | WebXR **AR** mode (passthrough, 3D source markers); **close-up** floating plane + 3rd Shaka instance + focus-driven track switching; `renderer` `alpha:true`. |
 | Encode | `stream.sh` | Multi-track DASH: `CLOSEUPS`/`CLOSEUP_SCALE`/`CLOSEUP_VBITRATE`, dynamic adaptation sets, per-stream video filters/bitrate. |
 | Editor | `editor.html` | Per-musician close-up video selector (VOD). |

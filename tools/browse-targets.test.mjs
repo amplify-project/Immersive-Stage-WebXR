@@ -12,7 +12,9 @@ import fs from 'fs';
 
 const EDITOR = process.argv[2] || new URL('../editor.html', import.meta.url);
 const html = fs.readFileSync(EDITOR, 'utf8');
-const js = html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1];
+// The editor's own code is the INLINE script. Taking the first <script> of any
+// kind broke the day the mesh viewer put three.js and GLTFLoader above it.
+const js = html.match(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/)[1];
 
 const grab = name => {
   const plain = js.indexOf(`function ${name}(`), asyn = js.indexOf(`async function ${name}(`);
@@ -96,8 +98,8 @@ const mk = () => {
     ${grab('addStemFile')}
     return { importFile, set: (t, a) => { brTarget = BROWSE[t]; brArgv = a; } };`;
   return new Function('$', 'fetch', 'toast', 'closeBrowser', 'browseTo', 'renderStems',
-                      'drawRadar', 'syncSelPanel', 'selected', 'getScene', 'getMedia', 'setMedia', src)
-    ($, fetchStub, () => {}, () => {}, () => {}, () => redraws++, () => {}, () => {}, -1,
+                      'drawRadar', 'drawViews', 'syncSelPanel', 'selected', 'getScene', 'getMedia', 'setMedia', src)
+    ($, fetchStub, () => {}, () => {}, () => {}, () => redraws++, () => {}, () => {}, () => {}, -1,
      () => scene, () => media, m => media = m);
 };
 
