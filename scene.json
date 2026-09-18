@@ -11,14 +11,14 @@
       "elevationDeg": 0,
       "gainDb": 0,
       "mesh": {
-        "url": "meshes/drums_bateria.glb",
-        "yawDeg": -90,
-        "heightM": 0.8
+        "url": "meshes/drumkit_animation.glb",
+        "heightM": 1.7,
+        "yawDeg": 91
       },
       "ar": {
-        "x": -0.03,
-        "y": 1.3,
-        "z": -1.6
+        "x": -1.11,
+        "y": 1.08,
+        "z": -4.08
       }
     },
     {
@@ -28,14 +28,14 @@
       "elevationDeg": 0,
       "gainDb": 13.9,
       "mesh": {
-        "url": "meshes/animated_musical_trem_playing_guitar_loop.glb",
-        "yawDeg": -147,
+        "url": "meshes/guitar.glb",
+        "yawDeg": -89,
         "heightM": 1.7
       },
       "ar": {
-        "x": -1.11,
-        "y": 1.3,
-        "z": 1.15
+        "x": -3.72,
+        "y": 3,
+        "z": -4.07
       }
     },
     {
@@ -44,7 +44,15 @@
       "azimuthDeg": -90,
       "elevationDeg": 0,
       "gainDb": 2.1,
-      "mesh": "meshes/test-figure-c.glb"
+      "mesh": {
+        "url": "meshes/synthesizer_free.glb",
+        "yawDeg": -90
+      },
+      "ar": {
+        "x": 2.42,
+        "y": 2.07,
+        "z": -4.04
+      }
     },
     {
       "file": "media/SAX - stem - sync.mp3",
@@ -53,9 +61,14 @@
       "elevationDeg": 0,
       "gainDb": 5.8,
       "mesh": {
-        "url": "meshes/test-figure-b.glb",
+        "url": "meshes/saxophone_alto.glb",
         "heightM": 1.4,
-        "yawDeg": 45
+        "yawDeg": -89
+      },
+      "ar": {
+        "x": 3.75,
+        "y": 3,
+        "z": -4.07
       }
     },
     {
@@ -63,7 +76,17 @@
       "name": "TBONE",
       "azimuthDeg": -45,
       "elevationDeg": 0,
-      "gainDb": 13.6
+      "gainDb": 13.6,
+      "ar": {
+        "x": 1.11,
+        "y": 1.08,
+        "z": -4.07
+      },
+      "mesh": {
+        "url": "meshes/used_trombone_NO_MATS.glb",
+        "heightM": 0.4,
+        "yawDeg": 1
+      }
     },
     {
       "file": "media/TPT - stem - sync.mp3",
@@ -72,11 +95,14 @@
       "elevationDeg": 0,
       "gainDb": 12.2,
       "ar": {
-        "x": -1.43,
-        "y": 1.34,
-        "z": -0.73
+        "x": -2.5,
+        "y": 1.67,
+        "z": -4.11
       },
-      "mesh": "meshes/test-figure-b.glb"
+      "mesh": {
+        "url": "meshes/trumpet.glb",
+        "yawDeg": -91
+      }
     }
   ],
   "alignment": {
