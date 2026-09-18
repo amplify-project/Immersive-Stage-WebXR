@@ -245,7 +245,7 @@ let sharedActive = false;
 // Salud del marco: sin esto, "la sala está girada" no distingue entre no haber
 // tenido nunca una pose (y estar dibujando en la identidad, o sea en el origen
 // de ESTE casco) y tenerla y estar mal.
-const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0 };
+const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0, lastResetAt: 0 };
 
 function syncReading() {
   return (window.syncDiag && window.syncDiag()) || null;
@@ -321,10 +321,16 @@ function syncPanelReport(now) {
   // `pose` a cero con la sala girada dice por sí solo que estamos dibujando en la
   // identidad, o sea en el origen de este casco y no en el común.
   if (SHAREDSPACE) {
+    // Lo que decide no es cuántos resets hubo, sino si han PARADO: un marco que
+    // se resetea cada pocos segundos no se ha asentado, y la sala no puede estar
+    // quieta encima de él.
+    const since = _shared.lastResetAt
+      ? ((performance.now() - _shared.lastResetAt) / 1000).toFixed(0) + 's'
+      : '—';
     arPerfPanelDraw(sharedActive
       ? [`shared space: ON`,
          `pose ${_shared.ok} · null ${_shared.nulls}`,
-         `resets ${_shared.resets}`,
+         `resets ${_shared.resets} · last ${since}`,
          `S yaw ${_shared.yawDeg.toFixed(1)}°`]
       : ['shared space: OFF', '', 'flag + Enhanced', 'Spatial Services']);
     return;
@@ -2152,27 +2158,22 @@ function updateSharedFrame(frame, refSpace) {
 // El `reset` del espacio compartido: el navegador entra con un marco provisional
 // —el origen de este casco— y a los pocos segundos lo cambia por el de la sala de
 // verdad. Ahí está la diferencia entre los dos cascos: el primero en entrar funda
-// el espacio y no recibe reset nunca, y el segundo sí. Si al llegar el reset nos
-// quedamos con el espacio viejo, ese casco dibuja la sala en su propio origen,
-// girado respecto al común — que es exactamente como se ve el fallo.
+// el espacio y no recibe reset nunca, y el segundo sí.
 //
-// Pedimos el espacio otra vez en vez de fiarnos de que el objeto siga vivo: no
-// está escrito en ninguna parte que lo esté, y volver a pedirlo es barato.
-async function onSharedReset() {
+// No se vuelve a pedir el espacio: un `reset` dice que el origen de ESTE espacio
+// ha cambiado, y `getPose` sobre el mismo objeto ya devuelve la transformada
+// nueva. Pedirlo otra vez —que es lo que se intentó primero— crea un espacio que
+// vuelve a resolverse y a resetearse, y el remedio se convierte en el bucle.
+// Tampoco se avisa por pantalla: el aviso dura cuatro segundos y con resets
+// seguidos tapa para siempre el panel que hay que leer. Se cuentan y ya.
+function onSharedReset() {
   _shared.resets++;
-  arLogAdd(`shared space: reset #${_shared.resets} — marco nuevo, pidiéndolo otra vez`);
-  try {
-    const fresh = await arSession.requestReferenceSpace('shared');
-    arSharedSpace = fresh;
-    attachSharedReset(fresh);
-    arNotice(`room frame updated (reset ${_shared.resets})`);
-  } catch (e) {
-    arLogAdd('shared space: no se pudo repedir tras el reset', e);
-  }
+  _shared.lastResetAt = performance.now();
+  arLogAdd(`shared space: reset #${_shared.resets}`);
 }
 
 function attachSharedReset(space) {
-  if (space && space.addEventListener) space.addEventListener('reset', onSharedReset, { once: true });
+  if (space && space.addEventListener) space.addEventListener('reset', onSharedReset);
 }
 
 // La cabeza, en el marco del PADRE de roomGroup, que es donde vive la
@@ -2714,7 +2715,8 @@ async function enterAR() {
       try {
         arSharedSpace = await arSession.requestReferenceSpace('shared');
         sharedActive = true;
-        _shared.ok = _shared.nulls = _shared.resets = 0; _shared.everOk = false;
+        _shared.ok = _shared.nulls = _shared.resets = 0;
+        _shared.everOk = false; _shared.lastResetAt = 0;
         attachSharedReset(arSharedSpace);
         arLogAdd(`shared space: concedido (${arSharedSpace.constructor && arSharedSpace.constructor.name})`);
       } catch (e) {
