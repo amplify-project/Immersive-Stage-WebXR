@@ -791,7 +791,18 @@ const handler = (req, res) => {
 
   if (pathname.startsWith('/api/')) return handleAPI(req, res, pathname);
 
-  if (pathname === '/') pathname = '/index.html';
+  // Redirect en vez de servir index.html calladamente en '/'. Para todo lo demás
+  // las dos URLs son la misma página; para los "shared spaces" de WebXR NO: el
+  // espacio se expone por página, así que un casco en '/' y otro en '/index.html'
+  // acaban en espacios distintos, cada uno con su uuid, sin que nada falle por
+  // ningún otro sitio. Costó una tarde. Mandando a todo el mundo a la misma URL
+  // deja de poder ocurrir.
+  if (pathname === '/') {
+    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    res.writeHead(302, { Location: '/index.html' + qs });
+    res.end();
+    return;
+  }
 
   const filePath = path.join(ROOT, path.normalize(pathname));
   if (!filePath.startsWith(ROOT)) { res.writeHead(403); res.end('Forbidden'); return; }
