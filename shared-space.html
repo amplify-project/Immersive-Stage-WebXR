@@ -171,6 +171,12 @@ async function enter(mode) {
     }
   }
 
+  // "I could not see anything in there" has two quite different causes, and the
+  // overlay being refused is one of them. Say which before anything else.
+  const ov = session.domOverlayState;
+  if (ov && ov.type) log(`dom-overlay granted (${ov.type}) — the reading is visible in the headset`);
+  else log('dom-overlay NOT granted — nothing will be visible in session; read the page after exiting');
+
   $('ar').disabled = $('vr').disabled = true;
   $('exit').disabled = false;
   $('hud').classList.add('on');
@@ -199,15 +205,21 @@ async function enter(mode) {
     space = await session.requestReferenceSpace('shared');
   } catch (e) {
     log(`requestReferenceSpace('shared') failed: ${e.name}: ${e.message}`);
-    show('—', 'failed', 'no shared reference space');
+    // The reason belongs in the box. A red box that says only "failed" sends
+    // you looking in the browser for something that is switched off in the OS.
+    show(`${e.name}: ${e.message}`, 'failed', "the session granted 'shared' but the space was refused");
+    log('→ Settings → Privacy → Device Permissions → Enhanced Spatial Services (and');
+    log('  Share point cloud data) must be ON in EACH headset: the shared space is');
+    log('  built on Shared Spatial Anchors, and those are what that permission covers.');
     return;
   }
-  log('got a shared reference space');
+  log(`got a reference space: ${space.constructor && space.constructor.name}`);
 
   let resets = 0;
   const report = () => {
     const u = readUuid(space);
-    if (!u) { show('—', 'failed', 'space has no readable uuid'); return; }
+    if (!u) { show('(no uuid on the space object — see the log)', 'failed',
+                   'a space, but not a shared one'); return; }
     // Before the first reset this is the placeholder, not the room. Saying so
     // matters: two headsets comparing placeholders would both be wrong and
     // would look right.
