@@ -1606,7 +1606,7 @@ async function enterXR() {
       xrSession = null;
       telemetry?.stop();
       if (debugMesh) debugMesh.visible = false;
-      if (SYNCLOG) arPerfPanelClear();
+      if (SYNCLOG || SHAREDSPACE) arPerfPanelClear();
       document.getElementById('xr-btn').textContent = 'VR';
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
@@ -1706,7 +1706,7 @@ async function enterXR() {
             // ?synclog=1: el error de sincronía delante de la cara, el mismo
             // sprite que en AR. Aquí no hay avisos del ancla con los que
             // turnarse, así que va derecho.
-            if (SYNCLOG) {
+            if (SYNCLOG || SHAREDSPACE) {
               arPerfPanelPlace(pose);
               syncPanelReport(performance.now());
             }
@@ -2833,15 +2833,15 @@ async function enterAR() {
           }
           // El panel sigue a la cabeza mientras haya algo que enseñar: el
           // informe de ?arperf=1, o un aviso hasta que caduque.
-          if (ARPERF || SYNCLOG || arNoticeUntil) arPerfPanelPlace(pose);
+          if (ARPERF || SYNCLOG || SHAREDSPACE || arNoticeUntil) arPerfPanelPlace(pose);
           if (arNoticeUntil && performance.now() > arNoticeUntil) {
             arNoticeUntil = 0;
             // Con ?arperf=1 o ?synclog=1 el panel se queda: tiene qué enseñar.
-            if (!ARPERF && !SYNCLOG) arPerfPanelClear();
+            if (!ARPERF && !SYNCLOG && !SHAREDSPACE) arPerfPanelClear();
           }
           // Después del aviso, no encima: los carteles del ancla son de cuatro
           // segundos y son los que se leen mientras se calibra.
-          if (SYNCLOG && !ARPERF && !arNoticeUntil) syncPanelReport(performance.now());
+          if ((SYNCLOG || SHAREDSPACE) && !ARPERF && !arNoticeUntil) syncPanelReport(performance.now());
         }
       }
       // Sin updateAmbiViz(): es un canvas 2D del HUD de la página, que en sesión
