@@ -242,6 +242,10 @@ const SHAREDSPACE = new URLSearchParams(location.search).get('sharedspace') === 
 let sharedGroup = null;      // S: origen compartido → mi local-floor
 let arSharedSpace = null;    // el XRReferenceSpace de tipo 'shared'
 let sharedActive = false;
+// Salud del marco: sin esto, "la sala está girada" no distingue entre no haber
+// tenido nunca una pose (y estar dibujando en la identidad, o sea en el origen
+// de ESTE casco) y tenerla y estar mal.
+const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0 };
 
 function syncReading() {
   return (window.syncDiag && window.syncDiag()) || null;
@@ -313,6 +317,18 @@ let _syncPanelAt = 0;
 function syncPanelReport(now) {
   if (now - _syncPanelAt < 1000) return;
   _syncPanelAt = now;
+  // Con ?sharedspace=1 el panel enseña el marco: es lo que se está mirando, y
+  // `pose` a cero con la sala girada dice por sí solo que estamos dibujando en la
+  // identidad, o sea en el origen de este casco y no en el común.
+  if (SHAREDSPACE) {
+    arPerfPanelDraw(sharedActive
+      ? [`shared space: ON`,
+         `pose ${_shared.ok} · null ${_shared.nulls}`,
+         `resets ${_shared.resets}`,
+         `S yaw ${_shared.yawDeg.toFixed(1)}°`]
+      : ['shared space: OFF', '', 'flag + Enhanced', 'Spatial Services']);
+    return;
+  }
   const d = syncReading();
   arPerfPanelDraw(d
     ? [`sync ${d.state}${d.paused ? ' PAUSED' : ''}  v=${d.velocity}`,
@@ -2124,9 +2140,39 @@ function saveARCalib() {
 // que para colocar una fuente no es nada.
 function updateSharedFrame(frame, refSpace) {
   const p = frame.getPose(arSharedSpace, refSpace);
-  if (!p) return;              // sin pose este frame: se queda la última buena
+  if (!p) { _shared.nulls++; return; }   // sin pose: se queda la última buena
+  _shared.ok++; _shared.everOk = true;
   sharedGroup.matrix.fromArray(p.transform.matrix);
   sharedGroup.matrixWorldNeedsUpdate = true;
+  const q = p.transform.orientation;
+  _shared.yawDeg = Math.atan2(2 * (q.w * q.y + q.x * q.z),
+                              1 - 2 * (q.y * q.y + q.z * q.z)) * 180 / Math.PI;
+}
+
+// El `reset` del espacio compartido: el navegador entra con un marco provisional
+// —el origen de este casco— y a los pocos segundos lo cambia por el de la sala de
+// verdad. Ahí está la diferencia entre los dos cascos: el primero en entrar funda
+// el espacio y no recibe reset nunca, y el segundo sí. Si al llegar el reset nos
+// quedamos con el espacio viejo, ese casco dibuja la sala en su propio origen,
+// girado respecto al común — que es exactamente como se ve el fallo.
+//
+// Pedimos el espacio otra vez en vez de fiarnos de que el objeto siga vivo: no
+// está escrito en ninguna parte que lo esté, y volver a pedirlo es barato.
+async function onSharedReset() {
+  _shared.resets++;
+  arLogAdd(`shared space: reset #${_shared.resets} — marco nuevo, pidiéndolo otra vez`);
+  try {
+    const fresh = await arSession.requestReferenceSpace('shared');
+    arSharedSpace = fresh;
+    attachSharedReset(fresh);
+    arNotice(`room frame updated (reset ${_shared.resets})`);
+  } catch (e) {
+    arLogAdd('shared space: no se pudo repedir tras el reset', e);
+  }
+}
+
+function attachSharedReset(space) {
+  if (space && space.addEventListener) space.addEventListener('reset', onSharedReset, { once: true });
 }
 
 // La cabeza, en el marco del PADRE de roomGroup, que es donde vive la
@@ -2668,7 +2714,9 @@ async function enterAR() {
       try {
         arSharedSpace = await arSession.requestReferenceSpace('shared');
         sharedActive = true;
-        arLogAdd('shared space: concedido');
+        _shared.ok = _shared.nulls = _shared.resets = 0; _shared.everOk = false;
+        attachSharedReset(arSharedSpace);
+        arLogAdd(`shared space: concedido (${arSharedSpace.constructor && arSharedSpace.constructor.name})`);
       } catch (e) {
         arLogAdd('shared space: NO', e);
         arLogAdd('→ flag "WebXR experiments" + Enhanced Spatial Services en cada casco');
@@ -2706,7 +2754,9 @@ async function enterAR() {
     // Sin await: no hay pose de ancla que leer hasta que haya un XRFrame, así
     // que la sala arranca con el {x,z,yaw} guardado y el bucle la corrige en
     // cuanto el ancla esté. Un frame en el sitio viejo no lo ve nadie.
-    restoreRoomAnchor(arSession);
+    // El ancla es un punto de ESTE casco: dentro del marco común no decide nada,
+    // y restaurarla gasta tiempo y toca el cupo de 8 para nada.
+    if (!sharedActive) restoreRoomAnchor(arSession);
     buildARSources();
 
     arSession.addEventListener('end', () => {
