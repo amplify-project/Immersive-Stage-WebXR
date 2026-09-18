@@ -128,7 +128,7 @@ function show(uuid, cls, state) {
 // the way that survives being wrong: try the likely spellings, and if none of
 // them hold a string, dump what the object does carry so the next person knows.
 function readUuid(space) {
-  for (const k of ['uuid', 'UUID', 'id', 'sharedSpaceId']) {
+  for (const k of ['UUId', 'uuid', 'UUID', 'id', 'sharedSpaceId']) {
     if (typeof space[k] === 'string' && space[k]) return space[k];
   }
   // A `for...in` was the first thing tried here and it found nothing, which was

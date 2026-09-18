@@ -241,11 +241,13 @@ const SYNCLOG = new URLSearchParams(location.search).get('synclog') === '1';
 const SHAREDSPACE = new URLSearchParams(location.search).get('sharedspace') === '1';
 let sharedGroup = null;      // S: origen compartido → mi local-floor
 let arSharedSpace = null;    // el XRReferenceSpace de tipo 'shared'
+let arViewerSpace = null;    // 'viewer', el puente para leer el marco común
 let sharedActive = false;
 // Salud del marco: sin esto, "la sala está girada" no distingue entre no haber
 // tenido nunca una pose (y estar dibujando en la identidad, o sea en el origen
 // de ESTE casco) y tenerla y estar mal.
-const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0, lastResetAt: 0, x: 0, z: 0 };
+const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0, lastResetAt: 0,
+                  x: 0, z: 0, uuid: '' };
 
 function syncReading() {
   return (window.syncDiag && window.syncDiag()) || null;
@@ -336,8 +338,12 @@ function syncPanelReport(now) {
     // distinto manda la sala a otro sitio.
     const ident = Math.abs(_shared.x) < 0.02 && Math.abs(_shared.z) < 0.02
                && Math.abs(_shared.yawDeg) < 1.0;
+    // El uuid es la identidad del espacio: seis caracteres bastan para que dos
+    // personas lo comparen de viva voz, y distintos = espacios distintos, que es
+    // la pregunta entera.
+    const uu = _shared.uuid ? _shared.uuid.slice(-6) : '—';
     arPerfPanelDraw(sharedActive
-      ? [`shared space: ${ident ? 'ON but IDENTITY' : 'ON'}`,
+      ? [`shared ${ident ? 'IDENTITY' : 'ON'} · ${uu}`,
          `pose ${_shared.ok} · null ${_shared.nulls}`,
          `resets ${_shared.resets} · last ${since}`,
          `S ${_shared.x.toFixed(2)},${_shared.z.toFixed(2)} y${_shared.yawDeg.toFixed(0)}`]
@@ -2201,16 +2207,36 @@ function showSharedOrigin(on) {
   sharedGroup.add(sharedOriginMarker);           // en el origen del marco común
 }
 
-function updateSharedFrame(frame, refSpace) {
-  const p = frame.getPose(arSharedSpace, refSpace);
-  if (!p) { _shared.nulls++; return; }   // sin pose: se queda la última buena
+// S (origen compartido → mi local-floor), sacada por el visor.
+//
+// El primer intento fue `getPose(espacio compartido, local-floor)`, que devolvía
+// algo —no nulo, estable— pero colocaba la sala en cualquier parte. El ejemplo de
+// Cabanier, que funciona, nunca usa el espacio compartido como objetivo: lo usa
+// siempre como BASE, `getPose(viewer, shared)`. Y entrega ese espacio a three
+// como reference space (`renderer.xr.setReferenceSpace`), que la r128 no tiene.
+//
+// Se puede tener lo mismo sin tocar three ni cambiar de versión, componiendo las
+// dos poses del visor, que es un sitio que ambos marcos saben expresar:
+//
+//     visor → local-floor   A   (getViewerPose, la que ya tenemos)
+//     visor → compartido    B   (getPose(viewer, shared), la del ejemplo)
+//     compartido → local    S = A · B⁻¹
+//
+// Así la única llamada nueva es la que el ejemplo demuestra que el navegador
+// implementa de verdad.
+const _mA = new THREE.Matrix4();
+function updateSharedFrame(frame, refSpace, pose) {
+  if (!arViewerSpace) { _shared.nulls++; return; }
+  const b = frame.getPose(arViewerSpace, arSharedSpace);
+  if (!b) { _shared.nulls++; return; }   // sin pose: se queda la última buena
   _shared.ok++; _shared.everOk = true;
-  sharedGroup.matrix.fromArray(p.transform.matrix);
+  _mA.fromArray(pose.transform.matrix);                  // A: visor → local-floor
+  sharedGroup.matrix.fromArray(b.transform.inverse.matrix)   // B⁻¹: compartido → visor
+             .premultiply(_mA);                          // S = A · B⁻¹
   sharedGroup.matrixWorldNeedsUpdate = true;
-  const q = p.transform.orientation, t = p.transform.position;
-  _shared.yawDeg = Math.atan2(2 * (q.w * q.y + q.x * q.z),
-                              1 - 2 * (q.y * q.y + q.z * q.z)) * 180 / Math.PI;
-  _shared.x = t.x; _shared.z = t.z;
+  const e = sharedGroup.matrix.elements;
+  _shared.x = e[12]; _shared.z = e[14];
+  _shared.yawDeg = Math.atan2(-e[8], e[0]) * 180 / Math.PI;
 }
 
 // El `reset` del espacio compartido: el navegador entra con un marco provisional
@@ -2753,7 +2779,8 @@ async function enterAR() {
       // opcionales para no dejar sin AR a un runtime que no la traiga: sin ella
       // se cae a la calibración a mano, que sigue entera.
       optionalFeatures: SHAREDSPACE
-        ? ['hand-tracking', 'anchors', 'shared']
+        // 'unbounded' porque el ejemplo que funciona lo pide junto a 'shared'.
+        ? ['hand-tracking', 'anchors', 'shared', 'unbounded']
         : ['hand-tracking', 'anchors'],
     });
     // Lo primero a descartar cuando la sala no vuelve a su sitio: sin 'anchors'
@@ -2777,6 +2804,11 @@ async function enterAR() {
         _shared.everOk = false; _shared.lastResetAt = 0;
         attachSharedReset(arSharedSpace);
         showSharedOrigin(true);
+        arViewerSpace = await arSession.requestReferenceSpace('viewer');
+        // `UUId`, así escrito. Ninguna de las grafías que probamos a ojo
+        // (`uuid`, `UUID`, `id`) era la buena, y por eso dimos por hecho que el
+        // espacio no lo traía.
+        _shared.uuid = arSharedSpace.UUId || arSharedSpace.uuid || '';
         arLogAdd(`shared space: concedido (${arSharedSpace.constructor && arSharedSpace.constructor.name})`);
         // El uuid, sin adivinar el nombre: los atributos WebIDL viven en el
         // PROTOTIPO, así que mirar el objeto no los encuentra. Uuids distintos en
@@ -2841,7 +2873,7 @@ async function enterAR() {
       if (arCalibrating) { if (!sharedActive) saveARCalib(); arCalibrating = false; }
       // El espacio compartido muere con la sesión (y del todo cuando sale el
       // último), así que no hay nada que conservar: la sala vuelve a la escena.
-      sharedActive = false; arSharedSpace = null;
+      sharedActive = false; arSharedSpace = null; arViewerSpace = null;
       showSharedOrigin(false);
       sharedGroup.matrix.identity();
       sharedGroup.matrixWorldNeedsUpdate = true;
@@ -2872,7 +2904,7 @@ async function enterAR() {
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
-          if (sharedActive) updateSharedFrame(frame, refSpace);   // S: el marco común, este frame
+          if (sharedActive) updateSharedFrame(frame, refSpace, pose);  // S: el marco común, este frame
           updateARCalib(frame, refSpace, pose);                   // recolocar la sala (grip + joysticks)
           // El ancla manda salvo mientras la mano la está moviendo. Con espacio
           // compartido NO: el ancla es un punto de ESTE casco y el marco común ya
