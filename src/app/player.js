@@ -2163,6 +2163,25 @@ function saveARCalib() {
 // parten en dos: si los dos cascos ven el cubo en el MISMO punto físico y los
 // ejes apuntando igual, el marco es correcto y el fallo está río abajo. Si no,
 // el marco que os dan ya es distinto y no hay nada que arreglar en este código.
+// Todo lo que el espacio lleva encima, propiedades del prototipo incluidas. Los
+// atributos de WebIDL se definen ahí, no en la instancia, así que un `for...in`
+// —que es lo que se intentó primero— puede no verlos.
+function describeSpace(space) {
+  const out = [];
+  const seen = new Set();
+  for (let o = space; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    for (const k of Object.getOwnPropertyNames(o)) {
+      if (seen.has(k) || k === 'constructor') continue;
+      seen.add(k);
+      let v;
+      try { v = space[k]; } catch (_) { continue; }
+      if (typeof v === 'function') continue;
+      out.push(`${k}=${typeof v === 'object' ? (v && v.constructor ? v.constructor.name : v) : v}`);
+    }
+  }
+  return out.join(' · ') || '(nada legible)';
+}
+
 let sharedOriginMarker = null;
 function showSharedOrigin(on) {
   if (!on) {
@@ -2759,6 +2778,10 @@ async function enterAR() {
         attachSharedReset(arSharedSpace);
         showSharedOrigin(true);
         arLogAdd(`shared space: concedido (${arSharedSpace.constructor && arSharedSpace.constructor.name})`);
+        // El uuid, sin adivinar el nombre: los atributos WebIDL viven en el
+        // PROTOTIPO, así que mirar el objeto no los encuentra. Uuids distintos en
+        // los dos cascos = espacios distintos, y eso lo contesta todo de una vez.
+        arLogAdd('shared space: ' + describeSpace(arSharedSpace));
       } catch (e) {
         arLogAdd('shared space: NO', e);
         arLogAdd('→ flag "WebXR experiments" + Enhanced Spatial Services en cada casco');

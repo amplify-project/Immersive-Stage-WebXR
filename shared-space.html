@@ -131,9 +131,22 @@ function readUuid(space) {
   for (const k of ['uuid', 'UUID', 'id', 'sharedSpaceId']) {
     if (typeof space[k] === 'string' && space[k]) return space[k];
   }
-  const keys = [];
-  for (const k in space) keys.push(k + '=' + typeof space[k]);
-  log('no uuid-shaped property. The space carries: ' + (keys.join(', ') || '(nothing enumerable)'));
+  // A `for...in` was the first thing tried here and it found nothing, which was
+  // the wrong conclusion drawn from the wrong place: WebIDL attributes live on
+  // the PROTOTYPE, so walk that instead of guessing names.
+  const out = [];
+  const seen = new Set();
+  for (let o = space; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    for (const k of Object.getOwnPropertyNames(o)) {
+      if (seen.has(k) || k === 'constructor') continue;
+      seen.add(k);
+      let v;
+      try { v = space[k]; } catch (_) { continue; }
+      if (typeof v === 'function') continue;
+      out.push(k + '=' + (typeof v === 'object' ? (v && v.constructor ? v.constructor.name : v) : v));
+    }
+  }
+  log(`${space.constructor && space.constructor.name} carries: ` + (out.join(' · ') || '(nothing readable)'));
   return null;
 }
 
