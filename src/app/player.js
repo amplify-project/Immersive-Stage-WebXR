@@ -245,7 +245,7 @@ let sharedActive = false;
 // Salud del marco: sin esto, "la sala está girada" no distingue entre no haber
 // tenido nunca una pose (y estar dibujando en la identidad, o sea en el origen
 // de ESTE casco) y tenerla y estar mal.
-const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0, lastResetAt: 0 };
+const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0, lastResetAt: 0, x: 0, z: 0 };
 
 function syncReading() {
   return (window.syncDiag && window.syncDiag()) || null;
@@ -327,11 +327,20 @@ function syncPanelReport(now) {
     const since = _shared.lastResetAt
       ? ((performance.now() - _shared.lastResetAt) / 1000).toFixed(0) + 's'
       : '—';
+    // S es la transformada del origen común a MI local-floor. Si sale la
+    // identidad, el "espacio compartido" que nos han dado es nuestro propio
+    // marco —el provisional del que avisa el README— y no hay colocalización
+    // ninguna, por mucho que la feature esté concedida. Un S identidad en los dos
+    // cascos explica que la sala dependa del boundary: el local-floor del Quest
+    // nace del boundary, así que dos boundaries parecidos casi coinciden y uno
+    // distinto manda la sala a otro sitio.
+    const ident = Math.abs(_shared.x) < 0.02 && Math.abs(_shared.z) < 0.02
+               && Math.abs(_shared.yawDeg) < 1.0;
     arPerfPanelDraw(sharedActive
-      ? [`shared space: ON`,
+      ? [`shared space: ${ident ? 'ON but IDENTITY' : 'ON'}`,
          `pose ${_shared.ok} · null ${_shared.nulls}`,
          `resets ${_shared.resets} · last ${since}`,
-         `S yaw ${_shared.yawDeg.toFixed(1)}°`]
+         `S ${_shared.x.toFixed(2)},${_shared.z.toFixed(2)} y${_shared.yawDeg.toFixed(0)}`]
       : ['shared space: OFF', '', 'flag + Enhanced', 'Spatial Services']);
     return;
   }
@@ -2150,9 +2159,10 @@ function updateSharedFrame(frame, refSpace) {
   _shared.ok++; _shared.everOk = true;
   sharedGroup.matrix.fromArray(p.transform.matrix);
   sharedGroup.matrixWorldNeedsUpdate = true;
-  const q = p.transform.orientation;
+  const q = p.transform.orientation, t = p.transform.position;
   _shared.yawDeg = Math.atan2(2 * (q.w * q.y + q.x * q.z),
                               1 - 2 * (q.y * q.y + q.z * q.z)) * 180 / Math.PI;
+  _shared.x = t.x; _shared.z = t.z;
 }
 
 // El `reset` del espacio compartido: el navegador entra con un marco provisional
