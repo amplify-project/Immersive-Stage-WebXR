@@ -128,8 +128,14 @@ function initThree() {
   // Marco de sala: de él cuelgan las fuentes ancladas en AR. Su transformada ES
   // la calibración (ver applyARCalib), así que moverlo mueve a la vez los
   // marcadores y sus panners, que siguen la matrixWorld.
+  // El marco compartido entre cascos (ver SHAREDSPACE). Sin él es la identidad y
+  // esto es exactamente lo de siempre: roomGroup colgando de la escena.
+  sharedGroup = new THREE.Group();
+  sharedGroup.matrixAutoUpdate = false;   // su matriz la pone la pose, no un TRS
+  scene.add(sharedGroup);
+
   roomGroup = new THREE.Group();
-  scene.add(roomGroup);
+  sharedGroup.add(roomGroup);
 
   // Close-up (Caso B): plano 16:9 ~2.5 m delante de la cámara. Como es hijo de
   // la cámara, queda siempre centrado en la vista (escritorio y XR). Oculto
@@ -210,6 +216,32 @@ const ARPERF = new URLSearchParams(location.search).get('arperf') === '1';
 // en la Quest sale otra cosa o no para quieto, ahí está la respuesta a si el que
 // llega tarde aterriza donde debe.
 const SYNCLOG = new URLSearchParams(location.search).get('synclog') === '1';
+
+// ?sharedspace=1 — un marco común entre cascos, sin calibrar cada uno el suyo.
+//
+// Hoy `roomGroup` guarda la calibración {x, z, yaw} en el `local-floor` de ESTE
+// casco, que es distinto en cada uno: por eso cada persona tiene que alinear la
+// sala a mano. El navegador de la Quest sabe dar un marco común a los cascos de
+// una misma habitación (feature `shared`), y con él la misma T significa lo
+// mismo en todos.
+//
+// La montamos SIN quitarle a three su reference space, que en la r128 no se
+// puede cambiar: `roomGroup` pasa a colgar de `sharedGroup`, cuya matriz es
+// `frame.getPose(espacio compartido, mi local-floor)` — o sea, dónde cae el
+// origen común en mi marco. Esa S es distinta en cada casco; la T de dentro es
+// la misma para todos, y es la que habrá que repartir por el relay (Caso C).
+//
+// Recalcular S cada frame sale casi gratis y además se come el `reset` que el
+// navegador dispara a los pocos segundos —cambia coordenadas y UUID— sin
+// tratarlo como caso especial: la sala simplemente sigue al origen nuevo.
+//
+// Hace falta el flag del navegador (chrome://flags → "WebXR experiments") Y el
+// permiso del sistema en cada casco (Settings → Privacy → Device Permissions →
+// Enhanced Spatial Services), porque por debajo son los Shared Spatial Anchors.
+const SHAREDSPACE = new URLSearchParams(location.search).get('sharedspace') === '1';
+let sharedGroup = null;      // S: origen compartido → mi local-floor
+let arSharedSpace = null;    // el XRReferenceSpace de tipo 'shared'
+let sharedActive = false;
 
 function syncReading() {
   return (window.syncDiag && window.syncDiag()) || null;
@@ -2086,6 +2118,38 @@ function saveARCalib() {
   try { localStorage.setItem(arCalibKey(), JSON.stringify(c)); } catch (_) { /* modo privado */ }
 }
 
+// Dónde cae el origen compartido en MI local-floor, este frame. No forzamos el
+// updateMatrixWorld: el render ya recorre el árbol y marcar la rama sucia cuesta
+// lo mismo que hoy. Los panners van entonces un frame por detrás — 14 ms a 72 Hz,
+// que para colocar una fuente no es nada.
+function updateSharedFrame(frame, refSpace) {
+  const p = frame.getPose(arSharedSpace, refSpace);
+  if (!p) return;              // sin pose este frame: se queda la última buena
+  sharedGroup.matrix.fromArray(p.transform.matrix);
+  sharedGroup.matrixWorldNeedsUpdate = true;
+}
+
+// La cabeza, en el marco del PADRE de roomGroup, que es donde vive la
+// calibración. Sin espacio compartido eso es el local-floor y no cambia nada;
+// con él, mover y girar la sala se haría si no con una cabeza de otro marco, y
+// la sala se iría de lado al tocar el joystick.
+const _headLocal = new THREE.Vector3();
+const _headQ     = new THREE.Quaternion();
+const _sharedQ   = new THREE.Quaternion();
+function headInRoomFrame(pose) {
+  const p = pose.transform.position, q = pose.transform.orientation;
+  _headLocal.set(p.x, p.y, p.z);
+  _headQ.set(q.x, q.y, q.z, q.w);
+  if (sharedActive) {
+    sharedGroup.updateMatrixWorld(true);
+    sharedGroup.worldToLocal(_headLocal);
+    _headQ.premultiply(sharedGroup.getWorldQuaternion(_sharedQ).invert());
+  }
+  const hy = Math.atan2(2 * (_headQ.w * _headQ.y + _headQ.x * _headQ.z),
+                        1 - 2 * (_headQ.y * _headQ.y + _headQ.z * _headQ.z));
+  return { head: _headLocal, hy };
+}
+
 function applyARCalib({ x, z, yaw }) {
   roomGroup.position.set(x, 0, z);
   roomGroup.rotation.y = yaw;
@@ -2109,11 +2173,10 @@ function rotateRoomAroundUser(dYaw, head) {
 // joystick vuelve al punto de partida si uno se pierde.
 function updateARCalib(frame, refSpace, pose) {
   const session = frame.session;
-  const head = pose.transform.position;
-  const q = pose.transform.orientation;
-  // Yaw de la cabeza: el bucle de AR no mantiene la global `yaw` (esa es la del
-  // arrastre de escritorio), así que sale del cuaternión de la pose.
-  const hy = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
+  // Cabeza y yaw en el marco donde vive la calibración (ver headInRoomFrame).
+  // El yaw sale del cuaternión de la pose porque el bucle de AR no mantiene la
+  // global `yaw`: esa es la del arrastre de escritorio.
+  const { head, hy } = headInRoomFrame(pose);
   let active = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
@@ -2144,7 +2207,13 @@ function updateARCalib(frame, refSpace, pose) {
   // ancla, no el ancla, que es un punto físico de la sala y no se mueve.
   // Al soltar el grip se da por buena la posición: se guarda y se fija como
   // ancla, que es lo que hace que esto no haya que repetirlo nunca más.
-  if (arCalibrating && !active) { saveARCalib(); saveRoomAnchor(frame, refSpace); }
+  // Con marco común no se guarda NADA al soltar. Ni el ancla —el cupo es de 8
+  // por sitio y no hay forma de vaciarlo, así que gastarlas en un marco que ya
+  // sabe dónde está la sala es tirarlas— ni la calibración, que está medida
+  // contra el origen compartido y envenenaría la de siempre si se reusara la
+  // misma clave. La T de aquí viaja por el relay (Caso C), no por localStorage.
+  if (arCalibrating && !active && sharedActive) { /* la T se comparte, no se guarda */ }
+  else if (arCalibrating && !active) { saveARCalib(); saveRoomAnchor(frame, refSpace); }
   // Reintento tras barrer el cupo (ver saveRoomAnchor): necesita este `frame`,
   // vivo, y que no se esté moviendo la sala otra vez.
   else if (arAnchorRedo && !active) { arAnchorRedo = false; saveRoomAnchor(frame, refSpace); }
@@ -2535,7 +2604,10 @@ function buildARSources() {
   // La calibración va antes que los marcadores: bindStemToObject lee la
   // matrixWorld en el momento de vincular, y esa ya debe ser la de la sala
   // colocada (si no, el primer frame suena en el sitio equivocado).
-  applyARCalib(loadARCalib());
+  // Con marco común se empieza en la identidad: la calibración guardada se midió
+  // contra el local-floor de este casco, o sea contra un origen que ya no es el
+  // que manda, y aplicarla dejaría a cada casco con su propio error.
+  applyARCalib(sharedActive ? { x: 0, z: 0, yaw: 0 } : loadARCalib());
   roomGroup.updateMatrixWorld(true);
   stemDefs.forEach((s, i) => {
     const m = makeSourceMarker(s.name);
@@ -2575,7 +2647,9 @@ async function enterAR() {
       // 'anchors': el ancla persistente de sala (ver restoreRoomAnchor). Va en
       // opcionales para no dejar sin AR a un runtime que no la traiga: sin ella
       // se cae a la calibración a mano, que sigue entera.
-      optionalFeatures: ['hand-tracking', 'anchors'],
+      optionalFeatures: SHAREDSPACE
+        ? ['hand-tracking', 'anchors', 'shared']
+        : ['hand-tracking', 'anchors'],
     });
     // Lo primero a descartar cuando la sala no vuelve a su sitio: sin 'anchors'
     // concedida no hay nada que persistir, y como va en optionalFeatures la
@@ -2584,6 +2658,22 @@ async function enterAR() {
     console.log('[ar] features:', arFeats ? arFeats.join(' ') : 'no expuestas');
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(arSession);
+
+    // El marco común, si se puede. Va en opcionales y se cae con elegancia: sin
+    // él queda la calibración a mano de siempre, que sigue entera.
+    sharedActive = false; arSharedSpace = null;
+    sharedGroup.matrix.identity();
+    sharedGroup.matrixWorldNeedsUpdate = true;
+    if (SHAREDSPACE) {
+      try {
+        arSharedSpace = await arSession.requestReferenceSpace('shared');
+        sharedActive = true;
+        arLogAdd('shared space: concedido');
+      } catch (e) {
+        arLogAdd('shared space: NO', e);
+        arLogAdd('→ flag "WebXR experiments" + Enhanced Spatial Services en cada casco');
+      }
+    }
     // 'room': mismo marco que stem.ar y que las posiciones que publicarán las cámaras.
     if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room'; telemetry.start(); }
     renderer.setClearAlpha(0);                    // deja ver el passthrough
@@ -2632,7 +2722,13 @@ async function enterAR() {
       telemetry?.stop();
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
-      if (arCalibrating) { saveARCalib(); arCalibrating = false; }   // salir con el grip apretado
+      // salir con el grip apretado (en marco común no se persiste: ver updateARCalib)
+      if (arCalibrating) { if (!sharedActive) saveARCalib(); arCalibrating = false; }
+      // El espacio compartido muere con la sesión (y del todo cuando sale el
+      // último), así que no hay nada que conservar: la sala vuelve a la escena.
+      sharedActive = false; arSharedSpace = null;
+      sharedGroup.matrix.identity();
+      sharedGroup.matrixWorldNeedsUpdate = true;
       resetARFocus();          // suelta el realce: el músico enfocado no puede
       clearARSources();        // seguir 6 dB arriba en el 360 al que se vuelve
       renderer.setClearAlpha(1);
@@ -2660,9 +2756,12 @@ async function enterAR() {
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
+          if (sharedActive) updateSharedFrame(frame, refSpace);   // S: el marco común, este frame
           updateARCalib(frame, refSpace, pose);                   // recolocar la sala (grip + joysticks)
-          // El ancla manda salvo mientras la mano la está moviendo.
-          if (!arCalibrating) followRoomAnchor(frame, refSpace);
+          // El ancla manda salvo mientras la mano la está moviendo. Con espacio
+          // compartido NO: el ancla es un punto de ESTE casco y el marco común ya
+          // dice dónde está la sala; dos fuentes de verdad se pelean.
+          if (!arCalibrating && !sharedActive) followRoomAnchor(frame, refSpace);
           // La sala solo se mueve mientras se calibra, y es entonces cuando su
           // matriz tiene que estar al día en el propio frame: la leen worldToLocal
           // y los panners, que siguen la matrixWorld de los marcadores. El resto
