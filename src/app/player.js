@@ -1820,8 +1820,13 @@ function arTelemetryPose(pose) {
   const p = pose.transform.position, q = pose.transform.orientation;
   _telP.set(p.x, p.y, p.z);
   roomGroup.worldToLocal(_telP);                 // usa matrixWorld: actualizarla antes
+  // La rotación, en MUNDO y no la local. `roomGroup.quaternion` es su giro
+  // respecto al padre, y mientras el padre fue la escena las dos eran la misma
+  // cosa; desde que cuelga de sharedGroup (el marco común entre cascos) ya no, y
+  // usar la local metía el giro del marco compartido en cada muestra — justo en
+  // las coordenadas que existen para poder comparar cascos entre sí.
   _telQ.set(q.x, q.y, q.z, q.w)
-       .premultiply(_telR.copy(roomGroup.quaternion).invert());
+       .premultiply(roomGroup.getWorldQuaternion(_telR).invert());
   return _telPair;
 }
 
