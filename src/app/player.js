@@ -189,6 +189,26 @@ const SPOTLOG = new URLSearchParams(location.search).get('spotlog') === '1';
 // mientras te desplazas), y no hay nada que optimizar aquí. Si el que sube es un
 // tramo concreto, ese es el culpable y tiene arreglo.
 const ARPERF = new URLSearchParams(location.search).get('arperf') === '1';
+
+// ?synclog=1 — el error de sincronía, DENTRO de las gafas.
+//
+// `syncDiag()` se lee en la consola, y en sesión inmersiva no hay consola: el
+// número que dice si dos cascos van juntos es justo el que no se puede mirar
+// cuando hay dos cascos puestos. En VR va al panel XR DEBUG, que ya está ahí, y
+// aparece solo si hay sesión de sincronía; en AR hace falta esta bandera, porque
+// el sprite de delante de la cara se comparte con ?arperf=1 y con los avisos del
+// ancla, y dos carteles no caben. Si se piden las dos, manda ?arperf=1.
+//
+// Cómo se lee: `err` es contra la SESIÓN, no contra el otro casco. Leídos los dos
+// a la vez, la resta es el desfase entre ellos. Y `lead` es lo que el controlador
+// ha medido que cuesta un seek en ESTE aparato — en escritorio son ~640 ms, y si
+// en la Quest sale otra cosa o no para quieto, ahí está la respuesta a si el que
+// llega tarde aterriza donde debe.
+const SYNCLOG = new URLSearchParams(location.search).get('synclog') === '1';
+
+function syncReading() {
+  return (window.syncDiag && window.syncDiag()) || null;
+}
 const _perf = { n: 0, t0: 0, worst: 0, sum: 0, audio: 0, focus: 0, render: 0, worstAt: '', vf0: -1 };
 
 // Fotogramas de vídeo que el navegador lleva DECODIFICADOS. En AR la esfera está
@@ -247,6 +267,22 @@ function arPerfPanelPlace(pose) {
   arPerfPanel.position.set(p.x + _panelFwd.x * 1.2,
                            p.y + _panelFwd.y * 1.2 - 0.25,
                            p.z + _panelFwd.z * 1.2);
+}
+
+// El informe de sincronía en el sprite de AR, una vez por segundo. La última
+// línea la pinta arPerfPanelDraw en verde, y aquí es la que toca: `lead` es el
+// dato que venimos a buscar a las gafas.
+let _syncPanelAt = 0;
+function syncPanelReport(now) {
+  if (now - _syncPanelAt < 1000) return;
+  _syncPanelAt = now;
+  const d = syncReading();
+  arPerfPanelDraw(d
+    ? [`sync ${d.state}${d.paused ? ' PAUSED' : ''}  v=${d.velocity}`,
+       `err  ${String(d.errMs).padStart(6)} ms`,
+       `rate ${d.rate.toFixed(4)}`,
+       `lead ${d.leadMs === null ? '—' : d.leadMs + ' ms'}`]
+    : ['[synclog] esperando', '', 'sin ?sync= en la URL', '']);
 }
 
 function arPerfPanelClear() {
@@ -1464,6 +1500,8 @@ function xrDebug(data) {
     `audio: ${data.audioState}`,
     `frame: ${data.frameCount}`,
   ];
+  // Solo con ?sync=: sin sesión de sincronía esta línea no diría nada.
+  if (data.sync) lines.push(data.sync);
   lines.forEach((l, i) => {
     ctx.fillStyle = i % 2 === 0 ? '#e6edf3' : '#8b949e';
     ctx.fillText(l, 16, 60 + i * 30);
@@ -1626,6 +1664,10 @@ async function enterXR() {
           audioCtx: audioCtx?.state || 'none',
           audioState: audioEl?.paused ? 'paused' : 'playing',
           frameCount,
+          sync: (() => {
+            const d = syncReading();
+            return d ? `sync: ${d.errMs}ms x${d.rate.toFixed(4)} lead ${d.leadMs ?? '—'}` : null;
+          })(),
         });
       }
 
@@ -2632,11 +2674,15 @@ async function enterAR() {
           }
           // El panel sigue a la cabeza mientras haya algo que enseñar: el
           // informe de ?arperf=1, o un aviso hasta que caduque.
-          if (ARPERF || arNoticeUntil) arPerfPanelPlace(pose);
+          if (ARPERF || SYNCLOG || arNoticeUntil) arPerfPanelPlace(pose);
           if (arNoticeUntil && performance.now() > arNoticeUntil) {
             arNoticeUntil = 0;
-            if (!ARPERF) arPerfPanelClear();   // con ?arperf=1 el panel se queda
+            // Con ?arperf=1 o ?synclog=1 el panel se queda: tiene qué enseñar.
+            if (!ARPERF && !SYNCLOG) arPerfPanelClear();
           }
+          // Después del aviso, no encima: los carteles del ancla son de cuatro
+          // segundos y son los que se leen mientras se calibra.
+          if (SYNCLOG && !ARPERF && !arNoticeUntil) syncPanelReport(performance.now());
         }
       }
       // Sin updateAmbiViz(): es un canvas 2D del HUD de la página, que en sesión

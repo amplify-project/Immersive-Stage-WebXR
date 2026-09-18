@@ -13,6 +13,13 @@ What is left is the headsets, and one open question they will answer: whether th
 seek cost the controller now aims ahead by is stable on a Quest, where the decoder
 and the network are not the desktop's.
 
+**Reading it on a headset.** `err` is measured against the session, not against
+the other headset — so put both readings side by side and it is their *difference*
+that is the skew between them, exactly as on the two desktops. `lead` is the one
+to watch: on the desktop it settled at 636 ms and stayed there. If the Quest
+settles too, the late joiner is solved there as well; if it wanders from seek to
+seek, the measurement wants a slower average than the half-and-half it uses now.
+
 The partner wants a session manager: a desktop page with play / pause / stop /
 restart, a list of connected headsets, and a player that, when someone joins late,
 lands where everyone else is instead of at the beginning.
@@ -45,6 +52,11 @@ and close-up with it. Nothing is synchronised twice.
   `&syncoffset=<seconds>`. `window.syncDiag()` reports where the vector says we
   should be, where we are, the error, and `leadMs` — what the controller has
   measured a seek to cost on this device.
+- The same reading inside a headset, where there is no console to read it in: in
+  VR it appears on the XR DEBUG panel on its own, as soon as there is a session;
+  in AR it wants `?synclog=1`, because the sprite in front of your face is shared
+  with `?arperf=1` and with the anchor notices, and two signs do not fit. If both
+  flags are given, `?arperf=1` keeps the panel.
 
 ## Running it
 
