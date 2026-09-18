@@ -220,10 +220,28 @@ first second, peak rate 1.2%*. The simulator's "before" reproduces what the two
 machines did (sixteen flat seconds, then `1.0585` against the browser's `1.0505`),
 which is why its "after" is quoted here.
 
-**Confirmed in the browser**, on the same two machines and the same reload that
-produced the trace above. The figures quoted are still the simulator's: the
-browser run was judged by eye and its log not kept. Worth a kept trace next time
-one is to hand.
+**And in the browser**, same two machines, same reload:
+
+```
+08:57:46  err = -104 ms  rate 1.0148  lead 636 ms      one seek, no blind spell
+08:57:56  err =   -9 ms  rate 1.0076  lead 636 ms      inside the band, ~10 s in
+08:58:06  err =  +63 ms  rate 0.9936                   far edge, nudged back
+08:58:29  err =  +47 ms  rate 0.9924                   and again, and so on
+08:58:54  err =  -33 ms  rate 0.9935                   still there a minute later
+```
+
+Forty seconds at up to 0.95 s behind became ten seconds to close 104 ms, and the
+correction peaked at **1.0148** — a quarter of a semitone, against the 1.0505 the
+same reload used to produce. The trace also shows the limit cycle plainly: the rate
+alternates between about 0.993 and 1.008 as the error crosses the band, never
+returning to 1, with the error staying inside roughly −50 to +63 ms. Sample to
+sample it steps by about 20 ms, which is the element's own time granularity, not
+the controller.
+
+`lead` settled at **636 ms**, from an opening guess of 500 — the measurement halves
+the gap each time, so this machine's real seek cost is about 0.77 s, half again as
+much as guessed. Which is the argument for measuring it rather than picking a
+number: a Quest will not cost what a desktop costs.
 
 The 0.25 clamp at the end of `controlElement()` — which sets `playbackRate` to a
 hard zero, freezing the video on purpose — stays as a curiosity rather than a
