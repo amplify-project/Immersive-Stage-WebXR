@@ -341,7 +341,9 @@ function syncPanelReport(now) {
     // El uuid es la identidad del espacio: seis caracteres bastan para que dos
     // personas lo comparen de viva voz, y distintos = espacios distintos, que es
     // la pregunta entera.
-    const uu = _shared.uuid ? _shared.uuid.slice(-6) : '—';
+    // Vacío no es "no hay": es "aún no se ha establecido". Son cosas distintas y
+    // la primera lectura siempre es esa.
+    const uu = _shared.uuid ? _shared.uuid.slice(-6) : 'pending';
     arPerfPanelDraw(sharedActive
       ? [`shared ${ident ? 'IDENTITY' : 'ON'} · ${uu}`,
          `pose ${_shared.ok} · null ${_shared.nulls}`,
@@ -2237,6 +2239,12 @@ function updateSharedFrame(frame, refSpace, pose) {
   const e = sharedGroup.matrix.elements;
   _shared.x = e[12]; _shared.z = e[14];
   _shared.yawDeg = Math.atan2(-e[8], e[0]) * 180 / Math.PI;
+  // `UUId`, con esa grafía, y se relee: nace VACÍO y se rellena cuando el espacio
+  // queda establecido de verdad. El ejemplo lo delata al comprobar `.length !== 0`
+  // en vez de la existencia. Leerlo una vez al arrancar la sesión —que es lo que
+  // se hizo primero— devuelve siempre la cadena vacía, y una cadena vacía se lee
+  // como "este espacio no trae uuid" cuando lo que dice es "todavía no".
+  _shared.uuid = arSharedSpace.UUId || '';
 }
 
 // El `reset` del espacio compartido: el navegador entra con un marco provisional
@@ -2805,10 +2813,6 @@ async function enterAR() {
         attachSharedReset(arSharedSpace);
         showSharedOrigin(true);
         arViewerSpace = await arSession.requestReferenceSpace('viewer');
-        // `UUId`, así escrito. Ninguna de las grafías que probamos a ojo
-        // (`uuid`, `UUID`, `id`) era la buena, y por eso dimos por hecho que el
-        // espacio no lo traía.
-        _shared.uuid = arSharedSpace.UUId || arSharedSpace.uuid || '';
         arLogAdd(`shared space: concedido (${arSharedSpace.constructor && arSharedSpace.constructor.name})`);
         // El uuid, sin adivinar el nombre: los atributos WebIDL viven en el
         // PROTOTIPO, así que mirar el objeto no los encuentra. Uuids distintos en
