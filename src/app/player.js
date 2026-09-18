@@ -322,6 +322,21 @@ function syncPanelReport(now) {
   // Con ?sharedspace=1 el panel enseña el marco: es lo que se está mirando, y
   // `pose` a cero con la sala girada dice por sí solo que estamos dibujando en la
   // identidad, o sea en el origen de este casco y no en el común.
+  // Los dos flags a la vez: caben cuatro líneas en el sprite y no más, así que la
+  // vista conjunta se queda con lo que se mira EN MARCHA —quién soy en el marco y
+  // cuánto me separo de la sesión— y suelta los resets y el `lead`, que son de
+  // mientras se monta. Cada flag por su cuenta sigue enseñando lo suyo entero.
+  if (SHAREDSPACE && SYNCLOG) {
+    const d = syncReading();
+    const uu = _shared.uuid ? _shared.uuid.slice(-6) : 'pending';
+    arPerfPanelDraw([
+      `shared ${sharedActive ? 'ON' : 'off'} · ${uu}`,
+      d ? `sync ${d.errMs}ms x${d.rate.toFixed(4)}` : 'sync: sin ?sync=',
+      `pose ${_shared.ok} · null ${_shared.nulls}`,
+      `S ${_shared.x.toFixed(2)},${_shared.z.toFixed(2)} y${_shared.yawDeg.toFixed(0)}`,
+    ]);
+    return;
+  }
   if (SHAREDSPACE) {
     // Lo que decide no es cuántos resets hubo, sino si han PARADO: un marco que
     // se resetea cada pocos segundos no se ha asentado, y la sala no puede estar
