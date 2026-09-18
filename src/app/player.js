@@ -2190,6 +2190,37 @@ function describeSpace(space) {
   return out.join(' · ') || '(nada legible)';
 }
 
+// El espacio compartido se pide DESDE EL BUCLE, con la sesión ya rodando, que es
+// lo que hace el ejemplo que funciona (`if (!spaceRequested)` dentro de su frame
+// loop). Pedirlo justo después de setSession —lo que se hizo primero— es antes
+// del primer frame, con la sesión aún sin rodar y el navegador todavía sin saber
+// en qué habitación está; y lo que devuelve entonces es un espacio propio que ya
+// no se junta con el de nadie.
+//
+// Y la otra mitad del mismo problema, que no está en el código: el espacio se
+// expone POR PÁGINA. Dos cascos con la misma página pero distinta query pueden
+// acabar con espacios distintos, así que la URL tiene que ser idéntica en los
+// dos, carácter por carácter.
+let sharedRequested = false;
+function requestSharedSpace(session) {
+  if (sharedRequested) return;
+  sharedRequested = true;
+  Promise.all([session.requestReferenceSpace('shared'),
+               session.requestReferenceSpace('viewer')])
+    .then(([shared, viewer]) => {
+      arSharedSpace = shared; arViewerSpace = viewer;
+      sharedActive = true;
+      attachSharedReset(shared);
+      showSharedOrigin(true);
+      arLogAdd(`shared space: concedido (${shared.constructor && shared.constructor.name})`);
+      arLogAdd('shared space: ' + describeSpace(shared));
+    })
+    .catch((e) => {
+      arLogAdd('shared space: NO', e);
+      arLogAdd('→ flag "WebXR experiments" + Enhanced Spatial Services en cada casco');
+    });
+}
+
 let sharedOriginMarker = null;
 function showSharedOrigin(on) {
   if (!on) {
@@ -2351,7 +2382,7 @@ function updateARCalib(frame, refSpace, pose) {
   // sabe dónde está la sala es tirarlas— ni la calibración, que está medida
   // contra el origen compartido y envenenaría la de siempre si se reusara la
   // misma clave. La T de aquí viaja por el relay (Caso C), no por localStorage.
-  if (arCalibrating && !active && sharedActive) { /* la T se comparte, no se guarda */ }
+  if (arCalibrating && !active && SHAREDSPACE) { /* la T se comparte, no se guarda */ }
   else if (arCalibrating && !active) { saveARCalib(); saveRoomAnchor(frame, refSpace); }
   // Reintento tras barrer el cupo (ver saveRoomAnchor): necesita este `frame`,
   // vivo, y que no se esté moviendo la sala otra vez.
@@ -2746,7 +2777,7 @@ function buildARSources() {
   // Con marco común se empieza en la identidad: la calibración guardada se midió
   // contra el local-floor de este casco, o sea contra un origen que ya no es el
   // que manda, y aplicarla dejaría a cada casco con su propio error.
-  applyARCalib(sharedActive ? { x: 0, z: 0, yaw: 0 } : loadARCalib());
+  applyARCalib(SHAREDSPACE ? { x: 0, z: 0, yaw: 0 } : loadARCalib());
   roomGroup.updateMatrixWorld(true);
   stemDefs.forEach((s, i) => {
     const m = makeSourceMarker(s.name);
@@ -2799,30 +2830,13 @@ async function enterAR() {
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(arSession);
 
-    // El marco común, si se puede. Va en opcionales y se cae con elegancia: sin
-    // él queda la calibración a mano de siempre, que sigue entera.
-    sharedActive = false; arSharedSpace = null;
+    // El marco común se pide en el primer frame, no aquí: ver requestSharedSpace.
+    sharedActive = false; arSharedSpace = null; arViewerSpace = null;
+    sharedRequested = false;
+    _shared.ok = _shared.nulls = _shared.resets = 0;
+    _shared.everOk = false; _shared.lastResetAt = 0; _shared.uuid = '';
     sharedGroup.matrix.identity();
     sharedGroup.matrixWorldNeedsUpdate = true;
-    if (SHAREDSPACE) {
-      try {
-        arSharedSpace = await arSession.requestReferenceSpace('shared');
-        sharedActive = true;
-        _shared.ok = _shared.nulls = _shared.resets = 0;
-        _shared.everOk = false; _shared.lastResetAt = 0;
-        attachSharedReset(arSharedSpace);
-        showSharedOrigin(true);
-        arViewerSpace = await arSession.requestReferenceSpace('viewer');
-        arLogAdd(`shared space: concedido (${arSharedSpace.constructor && arSharedSpace.constructor.name})`);
-        // El uuid, sin adivinar el nombre: los atributos WebIDL viven en el
-        // PROTOTIPO, así que mirar el objeto no los encuentra. Uuids distintos en
-        // los dos cascos = espacios distintos, y eso lo contesta todo de una vez.
-        arLogAdd('shared space: ' + describeSpace(arSharedSpace));
-      } catch (e) {
-        arLogAdd('shared space: NO', e);
-        arLogAdd('→ flag "WebXR experiments" + Enhanced Spatial Services en cada casco');
-      }
-    }
     // 'room': mismo marco que stem.ar y que las posiciones que publicarán las cámaras.
     if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room'; telemetry.start(); }
     renderer.setClearAlpha(0);                    // deja ver el passthrough
@@ -2857,7 +2871,7 @@ async function enterAR() {
     // cuanto el ancla esté. Un frame en el sitio viejo no lo ve nadie.
     // El ancla es un punto de ESTE casco: dentro del marco común no decide nada,
     // y restaurarla gasta tiempo y toca el cupo de 8 para nada.
-    if (!sharedActive) restoreRoomAnchor(arSession);
+    if (!SHAREDSPACE) restoreRoomAnchor(arSession);
     buildARSources();
 
     arSession.addEventListener('end', () => {
@@ -2874,10 +2888,11 @@ async function enterAR() {
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
       // salir con el grip apretado (en marco común no se persiste: ver updateARCalib)
-      if (arCalibrating) { if (!sharedActive) saveARCalib(); arCalibrating = false; }
+      if (arCalibrating) { if (!SHAREDSPACE) saveARCalib(); arCalibrating = false; }
       // El espacio compartido muere con la sesión (y del todo cuando sale el
       // último), así que no hay nada que conservar: la sala vuelve a la escena.
       sharedActive = false; arSharedSpace = null; arViewerSpace = null;
+      sharedRequested = false;
       showSharedOrigin(false);
       sharedGroup.matrix.identity();
       sharedGroup.matrixWorldNeedsUpdate = true;
@@ -2908,12 +2923,13 @@ async function enterAR() {
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
+          if (SHAREDSPACE && !sharedRequested) requestSharedSpace(frame.session);
           if (sharedActive) updateSharedFrame(frame, refSpace, pose);  // S: el marco común, este frame
           updateARCalib(frame, refSpace, pose);                   // recolocar la sala (grip + joysticks)
           // El ancla manda salvo mientras la mano la está moviendo. Con espacio
           // compartido NO: el ancla es un punto de ESTE casco y el marco común ya
           // dice dónde está la sala; dos fuentes de verdad se pelean.
-          if (!arCalibrating && !sharedActive) followRoomAnchor(frame, refSpace);
+          if (!arCalibrating && !SHAREDSPACE) followRoomAnchor(frame, refSpace);
           // La sala solo se mueve mientras se calibra, y es entonces cuando su
           // matriz tiene que estar al día en el propio frame: la leen worldToLocal
           // y los panners, que siguen la matrixWorld de los marcadores. El resto
