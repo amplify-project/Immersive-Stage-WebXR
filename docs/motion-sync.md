@@ -52,11 +52,13 @@ and close-up with it. Nothing is synchronised twice.
   `&syncoffset=<seconds>`. `window.syncDiag()` reports where the vector says we
   should be, where we are, the error, and `leadMs` — what the controller has
   measured a seek to cost on this device.
-- The same reading inside a headset, where there is no console to read it in: in
-  VR it appears on the XR DEBUG panel on its own, as soon as there is a session;
-  in AR it wants `?synclog=1`, because the sprite in front of your face is shared
-  with `?arperf=1` and with the anchor notices, and two signs do not fit. If both
-  flags are given, `?arperf=1` keeps the panel.
+- The same reading inside a headset, where there is no console to read it in:
+  `?synclog=1`, in VR and in AR alike, on the sprite that hangs in front of your
+  face. (The XR DEBUG panel looked like the natural home in VR, but
+  `initDebugPanel()` opens with a `return` — it has been switched off for a long
+  time, and writing to it shows nothing.) The sprite is shared with `?arperf=1`
+  and with the anchor notices, so in AR it waits behind a notice and stands down
+  altogether if `?arperf=1` wants the same space.
 
 ## Running it
 

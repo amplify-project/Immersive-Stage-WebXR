@@ -194,10 +194,15 @@ const ARPERF = new URLSearchParams(location.search).get('arperf') === '1';
 //
 // `syncDiag()` se lee en la consola, y en sesión inmersiva no hay consola: el
 // número que dice si dos cascos van juntos es justo el que no se puede mirar
-// cuando hay dos cascos puestos. En VR va al panel XR DEBUG, que ya está ahí, y
-// aparece solo si hay sesión de sincronía; en AR hace falta esta bandera, porque
-// el sprite de delante de la cara se comparte con ?arperf=1 y con los avisos del
-// ancla, y dos carteles no caben. Si se piden las dos, manda ?arperf=1.
+// cuando hay dos cascos puestos.
+//
+// Va al mismo sprite en VR y en AR. El panel XR DEBUG de más abajo parecía el
+// sitio natural en VR, pero `initDebugPanel()` empieza con un `return`: lleva
+// desactivado desde hace tiempo y escribir ahí no enseña nada. El sprite,
+// además, es lo que queremos: mira siempre a la cámara y se recoloca cada frame,
+// así que girarse no lo deja atrás. Se comparte con ?arperf=1 y con los avisos
+// del ancla —dos carteles delante de la cara no caben—, así que espera detrás de
+// un aviso y se aparta entero si ?arperf=1 pide el mismo sitio.
 //
 // Cómo se lee: `err` es contra la SESIÓN, no contra el otro casco. Leídos los dos
 // a la vez, la resta es el desfase entre ellos. Y `lead` es lo que el controlador
@@ -1500,8 +1505,6 @@ function xrDebug(data) {
     `audio: ${data.audioState}`,
     `frame: ${data.frameCount}`,
   ];
-  // Solo con ?sync=: sin sesión de sincronía esta línea no diría nada.
-  if (data.sync) lines.push(data.sync);
   lines.forEach((l, i) => {
     ctx.fillStyle = i % 2 === 0 ? '#e6edf3' : '#8b949e';
     ctx.fillText(l, 16, 60 + i * 30);
@@ -1549,6 +1552,7 @@ async function enterXR() {
       xrSession = null;
       telemetry?.stop();
       if (debugMesh) debugMesh.visible = false;
+      if (SYNCLOG) arPerfPanelClear();
       document.getElementById('xr-btn').textContent = 'VR';
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
@@ -1644,6 +1648,14 @@ async function enterXR() {
               debugMesh.position.set(pos.x, pos.y + 0.1, pos.z - 2);
               debugMesh.visible = true;
             }
+
+            // ?synclog=1: el error de sincronía delante de la cara, el mismo
+            // sprite que en AR. Aquí no hay avisos del ancla con los que
+            // turnarse, así que va derecho.
+            if (SYNCLOG) {
+              arPerfPanelPlace(pose);
+              syncPanelReport(performance.now());
+            }
           }
         }
       }
@@ -1664,10 +1676,6 @@ async function enterXR() {
           audioCtx: audioCtx?.state || 'none',
           audioState: audioEl?.paused ? 'paused' : 'playing',
           frameCount,
-          sync: (() => {
-            const d = syncReading();
-            return d ? `sync: ${d.errMs}ms x${d.rate.toFixed(4)} lead ${d.leadMs ?? '—'}` : null;
-          })(),
         });
       }
 
