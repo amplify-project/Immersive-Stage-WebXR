@@ -1,8 +1,17 @@
 # Synchronised playback across devices (Motion) — spike
 
-**Status: a spike that works end to end, with two things to fix before it is a
-feature and one measurement still owed.** Desktop, two tabs, September 2026.
-Nothing tried on a headset.
+**Status: measured on two machines, and the late joiner is fixed.** 18 September
+2026. Nothing tried on a headset.
+
+The steady state is good: two machines held **16 ms apart**, which is the number
+this feature lives or dies by. Joining late was the bad case — 40 s spent up to a
+second behind, ending in a correction loud enough to hear as pitch — and the four
+changes in *What was wrong with joining late* fix it, in the browser and on the
+two machines that showed the fault.
+
+What is left is the headsets, and one open question they will answer: whether the
+seek cost the controller now aims ahead by is stable on a Quest, where the decoder
+and the network are not the desktop's.
 
 The partner wants a session manager: a desktop page with play / pause / stop /
 restart, a list of connected headsets, and a player that, when someone joins late,
@@ -34,7 +43,8 @@ and close-up with it. Nothing is synchronised twice.
   object that happens to be the one that writes; nothing about it is privileged.
 - The player hook: `?sync=<session>`, optionally `&timing=<ws url>` and
   `&syncoffset=<seconds>`. `window.syncDiag()` reports where the vector says we
-  should be, where we are, and the error.
+  should be, where we are, the error, and `leadMs` — what the controller has
+  measured a seek to cost on this device.
 
 ## Running it
 
@@ -67,12 +77,36 @@ count.
 The manifest offers a single representation — 2560×1440 H.264, no lighter
 rendition — so there is nothing to fall back to and `?maxh` cannot dodge it.
 
+Two *different browsers* on the one machine do not dodge it either — they load,
+and then both starve. Measured on a run that looked for all the world like the
+synchronisation failing:
+
+```
+stalls: 46   stallTime_ms: 305392   dropped: 465
+buf_end_skew_s: -10.579             avDrift_ms: -3580
+```
+
+Five minutes stalled, the audio buffer ending ten seconds behind the video's, and
+3.6 s of A/V drift *inside a single player*. That last figure is the tell: it is
+the same signature as the July saturation, where the cause was the box and never
+the player. One player alone on the same machine, the same minute, tracked the
+session perfectly.
+
+In the logs it reads as `err` falling by **exactly 1000 ms per second**, which
+means the element is not advancing at all while the vector runs — a freeze, not a
+drift. Worth knowing by sight.
+
 This is the test rig, not the product: on two machines, or a machine and a
 headset, it does not arise. But it will eat an afternoon if you meet it without
-knowing, because it looks exactly like the synchronisation being broken. The
-ten-second check that tells them apart: create a bare `shaka.Player` on a new
-`<video>`, call `load()` with a timeout, and look at
-`performance.getEntriesByType('resource')`. No request means it is this, not us.
+knowing. The ten-second check that tells them apart: `avDiag()`. Stalls climbing
+and the video buffer ending near `t` is starvation, and it is the rig. For the
+silent-load variant, create a bare `shaka.Player` on a new `<video>`, call
+`load()` with a timeout, and look at `performance.getEntriesByType('resource')`.
+No request means it is this, not us.
+
+The way out, when one machine has to run two, is the lighter rendition we still
+owe: `stream.sh` maps a single `0:v:0` for the 360, so the manifest offers one
+2560×1440 representation and `?maxh` has nowhere to fall.
 
 ## Why the Motion server is not what we run
 
@@ -100,59 +134,101 @@ mismatch with the maintainers all the same.
 
 ## What the measurements say
 
-**Tracking, once running and undisturbed: good.** Error within ±40 ms of the
-session, which is far inside anything the ear resolves for placement.
+Two machines, one player each, 18 September 2026. Both `err` figures are taken
+against the same vector, so their *difference* is the skew between the machines
+and no clock alignment is needed.
 
-**But the default tuning wobbles the rate audibly.** The controller holds that
-±40 ms by closing whatever gap it finds within one second, which means the playback
-rate sitting at 0.955 or 1.043 and flipping between the two every couple of
-seconds. For a talking head, invisible. For music, ±4.3% is about ±0.7 of a
-semitone, wobbling.
+**Steady state: 16 ms apart.** One player read +17 ms, the other −1 ms, and they
+stayed there. That is far inside what the ear resolves for placement (~5-10°
+off-axis, some 40 cm at 3 m), and it is the number the feature lives or dies by.
 
-The arithmetic is `minDiff / amortPeriod`, and both are options, so this is tuning
-and not surgery. `sync.js` asks for a 50 ms dead band closed over 8 s → 0.6%,
-inaudible, with the error still inside 50 ms. *(Reasoned from the constants and the
-measured behaviour; not yet re-measured in isolation, because every run since has
-involved a seek — see below.)*
+**The rate does not go back to 1 inside the dead band.** Both players sat at a
+pinned `1.0063` — the last nudge they were given — because `controlElement()`
+takes the "in sync!" branch and touches nothing. So the error does not settle at
+zero: it sails slowly across the band, gets nudged at the far edge and comes back.
+A limit cycle of ±50 ms at 0.6%, which is the intended behaviour and inaudible,
+but it does mean a steady non-unity rate is the healthy reading, not a fault.
 
-**After a seek, there is a window where nothing is corrected at all.** A late
-joiner does jump to the session position — that part works — but it lands 0.6 to
-0.8 s late, because the seek costs a buffer flush and a fresh 6 s segment, and it
-then holds that offset, at rate 1.0, for a while. Measured at −810 ms and −630 ms,
-and once at −14.5 s after a pause/play.
+**Audio output latency is not the dominant term.** Web Audio adds its own delay
+when the element's audio is routed through Omnitone, and it differs per machine:
+56 ms and 40 ms here. 16 ms of difference, the same order as the timeline skew,
+so the worst case is ~32 ms audible and no per-device correction was needed.
+`avDiag().webaudio_outLat_ms` reads it; `?syncoffset=` is the knob if a device
+ever needs one.
 
-The cause is `amortPeriod`, doing a second job its name does not admit. After a
-seek or a play, `controlElements()` returns immediately for `amortPeriod × 2000`
-milliseconds — no correction of any kind. At the default that is 2 s. At the 8 s we
-ask for, **sixteen**.
+**The correction is proportional, and 0.6% was its floor, not its ceiling.** The
+rate asked for is `1 + diff / amortPeriod`, recomputed ten times a second. The
+`minDiff / amortPeriod` = 0.6% this document used to advertise is only the
+smallest step, the one taken at the edge of the dead band. The largest is
+`maxDelay / amortPeriod` = 0.8/8 = **10%**, over a semitone and a half — and it is
+the one a late joiner gets, because it arrives immediately after a seek that
+leaves half a second to close. Measured: `rate=1.0505` at 430 ms of error. That is
+the artefact the tuning existed to prevent, hiding one case downstream of where we
+looked for it.
 
-So the two settings are coupled the wrong way round: the smoother the correction,
-the longer the controller cannot correct. Decoupling them is a small change in the
-library, which is ours.
+## What was wrong with joining late
 
-**Once the window expires, it does close the gap — measured.** Sampling a late
-joiner for 30 s past the blackout: −360 ms → −194 → −134 → −98 → −72 → −52 → −25 →
-+5 → +31, then it turns round and trims the overshoot. The rate stays between 1.006
-and 1.023 throughout, settling at 1.006 — nothing like the ±4.3% flapping of the
-defaults, which also confirms the tuning above does what it was meant to.
+Reloading one player while the other kept going, measured on two machines:
 
-So the cost of joining late is not a permanent offset. It is about 16 s blind
-followed by a smooth ~30 s catch-up. (An earlier version of this document claimed
-the residual was never trimmed; every sample behind that claim had been taken
-inside the blind window.)
+```
+08:40:53  err = -122152 ms                 starts at the beginning; the session is at 137 s
+08:40:54  err =    -695 ms                 first seek: prompt, and lands 0.7 s late
+08:40:55 … 08:41:09  err ≈ -950 ms, rate 1.0000     sixteen seconds, not looking
+08:41:10  err =    -453 ms                 window expires, still beyond maxDelay → seek
+08:41:10 … 08:41:25  err ≈ -440 ms, rate 1.0000     sixteen more
+08:41:26  err =    -379 ms, rate 1.0505    and now the audible correction
+```
 
-Two ways forward, neither tried:
+**A flat `err` at exactly `1.0000` is the signature of a controller that is not
+looking**, as against a starved one, whose `err` falls 1000 ms per second. Nobody
+had written to `playbackRate`; a controller that is deciding leaves a number with
+decimals in it.
 
-- **In the library**: give the blind window its own constant instead of deriving it
-  from `amortPeriod`, so smoothness and responsiveness stop trading against each
-  other. Then re-measure the residual.
-- **From outside**: watch `syncDiag().errMs` and nudge when it sits outside the
-  dead band with the rate at 1. A workaround, and a second controller fighting the
-  first.
+And the blind spell **re-arms itself**, which is what turned 16 s into 40:
 
-Whether a late joiner landing ~0.7 s behind for ~16 s matters is the partner's
-call: for pointing at the same musician it is nothing, for clapping together it is
-not.
+```
+seek  →  buffer flushed, fresh 6 s segment  →  element not advancing
+      →  controller reads it as "not playing" (readyState drops)
+      →  its answer to that is to seek and go blind again
+```
+
+Its own correction creates the condition that triggers the next correction. Four
+changes, all in `src/vendor/motion/TimingMediaController.js`, which is ours:
+
+1. **`blindPeriod` is its own setting.** It used to be `amortPeriod × 2`, so asking
+   for a *smoother* correction bought a *longer* spell of no correction at all —
+   one knob doing two opposite jobs. 1.5 s is enough for a seek to settle.
+2. **A gross error breaks the blind period.** `controlElements()` used to return
+   flat while the timer was alive. It now looks first, and if an element is beyond
+   `maxDelay` it cancels and acts. Deliberately blind to elements that are seeking
+   or starved: there the position is not evidence yet, and seeking again would only
+   buy another flush.
+3. **Seeks aim ahead by what a seek costs.** A flush plus a fresh segment takes
+   0.4-0.7 s, and the session clock does not wait, so seeking to the position you
+   just read lands late *by definition* — and seeking again cannot close a gap that
+   every seek recreates. The controller now aims at `position + seekLead` and
+   re-measures `seekLead` per element, from setting `currentTime` to playback
+   advancing again. `syncDiag().leadMs` reports what it currently believes.
+4. **`maxRateDev` caps the correction.** ±1.5%, about a quarter of a semitone.
+   It buys seconds instead of pitch, and the default is wide enough to leave the
+   library's original behaviour alone.
+
+`sync.js` passes all four. In simulation — a fake element that charges 500 ms for
+every seek — joining 1.6 s late goes from *two seeks, 16 s blind twice, still
+−170 ms after 25 s, peak rate 5.8%* to *one seek, inside the dead band from the
+first second, peak rate 1.2%*. The simulator's "before" reproduces what the two
+machines did (sixteen flat seconds, then `1.0585` against the browser's `1.0505`),
+which is why its "after" is quoted here.
+
+**Confirmed in the browser**, on the same two machines and the same reload that
+produced the trace above. The figures quoted are still the simulator's: the
+browser run was judged by eye and its log not kept. Worth a kept trace next time
+one is to hand.
+
+The 0.25 clamp at the end of `controlElement()` — which sets `playbackRate` to a
+hard zero, freezing the video on purpose — stays as a curiosity rather than a
+finding. With this arithmetic it needs the element to be 6 s *ahead*, which would
+have triggered a seek first, so it can only bite when the vector is parked.
 
 ## The controller can be asleep, and a late joiner is exactly when
 
@@ -190,6 +266,9 @@ otherwise be half a millisecond, i.e. nothing at all, silently.
 directions, so the control page writes to it and the players follow. The relay
 keeps doing what it does — and its player map is already the "list of connected
 headsets" the manager wants, while `mt` and `srv` in the telemetry already let us
-check afterwards that everyone was in sync. Two of the partner's three asks are
+check afterwards that everyone was in sync. On headsets, that is the only check
+there is: inside an immersive session there is no console to read and `toast()`
+reaches nobody. On a desktop it records nothing at all — `sample()` runs only in
+VR or AR — so there the check is `syncDiag()` in each browser. Two of the partner's three asks are
 therefore done, and the downlink stays where it belongs: Case C, the camera
 positions, in [`handoff.md`](handoff.md).

@@ -70,7 +70,8 @@ export function attachSync(el, { sessionId, url, offsetSec = 0, duration } = {})
   const timing = new TimingObject();
   timing.srcObject = provider;
 
-  // Convergence, tuned for music rather than for video.
+  // Convergence, tuned for music rather than for video. Every number below was
+  // measured on two machines on 2026-09-18; see docs/motion-sync.md.
   //
   // Out of the box the controller holds the error under 40 ms by closing
   // whatever gap it finds within one second — measured here, that means the rate
@@ -79,27 +80,37 @@ export function attachSync(el, { sessionId, url, offsetSec = 0, duration } = {})
   // is about ±0.7 of a semitone, wobbling: the one artefact this player cannot
   // ship.
   //
-  // The arithmetic is just minDiff / amortPeriod. Closing 50 ms over 8 s asks
-  // for 0.6%, which is inaudible, and the error still never exceeds the 50 ms
-  // band — which is itself far inside what the ear resolves for placement
-  // (~5-10° off-axis, some 40 cm at 3 m). maxDelay stays where it is: beyond
-  // that a seek is the honest answer, and a seek here costs a buffer flush and a
-  // fresh 6 s segment.
+  // The correction is proportional: the rate it asks for is 1 + diff /
+  // amortPeriod, recomputed ten times a second. So minDiff / amortPeriod — the
+  // 0.6% this used to advertise — is only its *smallest* step, the one it takes
+  // at the edge of the dead band. Its largest is maxDelay / amortPeriod, and
+  // that is the one a late joiner hears, because it arrives right after the seek
+  // that leaves half a second to close: 0.8/8 = 10%, over a semitone and a half.
+  // Hence maxRateDev, which caps the whole thing at something inaudible and pays
+  // for it in seconds rather than in pitch.
   //
-  // But amortPeriod is doing a second job that its name does not admit: after a
-  // seek or a play the controller stops correcting entirely for amortPeriod ×
-  // 2000 ms, because controlElements() returns immediately while that timer is
-  // alive. Default 1 s → 2 s blind. Ours, 8 s → SIXTEEN seconds blind, during
-  // which a late joiner sits wherever its seek happened to land.
+  // In the steady state none of that is reached. Two machines held 16 ms apart,
+  // at a rate pinned at 1.0063: inside the dead band the controller does not
+  // restore the rate to 1, so the error drifts slowly across the band and gets
+  // nudged back at the far edge. A cycle of ±50 ms at 0.6%, inaudible, and far
+  // inside what the ear resolves for placement (~5-10° off-axis, 40 cm at 3 m).
   //
-  // So the two are coupled the wrong way round: the smoother we make the
-  // correction, the longer we cannot correct at all. Decoupling them is a
-  // one-line change in the library, which is ours — until then this number is a
-  // compromise and 8 is the smooth end of it, not a measured optimum.
+  // blindPeriod and seekLead are what make a late joiner bearable, and both are
+  // ours (the library is in src/vendor/motion). The blind spell used to be
+  // amortPeriod × 2 — asking for a smoother correction bought a longer spell of
+  // no correction, so at 8 s it went blind for SIXTEEN, and each seek re-armed
+  // it: measured, joining late cost ~40 s at 0.4-0.95 s behind. seekLead is the
+  // other half: a seek flushes the buffer and fetches a fresh 6 s segment while
+  // the session clock runs on, so seeking to the position you just read lands
+  // late by however long that took, every time. Aim ahead by the cost instead —
+  // 0.5 s is the opening guess, and the controller re-measures it per element.
   const controller = new TimingMediaController(timing, {
     minDiff: 0.05,       // dead band: below this, leave the rate alone
-    amortPeriod: 8.0,    // close the gap over this long → 0.05/8 = 0.6%
+    amortPeriod: 8.0,    // gain: the rate asks for 1 + diff/8
     maxDelay: 0.8,       // above this, stop nudging and seek
+    blindPeriod: 1.5,    // how long a seek is given to settle, uncoupled from the gain
+    maxRateDev: 0.015,   // ±1.5%, about a quarter of a semitone
+    seekLead: 0.5,       // opening guess at what a seek costs; measured thereafter
   });
   // Ojo con las unidades: addMediaElement divide entre 1000, o sea que espera
   // MILISEGUNDOS pese a llamarse offset y a que todo lo demás va en segundos.
@@ -150,9 +161,11 @@ export function attachSync(el, { sessionId, url, offsetSec = 0, duration } = {})
   const diag = () => {
     const v = timing.query();
     const want = v.position, have = el.currentTime + offsetSec;
+    const lead = controller.getSeekLead(el);
     return { state: timing.readyState, want: +want.toFixed(3), have: +have.toFixed(3),
              errMs: Math.round((have - want) * 1000), rate: el.playbackRate,
-             velocity: v.velocity, paused: el.paused };
+             velocity: v.velocity, paused: el.paused,
+             leadMs: lead === null ? null : Math.round(lead * 1000) };
   };
   window.syncDiag = diag;
 

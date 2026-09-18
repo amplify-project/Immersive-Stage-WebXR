@@ -60,7 +60,31 @@ var TimingMediaController = function (timing, options) {
     // Amortization period (in seconds).
     // The amortization period is used when adjustments are made to
     // the playback rate of the video.
-    amortPeriod: options.amortPeriod || 1.0 // 2.0
+    amortPeriod: options.amortPeriod || 1.0, // 2.0
+
+    // How long the controller stays blind after a seek (in seconds).
+    //
+    // A seek flushes the buffer and fetches a fresh segment, and until that
+    // lands the element's position says nothing useful — hence a pause before
+    // judging it again. This used to be derived from amortPeriod (x2), which
+    // made one knob do two opposite jobs: asking for a *smoother* correction
+    // bought a *longer* spell of no correction at all. Measured with
+    // amortPeriod 8, a client that joined late sat 0.95 s behind for sixteen
+    // seconds, corrected half of it, and sat there another sixteen.
+    blindPeriod: options.blindPeriod || (options.amortPeriod || 1.0) * 2,
+
+    // Largest playback-rate deviation the controller may ask for.
+    //
+    // The correction is proportional — 1 + diff/amortPeriod — so the rate it
+    // asks for grows with the error and is bounded only by maxDelay/amortPeriod.
+    // At 0.8/8 that is 10%, about 1.6 semitones: fine for speech, not for
+    // music, and it arrives exactly when a late joiner is listening. Capping
+    // it trades a longer catch-up for an inaudible one.
+    maxRateDev: options.maxRateDev || 1.0,
+
+    // Initial guess at what a seek costs (in seconds), refined by measurement.
+    // See seekLead below.
+    seekLead: options.seekLead || 0.0
   };
 
   /**
@@ -210,15 +234,61 @@ var TimingMediaController = function (timing, options) {
         return;
       }
       
-      controlledElements.push({
+      var wrapped = {
         element: element,
         vector: null,
         driftRate: 0.0,
         seeked: false,
-        amortization: false
-      });
+        amortization: false,
+        // What a seek costs this element, in seconds: from setting currentTime
+        // to playback advancing again. A seek to exactly the timing object's
+        // position therefore always lands *late* by that much, and seeking
+        // again cannot close a gap that every seek recreates. So we aim ahead
+        // by the cost instead, and measure it as we go: the first seek pays
+        // the guess, the ones after pay the measurement.
+        seekLead: settings.seekLead,
+        seekAt: 0,
+        seekTo: 0
+      };
+      var onResume = function () {
+        if (!wrapped.seekAt) {
+          return;
+        }
+        // Only once playback has actually moved past where we put it.
+        if (element.currentTime <= wrapped.seekTo) {
+          return;
+        }
+        var cost = (Date.now() - wrapped.seekAt) / 1000;
+        wrapped.seekAt = 0;
+        if (cost > 0 && cost < 2.0) {
+          wrapped.seekLead = (wrapped.seekLead * 0.5) + (cost * 0.5);
+        }
+      };
+      element.addEventListener('playing', onResume);
+      element.addEventListener('timeupdate', onResume);
+
+      controlledElements.push(wrapped);
     }
   };
+  /**
+   * What the controller currently believes a seek costs this element, in
+   * seconds — the figure it aims ahead by. Diagnostic only; it is the one
+   * number that says whether the seek-lead measurement is converging.
+   *
+   * @function
+   * @param {MediaElement} [element] defaults to the last element added
+   * @returns {?number}
+   */
+  this.getSeekLead = function (element) {
+    var lead = null;
+    controlledElements.forEach(function (wrappedEl) {
+      if (!element || wrappedEl.element === element) {
+        lead = wrappedEl.seekLead;
+      }
+    });
+    return lead;
+  };
+
   this.removeMediaElement = function (element) {
     // var found = false;
     controlledElements = controlledElements.filter(function (wrappedEl) {
@@ -293,10 +363,43 @@ var TimingMediaController = function (timing, options) {
    * Ensure media elements are aligned with the current timing object's
    * state vector
    */
+  /**
+   * Is some element so far from the timing object that waiting is the wrong
+   * answer? Deliberately blind to elements that are seeking or starved: there
+   * the position means nothing yet, and seeking again would only buy another
+   * buffer flush. This asks about elements that are playing, with data, and
+   * simply in the wrong place.
+   */
+  var someElementLost = function () {
+    var v;
+    try {
+      v = timing.query();
+    } catch (e) {
+      return false;
+    }
+    if (v.velocity === 0.0) {
+      return false;
+    }
+    return controlledElements.some(function (wrappedEl) {
+      var el = wrappedEl.element;
+      if (el.seeking || el.paused || el.readyState <= el.HAVE_CURRENT_DATA) {
+        return false;
+      }
+      return Math.abs(v.position - el.currentTime - el._offset) > settings.maxDelay;
+    });
+  };
+
   var controlElements = function () {
-    // Do not adjust anything during an amortization period
+    // Do not adjust anything during an amortization period — unless an element
+    // is plainly lost, which is the one case where not looking is indefensible.
+    // A client joining an existing session is exactly that: it lands a second
+    // behind, and every seek it makes re-arms this period, so it would wait out
+    // one blind spell after another while the music played on without it.
     if (amortTimeout) {
-      return;
+      if (!someElementLost()) {
+        return;
+      }
+      cancelAmortizationPeriod();
     }
 
     // Get new readings from Timing object
@@ -313,7 +416,7 @@ var TimingMediaController = function (timing, options) {
 
     if (amortNeeded) {
       // start amortization period
-      amortTimeout = setTimeout(stopAmortizationPeriod, settings.amortPeriod * 2000);
+      amortTimeout = setTimeout(stopAmortizationPeriod, settings.blindPeriod * 1000);
     }
 
     // Queue a task to fire a simple event named "timeupdate"
@@ -372,17 +475,32 @@ var TimingMediaController = function (timing, options) {
       if (Math.abs(diff) < settings.minDiff) {
         // video and vector are in sync!
       } else if (Math.abs(diff) > settings.maxDelay) {
-        // seek video to pos= timingVector.position
-        wrappedEl.vector.position = timingVector.position;
+        // Seek — but ahead of the timing object by what the seek itself will
+        // cost, because the clock does not wait for our buffer. Landing on the
+        // position we read is landing late by definition.
+        wrappedEl.vector.position = timingVector.position + (wrappedEl.seekLead * timingVector.velocity);
         wrappedEl.vector.velocity = timingVector.velocity + wrappedEl.driftRate;
         wrappedEl.seeked = true;
-        wrappedEl.amortization = false;
+        // Hold still while the buffer refills: until it does, this element's
+        // position is not evidence of anything, and seeking on it again would
+        // only pay for another flush.
+        wrappedEl.amortization = true;
         element.currentTime = wrappedEl.vector.position - element._offset;
         element.playbackRate = wrappedEl.vector.velocity;
+        wrappedEl.seekAt = Date.now();
+        wrappedEl.seekTo = element.currentTime;
       } else {
         futurePos = timingVector.computePosition(timingVector.timestamp + settings.amortPeriod);
-        wrappedEl.vector.velocity =
+        var wanted =
           wrappedEl.driftRate + (futurePos - wrappedEl.vector.position) / settings.amortPeriod;
+        // The correction is proportional to the error, so its size is not the
+        // dead band divided by the amortization period — that is only its
+        // smallest step. Left alone it reaches maxDelay/amortPeriod, which on a
+        // sustained note is heard as pitch. maxRateDev is the ceiling; it
+        // defaults wide enough to leave the original behaviour alone.
+        var nominal = timingVector.velocity;
+        wrappedEl.vector.velocity = Math.min(nominal + settings.maxRateDev,
+                                    Math.max(nominal - settings.maxRateDev, wanted));
         wrappedEl.amortization = false;
         element.playbackRate = wrappedEl.vector.velocity < 0.25 ? 0 : wrappedEl.vector.velocity;
         // new playbackrate= wrappedEl.vector.velocity
