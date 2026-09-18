@@ -2153,6 +2153,35 @@ function saveARCalib() {
 // updateMatrixWorld: el render ya recorre el árbol y marcar la rama sucia cuesta
 // lo mismo que hoy. Los panners van entonces un frame por detrás — 14 ms a 72 Hz,
 // que para colocar una fuente no es nada.
+// El ORIGEN del marco común, dibujado a pelo: un cubo y tres ejes de un metro
+// colgando de sharedGroup, o sea en 0,0,0 del espacio compartido.
+//
+// Con los músicos no se puede depurar esto: si dos cascos los ven en sitios
+// distintos, la culpa puede ser del navegador (que os colocalice mal — una L
+// tiene dos brazos parecidos y una relocalización puede encajar en el equivocado
+// y quedarse ahí, firme) o nuestra (que la S se aplique al revés). Los ejes lo
+// parten en dos: si los dos cascos ven el cubo en el MISMO punto físico y los
+// ejes apuntando igual, el marco es correcto y el fallo está río abajo. Si no,
+// el marco que os dan ya es distinto y no hay nada que arreglar en este código.
+let sharedOriginMarker = null;
+function showSharedOrigin(on) {
+  if (!on) {
+    if (sharedOriginMarker) { sharedGroup.remove(sharedOriginMarker); sharedOriginMarker = null; }
+    return;
+  }
+  if (sharedOriginMarker) return;
+  sharedOriginMarker = new THREE.Group();
+  const axes = new THREE.AxesHelper(1);          // X rojo, Y verde, Z azul
+  axes.material.depthTest = false;
+  sharedOriginMarker.add(axes);
+  const cube = new THREE.Mesh(
+    new THREE.BoxGeometry(0.12, 0.12, 0.12),
+    new THREE.MeshBasicMaterial({ color: MeshFit.colour(0xff00ff), depthTest: false }));
+  sharedOriginMarker.add(cube);
+  sharedOriginMarker.renderOrder = 998;
+  sharedGroup.add(sharedOriginMarker);           // en el origen del marco común
+}
+
 function updateSharedFrame(frame, refSpace) {
   const p = frame.getPose(arSharedSpace, refSpace);
   if (!p) { _shared.nulls++; return; }   // sin pose: se queda la última buena
@@ -2728,6 +2757,7 @@ async function enterAR() {
         _shared.ok = _shared.nulls = _shared.resets = 0;
         _shared.everOk = false; _shared.lastResetAt = 0;
         attachSharedReset(arSharedSpace);
+        showSharedOrigin(true);
         arLogAdd(`shared space: concedido (${arSharedSpace.constructor && arSharedSpace.constructor.name})`);
       } catch (e) {
         arLogAdd('shared space: NO', e);
@@ -2789,6 +2819,7 @@ async function enterAR() {
       // El espacio compartido muere con la sesión (y del todo cuando sale el
       // último), así que no hay nada que conservar: la sala vuelve a la escena.
       sharedActive = false; arSharedSpace = null;
+      showSharedOrigin(false);
       sharedGroup.matrix.identity();
       sharedGroup.matrixWorldNeedsUpdate = true;
       resetARFocus();          // suelta el realce: el músico enfocado no puede
