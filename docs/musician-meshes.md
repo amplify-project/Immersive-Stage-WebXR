@@ -320,7 +320,10 @@ animates plain nodes (`skins: 0`) while the guitarist has a skeleton, so a test
 with the music box proves nothing about the guitarist.
 
 Worse, it bites **in the headset only**: the editor's preview holds the single
-original and looks perfectly right.
+original and looks perfectly right. Both paths have since been seen working on a
+Quest — the music box's plain nodes and the guitarist's skeleton — but the rule
+for the next animated model stands: whichever of the two you tested says nothing
+about the other.
 
 **The fit used to measure the rest pose.** `fitMeshToRoom` normalises height
 from the bounding box, and a model exported in a T-pose whose clip is a seated
@@ -353,11 +356,16 @@ media time maps to the pose, including a backwards seek, a wrap past the end and
 the offset; the same time always gives the same pose; and two musicians sharing
 one file move independently.
 
+**Animation, verified on a Quest (2026-09-21):** both models animate — the music
+box, which drives plain nodes, and the guitarist, which is skinned and therefore
+the one that exercises `SkeletonUtils.clone`. The frame cost is still an
+impression rather than a figure; see Pending.
+
 **Pending:**
 
-- **Animation in the headset.** Written and unit-tested (see below), never yet
-  seen on a Quest. Specifically untested: a *skinned* model — the guitarist —
-  through `SkeletonUtils.clone`, and what several animated meshes cost per frame.
+- **What animation costs per frame.** Both models look right on a Quest, but
+  "looks right" is not a measurement: nobody has yet run `?arperf=1` with
+  several animated meshes at once, and AR is where the budget is already tight.
 - **S3 publishing — not needed as things are deployed today.** Publishing sends
   the *media* to S3: `upload-s3.sh` syncs `encoded/`, and the player is pointed at
   it with `?src=<manifest URL>`. The player **page** is still served by
