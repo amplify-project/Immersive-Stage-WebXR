@@ -98,6 +98,10 @@
 <!-- Mallas de los músicos en AR (scene.json → stems[i].mesh). Vendorizado y no del
      CDN a propósito: tiene que ser exactamente la r128 del three de arriba. -->
 <script src="./src/vendor/GLTFLoader.js"></script>
+<!-- SkeletonUtils (three r128 examples, vendorizado igual que el loader): un
+     clon plano de una malla con esqueleto queda atado al esqueleto del
+     original y no se mueve. Ver MeshFit.clone(). -->
+<script src="./src/vendor/SkeletonUtils.js"></script>
 <!-- Carga y ajuste de las mallas, compartido con el editor: la vista previa de
      allí tiene que colocar el modelo igual que aquí, o no sirve de nada. -->
 <script src="./src/app/mesh-fit.js"></script>

@@ -440,6 +440,10 @@
      llega, el editor sigue funcionando entero y sólo desaparece la vista. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="./src/vendor/GLTFLoader.js"></script>
+<!-- SkeletonUtils (three r128 examples, vendorizado igual que el loader): un
+     clon plano de una malla con esqueleto queda atado al esqueleto del
+     original y no se mueve. Ver MeshFit.clone(). -->
+<script src="./src/vendor/SkeletonUtils.js"></script>
 <script src="./src/app/mesh-fit.js"></script>
 
 <script>
@@ -850,7 +854,13 @@ function setStemMesh(i, patch) {
   if (spec.yawDeg === 0) delete spec.yawDeg;
   if (!spec.zUp) delete spec.zUp;
   if (!spec.url) { delete s.mesh; return; }     // "none" → fuera la malla entera
-  const plain = spec.heightM == null && spec.yawDeg == null && !spec.zUp;
+  // "Plain" es que NO haya nada más que la url, y se mira así —contando las
+  // claves— en vez de enumerando las que conocemos: con una lista, el día que
+  // el player entiende un campo nuevo (`clip`, `animOffset`) el editor lo
+  // colapsa a cadena y lo borra al guardar, sin decir nada. Ya pasó con `ar` y
+  // `gainDb` en el player.
+  const keys = Object.keys(spec).filter(k => spec[k] !== undefined);
+  const plain = keys.length === 1 && keys[0] === 'url';
   s.mesh = plain ? spec.url : spec;
 }
 
@@ -1062,6 +1072,11 @@ function mvMeasure(info) {
     t += `
 · its own units already look like metres (${u.y.toFixed(2)} m tall). ` +
          `Put ${u.y.toFixed(2)} in Mesh height to keep the size it was made at.`;
+  // El nombre del clip no se puede adivinar, y hace falta para escribirlo en la
+  // escena: aquí es donde ya se está mirando el fichero. La vista previa no lo
+  // reproduce (se dibuja por eventos, no en bucle), pero el modelo se coloca en
+  // su primer fotograma, que es contra lo que se midió la altura.
+  if (info.clip) t += `\n· animated · clip "${info.clip}" · ${info.clipSecs.toFixed(1)} s`;
   let html = mvEsc(t);
   for (const w of info.warnings) html += `\n<span class="warn">⚠ ${mvEsc(w)}</span>`;
   $('meshMeas').innerHTML = html;
@@ -1096,7 +1111,7 @@ function updateMeshPreview() {
   MeshFit.load(spec.url).then(src => {
     if (token !== meshView.token) return;      // te fuiste a otro músico mientras bajaba
     mvClearModel();
-    const wrap = MeshFit.fit(src.clone(true), { ...spec, name: spec.url });
+    const wrap = MeshFit.fit(MeshFit.clone(src), { ...spec, name: spec.url });
     meshView.wrap = wrap; meshView.key = key;
     meshView.scene.add(wrap);
     mvMeasure(wrap.userData.fit);

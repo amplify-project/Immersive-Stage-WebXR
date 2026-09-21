@@ -66,6 +66,7 @@ let audioCtx   = null, gainNode = null;  // referencias derivadas del engine
 let xrSession  = null;
 let arSession  = null;               // sesión WebXR immersive-ar (passthrough)
 let arSources  = [];                 // Object3D por stem, anclados en la sala
+let arMeshAnims = [];                // MeshFit.animator() por malla animada (se mueven con el medio)
 let roomGroup  = null;               // marco de sala: padre de las fuentes ancladas
 let arCalibrating = false;           // grip apretado: se está recolocando la sala
 let arPrevSpot = null;               // spotlight previo (restaurar al salir de AR)
@@ -2057,6 +2058,14 @@ function makeFocusRing() {
 // sin entorno sale negro igual. La hemisférica baja a la mitad al entrar el
 // entorno, que ya hace el ambiente; con las dos a tope la malla se lava.
 let arLights = null;
+// Un solo número para todas: el que marca el <video>, que es de donde cuelga
+// todo lo demás en este player. Barato aunque no haya ninguna (el caso normal).
+function updateMeshAnims() {
+  if (!arMeshAnims.length) return;
+  const t = videoEl?.currentTime || 0;
+  for (const a of arMeshAnims) a.setMediaTime(t);
+}
+
 function ensureARLights() {
   if (arLights) return arLights;
   arLights = new THREE.Group();
@@ -2083,10 +2092,24 @@ function attachMeshTo(marker, cfg, floorY) {
     // sala): si este marcador ya no está en la escena, el GLB no pinta nada aquí.
     if (!arSources.includes(marker)) return;
     const holder = new THREE.Group();
-    // clone(): varios músicos pueden compartir fichero (el `ar.mesh` común) y cada
-    // uno necesita su propio nodo. Ojo, un clon plano no arrastra el esqueleto de
-    // una malla animada — cuando toque animar habrá que ir a SkeletonUtils.clone.
-    holder.add(MeshFit.fit(src.clone(true), { ...spec, name: spec.url }));
+    // MeshFit.clone(): varios músicos pueden compartir fichero (el `ar.mesh`
+    // común) y cada uno necesita sus propios nodos para que su mixer los mueva.
+    // Y si la malla tiene esqueleto, un clon plano se queda atado al esqueleto
+    // del original y no se mueve — de eso se encarga ya MeshFit.clone().
+    const fitted = MeshFit.fit(MeshFit.clone(src), { ...spec, name: spec.url });
+    holder.add(fitted);
+    // La animación la mueve el tiempo de medio (ver MeshFit.animator), así que
+    // basta con registrarla: el bucle de AR le pasa el currentTime del <video>.
+    const anim = MeshFit.animator(fitted);
+    if (anim) {
+      arMeshAnims.push(anim);
+      // Colocada ya en su primer fotograma, no en reposo: la malla aparece a
+      // mitad de una sesión que lleva rato corriendo y tiene que entrar donde
+      // va, no dar un salto en el frame siguiente.
+      anim.setMediaTime(videoEl?.currentTime || 0);
+      console.log(`[mesh] "${spec.url}" animada · clip "${anim.name}" · ${anim.duration.toFixed(1)}s` +
+                  (anim.offset ? ` · desfase ${anim.offset}s` : ''));
+    }
     holder.position.y = floorY;               // del punto de audio al suelo
     holder.add(makeFocusRing());
     marker.add(holder);
@@ -2939,6 +2962,10 @@ function buildARSources() {
 function clearARSources() {
   for (const m of arSources) roomGroup.remove(m);
   arSources = [];
+  // Los mixers apuntan a nodos que se van con los marcadores: sin soltarlos, la
+  // siguiente sesión de AR anima mallas que ya no están en la escena.
+  for (const a of arMeshAnims) a.dispose();
+  arMeshAnims = [];
   // Fuera las luces con las mallas: en el 360 no hay nada que iluminar y una luz
   // de más es trabajo del shader por cada fotograma que nadie ve. El entorno se
   // suelta igual (la textura sigue cacheada: volver a AR no la reconstruye).
@@ -3066,6 +3093,10 @@ async function enterAR() {
       // (es el mismo elemento del que sale el audio).
       if (sphere && sphere.visible && videoEl && videoEl.readyState >= 2 && videoTexture)
         videoTexture.needsUpdate = true;
+      // Las mallas animadas, contra el reloj del medio. Va antes del render y
+      // fuera del `if (frame)`: es la escena la que tiene que estar al día,
+      // haya pose de visor o no.
+      updateMeshAnims();
       const _p0 = ARPERF ? performance.now() : 0;
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
