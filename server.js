@@ -10,6 +10,7 @@ const ROOT = __dirname;
 const MEDIA_DIR = path.join(ROOT, 'media');
 const MESH_DIR = path.join(ROOT, 'meshes');
 const SCENE_FILE = path.join(ROOT, 'scene.json');
+const RECORDINGS_DIR = path.join(ROOT, 'recordings');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -785,6 +786,12 @@ const handler = (req, res) => {
     return res.end(JSON.stringify(relay ? relay.health() : { ok: false, reason: 'relay disabled' }));
   }
 
+  // Y si alguien está grabando voz ahora mismo, y dónde van los ficheros.
+  if (req.url === '/voice/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(voice ? voice.health() : { ok: false, reason: 'voice disabled' }));
+  }
+
   let pathname;
   try { pathname = decodeURIComponent(req.url.split('?')[0]); }
   catch { pathname = req.url.split('?')[0]; }
@@ -806,6 +813,15 @@ const handler = (req, res) => {
 
   const filePath = path.join(ROOT, path.normalize(pathname));
   if (!filePath.startsWith(ROOT)) { res.writeHead(403); res.end('Forbidden'); return; }
+
+  // Las grabaciones de voz viven bajo ROOT, así que sin esto el servidor de
+  // estáticos las serviría a cualquiera de la red con sólo acertar el nombre —y
+  // el nombre es la fecha y el id del player, que no es adivinar mucho—. Se
+  // escriben por el WebSocket y se leen desde la máquina, no por HTTP.
+  if (filePath === RECORDINGS_DIR || filePath.startsWith(RECORDINGS_DIR + path.sep)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('Las grabaciones de voz no se sirven por HTTP');
+  }
 
   fs.stat(filePath, (err, stat) => {
     if (err || !stat.isFile()) {
@@ -898,11 +914,28 @@ if (relay && !/^(0|off|false)$/i.test(process.env.TIMING || '')) {
   }
 }
 
+// ── Grabación de voz de los participantes, en ESTE servidor ────────────
+// Lo que dice quien lleva el casco es la observación que la telemetría de pose
+// no sabe hacer. Mismo argumento que los otros dos para montarlo aquí: una sola
+// origen, un solo certificado. Ver telemetry/voice.js y docs/voice-recording.md.
+// El player no manda nada si no se lo piden (?voice=1 o scene.json), así que
+// esto abierto no graba a nadie por su cuenta.
+let voice = null;
+if (!/^(0|off|false)$/i.test(process.env.VOICE || '')) {
+  try {
+    const { createVoiceService } = require('./telemetry/voice');
+    voice = createVoiceService({ server, dir: RECORDINGS_DIR, log: false });
+  } catch (e) {
+    const why = e.code === 'MODULE_NOT_FOUND' ? 'falta `cd telemetry && npm install`' : e.message;
+    console.warn(`⚠  Grabación de voz desactivada (${why}). El player funciona igual.`);
+  }
+}
+
 // Ni el relay ni el timing cierran un upgrade que no sea suyo: cada uno se
 // desentiende y el siguiente oyente lo mira. Aquí se acaban los oyentes, así que
 // lo que no haya reclamado nadie se cierra ahora — sin esto el socket se queda
 // abierto para siempre.
-const WS_PATHS = ['/ingest', '/consume', ...(timing ? [timing.path] : [])];
+const WS_PATHS = ['/ingest', '/consume', ...(timing ? [timing.path] : []), ...(voice ? [voice.path] : [])];
 server.on('upgrade', (req, socket) => {
   if (!WS_PATHS.includes((req.url || '').split('?')[0])) socket.destroy();
 });
@@ -930,6 +963,10 @@ server.listen(PORT, '0.0.0.0', () => {
   if (timing) {
     console.log(`  sync      → ${scheme === 'https' ? 'wss' : 'ws'}://<host>:${PORT}${timing.path}`);
     console.log(`              manager=${scheme}://<host>:${PORT}/timing.html · player=?sync=<sesión>`);
+  }
+  if (voice) {
+    console.log(`  voz       → ${scheme === 'https' ? 'wss' : 'ws'}://<host>:${PORT}${voice.path} · health=/voice/health`);
+    console.log(`              player=?voice=1 · graba en ${path.relative(ROOT, voice.dir)}/`);
   }
   if (scheme === 'http') {
     console.warn('⚠  Sin certificados → HTTP. WebXR (VR) NO funciona por IP sin HTTPS.');

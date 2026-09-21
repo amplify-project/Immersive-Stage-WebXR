@@ -63,6 +63,12 @@ canvas#three-canvas { width: 100% !important; height: 100% !important; display: 
 .badge-ambi { color: var(--accent); border-color: #00d4ff40; background: #00d4ff10; }
 .badge-360  { color: #a78bfa; border-color: #a78bfa40; background: #a78bfa10; }
 .badge-xr   { color: #34d399; border-color: #34d39940; background: #34d39910; }
+/* Que se está grabando la voz de alguien tiene que verse desde el otro lado de
+   la sala: parpadea, y en rojo como el punto de cualquier grabadora. */
+.badge-rec  { color: #ff4444; border-color: #ff444440; background: #ff444415; animation: rec-blink 1.6s ease-in-out infinite; }
+.badge-rec.badge-rec-off { color: #ffd400; border-color: #ffd40040; background: #ffd40015; animation: none; }
+@keyframes rec-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
 
 #delay-badge {
   font-family: var(--mono);
@@ -153,7 +159,7 @@ canvas#three-canvas { width: 100% !important; height: 100% !important; display: 
   box-shadow: 0 0 6px var(--accent);
 }
 
-#xr-btn, #ar-btn {
+#xr-btn, #ar-btn, #rec-btn {
   margin-left: 8px;
   font-family: var(--mono);
   font-size: 11px;
@@ -168,7 +174,9 @@ canvas#three-canvas { width: 100% !important; height: 100% !important; display: 
   text-transform: uppercase;
 }
 #ar-btn { background: linear-gradient(135deg, #0ea5e9, #0369a1); }
-#xr-btn:hover, #ar-btn:hover { opacity: 0.85; transform: scale(1.03); }
+#rec-btn { background: linear-gradient(135deg, #475569, #1e293b); }
+#rec-btn.rec-on { background: linear-gradient(135deg, #ef4444, #991b1b); }
+#xr-btn:hover, #ar-btn:hover, #rec-btn:hover { opacity: 0.85; transform: scale(1.03); }
 #xr-btn:disabled, #ar-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
 
 #ambi-viz {

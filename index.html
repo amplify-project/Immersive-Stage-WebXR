@@ -54,6 +54,7 @@
       <span class="badge badge-ambi" id="ambi-badge" style="display:none">ambi B-fmt</span>
       <span class="badge badge-live" id="live-badge" style="display:none">● live</span>
       <span class="badge badge-xr"  id="xr-badge"   style="display:none">WebXR</span>
+      <span class="badge badge-rec" id="rec-badge"  style="display:none">● rec</span>
       <span id="delay-badge">⏱ --s</span>
     </div>
   </div>
@@ -76,6 +77,10 @@
       </div>
       <button class="ctrl-btn" onclick="resetView()" title="Centrar vista">⊙</button>
       <button class="ctrl-btn" onclick="toggleFS()"  title="Pantalla completa">⛶</button>
+      <!-- Sólo aparece con ?voice=1 (o scene.json). El micro se pide AQUÍ, en la
+           página plana: dentro de una sesión inmersiva el permiso no se puede
+           pintar, y esperarlo se gasta el gesto que requestSession necesita. -->
+      <button id="rec-btn" style="display:none" onclick="toggleVoice()" title="Grabar voz del participante">REC</button>
       <button id="xr-btn" disabled onclick="enterXR()">VR</button>
       <button id="ar-btn" disabled onclick="enterAR()">AR</button>
     </div>

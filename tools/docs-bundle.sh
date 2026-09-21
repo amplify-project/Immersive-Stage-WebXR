@@ -28,6 +28,7 @@ DOCS=(
   docs/musician-meshes.md
   docs/closeup-panel.md
   docs/telemetry.md
+  docs/voice-recording.md
   docs/live-editor-tutorial.md
   docs/produccion-hardware.md
   docs/motion-sync.md

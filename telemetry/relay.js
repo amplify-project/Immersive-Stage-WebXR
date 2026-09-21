@@ -117,8 +117,12 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
         // hello: meta stays server-side, and a consumer that reads `p` without
         // knowing whether it is this headset's local-floor or the shared room
         // will silently mix the two the day one spectator is in AR.
+        // `rec` rides along for the same reason as `frame`: it names the voice
+        // recording these poses belong to (docs/voice-recording.md), and a
+        // consumer or a CSV that has the poses without it cannot tell which
+        // audio file goes with them. Null when nobody is recording.
         players.set(id, { ...prev, id, meta, frame: meta.frame || 'local-floor',
-                          lastSeen: Date.now() });
+                          rec: meta.rec || null, lastSeen: Date.now() });
         // Probe at once and keep probing: the first exchange puts `srv` on the
         // very first batch, and the rest both refine it (a quieter exchange
         // measures a tighter round trip) and follow the headset's oscillator
@@ -133,6 +137,7 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
         const prev = players.get(id) || { meta: {} };
         const rec = {
           id, frame: prev.frame || 'local-floor',
+          rec: prev.rec || null,        // the voice recording, from the hello's meta
           // Three clocks, because no single one does the job. `t` and `w` are the
           // player's own, monotonic and wall, and travel untouched. `srv` is that
           // sample on OUR clock, which is the only one every player shares:

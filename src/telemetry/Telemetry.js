@@ -116,6 +116,18 @@ export class Telemetry {
     if (this._flushMs <= 0) this._flush();
   }
 
+  /**
+   * Merge into the metadata and tell the relay now, rather than at the next
+   * connection. `meta` is only ever sent in the hello, so a fact that arrives
+   * mid-session — voice recording started, and what it is called — would
+   * otherwise sit here until a reconnection that may never come. Re-sending the
+   * hello is how the relay takes an update: it keys on the id and merges.
+   */
+  setMeta(patch) {
+    Object.assign(this.meta, patch);
+    if (!this._stopped) this._send({ hello: this.playerId, meta: this.meta });
+  }
+
   /** True while the socket is open and shipping. */
   get connected() { return this._isOpen(); }
 

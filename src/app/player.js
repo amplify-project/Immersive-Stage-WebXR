@@ -84,6 +84,8 @@ let syncInterval = null;
 let xrZoomDist = 0;   // acercamiento en VR (joystick derecho), 0 = sin zoom
 let telemetry    = null;             // Telemetry: pose de cabeza → relay externo (opt-in)
 let telemetryCfg = null;             // bloque telemetry de scene.json
+let voice        = null;             // VoiceRecorder: micro del participante → /voice (opt-in)
+let voiceCfg     = null;             // bloque voice de scene.json
 // Diagnóstico: ?audiotest=spin → el campo sonoro gira solo (ignora la cabeza).
 const AUDIO_SPIN_TEST = new URLSearchParams(location.search).get('audiotest') === 'spin';
 
@@ -1034,6 +1036,7 @@ async function setupFOA() {
         if (_sc.alignment) _align = _sc.alignment;
         if (_sc.ar) arCfg = _sc.ar;
         if (_sc.telemetry) telemetryCfg = _sc.telemetry;
+        if (_sc.voice) voiceCfg = _sc.voice;
       }
     } catch (_) { /* sin escena → DEFAULT_STEMS */ }
 
@@ -1092,6 +1095,26 @@ async function setupFOA() {
         window.telemetry = telemetry;   // inspección desde consola
         toast('Telemetría lista → ' + _turl);
       }
+    }
+
+    // ── Grabación de voz del participante (opt-in) ────────────────────
+    // Lo que dice mientras está dentro —"no veo el saxo", "ahora lo tengo
+    // detrás"— es la observación que la pose no sabe hacer. Se guarda en el
+    // servidor troceada en Opus, y cada trozo lleva el tiempo de medio del
+    // player: la misma columna que escribe el recorder de poses (media_s), así
+    // que la frase y la cabeza que se estaba girando al decirla se cruzan por
+    // un join. Config en scene.json:
+    //   "voice": { "enabled": true }
+    // Overrides por URL:  ?voice=1   ?voice=0   ?voice=wss://otra/voice
+    // Ver docs/voice-recording.md — y ojo: esto graba a una persona, así que
+    // sale por defecto apagado y con un piloto que se ve desde fuera.
+    {
+      const _vp = new URLSearchParams(location.search).get('voice');
+      const _von = _vp !== null ? !/^(0|off|false)$/i.test(_vp) : !!(voiceCfg && voiceCfg.enabled);
+      // Sin await: si el permiso está concedido esto arranca el micro, y un
+      // getUserMedia que se quede pensando (dispositivo ocupado) no puede dejar
+      // a medias la carga del player. setupVoice() se traga sus propios errores.
+      if (_von) setupVoice(_vp);
     }
     if (_stems.length) {
       // zoomMin = vista actual (sin zoom) → en reposo los stems quedan en
@@ -1600,6 +1623,100 @@ function xrDebug(data) {
 }
 
 // ══════════════════════════════════════════════════════
+// GRABACIÓN DE VOZ DEL PARTICIPANTE
+// ══════════════════════════════════════════════════════
+// El micro se pide desde la página plana y nunca al entrar en XR: dentro de una
+// sesión inmersiva el diálogo de permiso no se puede pintar, y esperarlo antes
+// de requestSession() se gasta el gesto de usuario que ésta necesita —con lo que
+// falla el VR por algo que no tiene nada que ver con el VR—. La contrapartida es
+// un botón que hay que tocar una vez; a partir de la segunda sesión el permiso
+// ya está concedido para este origen y arranca solo.
+async function setupVoice(param) {
+  const q = new URLSearchParams(location.search);
+  const _same = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/voice`;
+  const url = (param && /^wss?:\/\//i.test(param) ? param : null) || (voiceCfg && voiceCfg.url) || _same;
+  try {
+    // import() dinámico, como Motion: sin ?voice no se baja ni una línea de esto.
+    const { VoiceRecorder } = await import('./voice.js');
+    voice = new VoiceRecorder({
+      url,
+      // El MISMO id que la telemetría, que es lo que permite cruzar la voz con
+      // las poses después. Sin telemetría no hay con qué cruzar, así que vale
+      // cualquiera —pero que sea el de ?player si lo han puesto.
+      playerId: telemetry ? telemetry.playerId : (q.get('player') || undefined),
+      timesliceMs:   (voiceCfg && voiceCfg.timesliceMs)   || 1000,
+      bitsPerSecond: (voiceCfg && voiceCfg.bitsPerSecond) || 32000,
+      constraints:   (voiceCfg && voiceCfg.constraints)   || undefined,
+      meta: { ua: navigator.userAgent, player: q.get('player') || null },
+      mediaTime: () => videoEl?.currentTime || 0,
+      onState: (state, info) => { voiceBadge(state); voiceRefToTelemetry(state, info); },
+    });
+    window.voice = voice;
+    const btn = document.getElementById('rec-btn');
+    if (btn) btn.style.display = '';
+
+    // Si ya nos dieron el micro en una sesión anterior, no hay nada que tocar.
+    // Un navegador sin Permissions API (o que no conoce 'microphone') deja esto
+    // en false y se queda el botón, que es el comportamiento seguro.
+    let granted = false;
+    try { granted = (await navigator.permissions.query({ name: 'microphone' })).state === 'granted'; }
+    catch (_) { /* sin Permissions API: que lo pulse */ }
+    if (granted) await toggleVoice();
+    else toast('Grabación de voz: pulsa REC');
+  } catch (e) {
+    console.warn('[voice] no se pudo preparar:', e.message || e);
+    toast('Grabación de voz no disponible');
+  }
+}
+
+async function toggleVoice() {
+  if (!voice) return toast('Grabación de voz desactivada (?voice=1)');
+  if (voice.recording) { voice.stop(); return toast('Grabación detenida'); }
+  try {
+    await voice.start();
+    toast('Grabando voz → ' + voice.url);
+  } catch (e) {
+    // NotAllowedError (lo han denegado) y NotFoundError (no hay micro) son las
+    // dos que se ven de verdad, y las dos se arreglan fuera de aquí. Un Error
+    // pelado no tiene nombre que decir, así que ahí vale más el mensaje.
+    console.warn('[voice] start:', e);
+    const _why = (e.name && e.name !== 'Error') ? e.name : (e.message || e);
+    toast('Micrófono no disponible: ' + _why);
+  }
+}
+
+// La referencia a la grabación viaja EN la telemetría de pose: el servicio de
+// voz contesta al hello con el nombre que le ha puesto a los ficheros, y ese
+// nombre se mete en el meta del hello de la telemetría. El relay lo promueve a
+// cada registro igual que hace con `frame`, así que sale por /consume y acaba en
+// la columna `rec` del CSV. Resultado: una fila de poses dice a qué audio
+// pertenece, sin manifiesto que mantener en pie ni nombres que cuadrar a mano.
+// Ver docs/telemetry.md y docs/voice-recording.md.
+function voiceRefToTelemetry(state, info) {
+  if (!telemetry) return;
+  // Al parar, recRef ya es null: las poses que vengan después no son de ninguna
+  // grabación, y decir lo contrario sería peor que no decir nada.
+  const ref = (state === 'idle') ? null : ((info && info.recRef) || (voice && voice.recRef) || null);
+  if ((telemetry.meta.rec || null) === ref) return;
+  telemetry.setMeta({ rec: ref });
+}
+
+// El piloto. Grabar la voz de alguien tiene que notarse desde fuera del casco
+// —dentro, el único aviso honesto es el indicador de micro del sistema, que se
+// apaga al soltar la pista en stop()—.
+function voiceBadge(state) {
+  const on = state === 'recording' || state === 'offline';
+  const b = document.getElementById('rec-badge');
+  if (b) {
+    b.style.display = on ? '' : 'none';
+    b.textContent = state === 'offline' ? '● rec · sin red' : '● rec';
+    b.classList.toggle('badge-rec-off', state === 'offline');
+  }
+  const btn = document.getElementById('rec-btn');
+  if (btn) { btn.classList.toggle('rec-on', on); btn.textContent = on ? '■ REC' : 'REC'; }
+}
+
+// ══════════════════════════════════════════════════════
 // WebXR — Oculus Quest 3
 // ══════════════════════════════════════════════════════
 async function checkWebXR() {
@@ -1630,13 +1747,19 @@ async function enterXR() {
     await renderer.xr.setSession(xrSession);
 
     // frame: en qué marco viajan p/q. En VR es el del propio casco (ver arTelemetryPose).
-    if (telemetry) { telemetry.meta.mode = 'vr'; telemetry.meta.frame = 'local-floor'; telemetry.start(); }
+    if (telemetry) {
+      telemetry.meta.mode = 'vr'; telemetry.meta.frame = 'local-floor';
+      telemetry.meta.rec = voice?.recRef || null;   // en el hello, que es donde el relay lee el meta
+      telemetry.start();
+    }
+    voice?.mark('enter-vr');
 
     document.getElementById('xr-btn').textContent = 'EXIT VR';
 
     xrSession.addEventListener('end', () => {
       xrSession = null;
       telemetry?.stop();
+      voice?.mark('exit-vr');   // la grabación sigue: lo que se dice al salir vale tanto como lo de dentro
       if (debugMesh) debugMesh.visible = false;
       if (SYNCLOG || SHAREDSPACE) arPerfPanelClear();
       document.getElementById('xr-btn').textContent = 'VR';
@@ -2858,7 +2981,12 @@ async function enterAR() {
     sharedGroup.matrix.identity();
     sharedGroup.matrixWorldNeedsUpdate = true;
     // 'room': mismo marco que stem.ar y que las posiciones que publicarán las cámaras.
-    if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room'; telemetry.start(); }
+    if (telemetry) {
+      telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room';
+      telemetry.meta.rec = voice?.recRef || null;
+      telemetry.start();
+    }
+    voice?.mark('enter-ar');
     renderer.setClearAlpha(0);                    // deja ver el passthrough
     document.getElementById('ar-btn').textContent = 'EXIT AR';
 
@@ -2905,6 +3033,7 @@ async function enterAR() {
         console.log('[arperf] ventanas:', window.__arperf);
       }
       telemetry?.stop();
+      voice?.mark('exit-ar');
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
       // salir con el grip apretado (en marco común no se persiste: ver updateARCalib)
@@ -3078,7 +3207,7 @@ document.addEventListener('click', () => {
 // ══════════════════════════════════════════════════════
 Object.assign(window, {
   loadFromURL, loadFile, seekTo, togglePlay, skipBack, skipFwd,
-  toggleMute, setVolume, resetView, toggleFS, enterXR, enterAR,
+  toggleMute, setVolume, resetView, toggleFS, enterXR, enterAR, toggleVoice,
 });
 
 // ══════════════════════════════════════════════════════
