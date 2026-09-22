@@ -100,6 +100,10 @@
       heightM: isFinite(+m.heightM) && +m.heightM > 0 ? +m.heightM : AR_MESH_HEIGHT,
       yawDeg:  isFinite(+m.yawDeg) ? +m.yawDeg : 0,
       zUp:     !!m.zUp,
+      // How far off the floor the model hangs. The fit stands everything on the
+      // floor, which is right for a person and wrong for anything a person
+      // holds: a trumpet on its own belongs at playing height, not at your feet.
+      offsetYM: isFinite(+m.offsetYM) ? +m.offsetYM : 0,
       // Animation. `clip` is a name or an index, null meaning "the first one";
       // `animOffset` is the media time at which the clip's own zero falls, which
       // is how a loop gets put on the beat; `animate:false` freezes a model that
@@ -113,7 +117,7 @@
 
   // ── The fit ───────────────────────────────────────────────────────────────
   // Normalises whatever arrives: the model is scaled to `heightM`, centred in
-  // plan, stood on the floor and turned to `yawDeg`.
+  // plan, stood on the floor (or `offsetYM` above it) and turned to `yawDeg`.
   //
   // Without this, anyone's first mesh shows up 100× too big or invisibly small,
   // because a GLB does not declare its units and every tool exports in its own.
@@ -128,7 +132,7 @@
   // translation — and the order this needs is rotate to Y-up, recentre, scale,
   // then yaw:
   //
-  //     wrap   scale = k, rotation.y = yaw      ← spins in place
+  //     wrap   scale = k, rotation.y = yaw, position.y = offset   ← spins in place
   //      └ axis  rotation.x = zUp, position = −centre
   //         └ obj  the model, exactly as the file has it
   function fitMeshToRoom(obj, opts) {
@@ -200,10 +204,14 @@
     axis.position.set(-c.x, -box.min.y, -c.z);   // centred in plan, feet on the floor
     wrap.scale.setScalar(k);
     wrap.rotation.y = o.yawDeg * Math.PI / 180;
+    // Outside the scale, so it is metres of room and not metres of model: inside
+    // it, the same number would mean something different for every file.
+    wrap.position.y = o.offsetYM;
 
     info.scale = k;
     info.spanM = span;
     info.heightM = size.y * k;                   // what it actually ended up being
+    info.offsetYM = o.offsetYM;
     info.clip = clip ? (clip.name || '(unnamed)') : null;
     info.clipSecs = clip ? clip.duration : 0;
     wrap.userData.fit = info;

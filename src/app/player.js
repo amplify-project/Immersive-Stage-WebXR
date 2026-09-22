@@ -2019,6 +2019,9 @@ function makeSourceMarker(name) {
 // DE PIE en el suelo. Por eso la malla no se coloca en ese punto sino colgando de
 // él hacia abajo: así el panner no se entera de que hemos puesto un muñeco, y el
 // audio de una escena con mallas es idéntico al de la misma escena sin ellas.
+// Un modelo que NO es una persona de pie —una trompeta suelta, un micro colgado—
+// se sube con `offsetYM`, que son metros sobre el suelo de la sala y tampoco toca
+// el audio: mover el muñeco y mover la fuente siguen siendo dos cosas distintas.
 // El cargador y el ajuste de escala viven en src/app/mesh-fit.js (window.MeshFit),
 // no aquí: el editor tiene que colocar el modelo EXACTAMENTE igual que las gafas
 // para que su vista previa sirva de algo, y dos copias de esta función son dos
@@ -2111,6 +2114,9 @@ function attachMeshTo(marker, cfg, floorY) {
                   (anim.offset ? ` · desfase ${anim.offset}s` : ''));
     }
     holder.position.y = floorY;               // del punto de audio al suelo
+    // El aro va en el holder, o sea SIEMPRE en el suelo, y no en la malla: con
+    // `offsetYM` la figura puede ir por el aire (una trompeta a la altura a la
+    // que se toca), y un aro flotando a media altura no marca ningún sitio.
     holder.add(makeFocusRing());
     marker.add(holder);
     // Al colgar la primera malla, y no antes: una escena sin mallas no gasta ni

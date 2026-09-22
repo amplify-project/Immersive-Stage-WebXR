@@ -315,6 +315,8 @@
           <input type="number" id="selMeshH" step="0.05" min="0.1" placeholder="1.70"></div>
         <div style="flex:0 0 110px"><label>Yaw °</label>
           <input type="number" id="selMeshYaw" step="5" placeholder="0"></div>
+        <div style="flex:0 0 120px"><label>Off floor m</label>
+          <input type="number" id="selMeshOff" step="0.05" placeholder="0"></div>
         <div style="flex:0 0 150px"><label>&nbsp;</label>
           <button type="button" id="meshUpBtn" style="width:100%">Upload .glb…</button>
           <input type="file" id="meshUpFile" accept=".glb,model/gltf-binary" style="display:none"></div>
@@ -322,6 +324,10 @@
       <p class="hint"><b>Mesh height</b> is how tall the figure is, feet to head — not where it is
         heard. That is <b>Height m</b> above (or <b>Elevation</b> on the sphere): the model hangs from
         the point that sounds down to the floor, so raising one never moves the other.</p>
+      <p class="hint"><b>Off floor</b> lifts the model, in metres of room: 0 is standing on the floor,
+        which is what a person does and an instrument on its own does not — a trumpet belongs at the
+        height it is played, around 1.4 m. It moves the model and nothing else: the sound stays at
+        <b>Height m</b> and the focus ring stays on the floor, under the musician's spot.</p>
       <!-- Preview. It renders the model through the SAME fit the headset uses
            (src/app/mesh-fit.js), which is the only reason it is worth having:
            a 45 m wall or a musician facing backwards must be found here and not
@@ -762,6 +768,7 @@ function bindControls() {
   $('selMesh').onchange    = e => { if(selected>=0){ setStemMesh(selected, { url: e.target.value }); renderStems(); updateMeshPreview(); } };
   $('selMeshH').oninput    = e => { if(selected>=0){ setStemMesh(selected, { heightM: e.target.value }); updateMeshPreview(); } };
   $('selMeshYaw').oninput  = e => { if(selected>=0){ setStemMesh(selected, { yawDeg: e.target.value }); updateMeshPreview(); } };
+  $('selMeshOff').oninput  = e => { if(selected>=0){ setStemMesh(selected, { offsetYM: e.target.value }); updateMeshPreview(); } };
   // Z-up: gira −90° en X ANTES de medir, así que cambia la escala además de la
   // pose — un modelo tumbado se estaba escalando por su fondo, no por su altura.
   $('selMeshZUp').onchange = e => { if(selected>=0){ setStemMesh(selected, { zUp: e.target.checked }); updateMeshPreview(); } };
@@ -832,9 +839,10 @@ function videoOptionsHTML(sel) {
 // ── Mallas ───────────────────────────────────────────────────────────────────
 //
 // En scene.json un `mesh` es la cadena a secas mientras no haga falta más, y un
-// objeto en cuanto se toca la altura o el giro. Guardar siempre el objeto sería
-// llenar la escena de `{"heightM":1.7,"yawDeg":0}` que no dicen nada, y esos dos
-// valores por defecto los pone el player.
+// objeto en cuanto se toca la altura, el giro o lo que se levanta del suelo.
+// Guardar siempre el objeto sería llenar la escena de
+// `{"heightM":1.7,"yawDeg":0,"offsetYM":0}` que no dicen nada, y esos valores por
+// defecto los pone el player.
 function meshSpec(s) {
   const m = s && s.mesh;
   if (!m) return {};
@@ -845,13 +853,14 @@ function setStemMesh(i, patch) {
   const s = scene.stems[i]; if (!s) return;
   const spec = Object.assign(meshSpec(s), patch);
   // Cadena vacía = campo en blanco: es quitar el valor, no ponerlo a cero.
-  for (const k of ['heightM', 'yawDeg']) {
+  for (const k of ['heightM', 'yawDeg', 'offsetYM']) {
     if (spec[k] === '' || spec[k] == null || !isFinite(+spec[k])) delete spec[k];
     else spec[k] = +spec[k];
   }
   // Un giro de 0° es el valor por defecto, no una decisión: guardarlo llenaría la
   // escena de `"yawDeg":0` sólo porque alguien arrastró y volvió. Con zUp igual.
   if (spec.yawDeg === 0) delete spec.yawDeg;
+  if (spec.offsetYM === 0) delete spec.offsetYM;
   if (!spec.zUp) delete spec.zUp;
   if (!spec.url) { delete s.mesh; return; }     // "none" → fuera la malla entera
   // "Plain" es que NO haya nada más que la url, y se mira así —contando las
@@ -909,6 +918,7 @@ const meshView = {
   figure: null,        // la silueta de 1,70 m, que se aparta según lo ancho que sea el modelo
   target: 0.85,        // altura a la que mira la cámara
   key: '',             // url|altura|zUp de lo que hay montado: el yaw no recarga nada
+  fit: null,           // lo que midió el ajuste, para reencuadrar sin volver a cargar
   token: 0,            // descarta la carga de un músico del que ya te has ido
   pitch: 0.22, dist: 3.0,
 };
@@ -1000,9 +1010,11 @@ function mvCamera() {
 // del canvas tapando justo la silueta con la que hay que compararla, que es como
 // perder la única referencia de la vista. Y la silueta se aparta lo que haga
 // falta, porque plantada a 1,15 m acababa dentro del modelo.
-function mvFrame(info) {
+function mvFrame(info, offsetY) {
   const halfW = Math.max(info.spanM, 0.5) / 2;
-  const h = Math.max(info.heightM, 1.7);
+  // Con la altura a la que cuelga, no sólo la del modelo: una trompeta de 0,5 m a
+  // 1,4 m del suelo encuadrada por su propio tamaño se sale por arriba del canvas.
+  const h = Math.max((offsetY || 0) + info.heightM, 1.7);
   meshView.figure.position.x = -(halfW + 0.55);
   meshView.target = h / 2;
   const vfov = meshView.camera.fov * Math.PI / 180;
@@ -1058,6 +1070,16 @@ function mvYaw(yawDeg) {
   mvRender();
 }
 
+// Girar y subir: lo que se puede cambiar sin volver a medir el modelo. El aro y la
+// silueta de 1,70 m se quedan en el suelo aunque el modelo suba, que es justo lo
+// que hace legible la altura —y lo que harán las gafas, donde el aro marca el sitio
+// del músico en el suelo y no la base de la figura.
+function mvPlace(spec) {
+  if (meshView.wrap) meshView.wrap.position.y = spec.offsetYM || 0;
+  if (meshView.fit) mvFrame(meshView.fit, spec.offsetYM || 0);
+  mvYaw(spec.yawDeg);
+}
+
 function mvMeasure(info) {
   const u = info.raw, n = v => v >= 100 ? v.toFixed(0) : v.toFixed(2);
   // La medida en crudo es la que explica el 99% de los sustos: un modelo en
@@ -1084,6 +1106,7 @@ function mvMeasure(info) {
 
 function mvClearModel() {
   if (meshView.wrap) { meshView.scene.remove(meshView.wrap); meshView.wrap = null; }
+  meshView.fit = null;
   // Sin dispose(): el clon comparte geometrías y materiales con el original que
   // guarda la caché de MeshFit, y liberarlos aquí vaciaría el siguiente montaje.
   meshView.key = '';
@@ -1106,17 +1129,17 @@ function updateMeshPreview() {
   }
   const spec = MeshFit.spec(s.mesh);
   const key = spec.url + '|' + spec.heightM + '|' + spec.zUp;
-  if (key === meshView.key) { mvYaw(spec.yawDeg); return; }   // sólo ha cambiado el giro
+  if (key === meshView.key) { mvPlace(spec); return; }   // sólo el giro o la altura
   const token = ++meshView.token;
   MeshFit.load(spec.url).then(src => {
     if (token !== meshView.token) return;      // te fuiste a otro músico mientras bajaba
     mvClearModel();
     const wrap = MeshFit.fit(MeshFit.clone(src), { ...spec, name: spec.url });
     meshView.wrap = wrap; meshView.key = key;
+    meshView.fit = wrap.userData.fit;
     meshView.scene.add(wrap);
     mvMeasure(wrap.userData.fit);
-    mvFrame(wrap.userData.fit);
-    mvYaw(spec.yawDeg);
+    mvPlace(spec);
   }).catch(e => {
     if (token !== meshView.token) return;
     mvClearModel();
@@ -1162,7 +1185,7 @@ function syncSelPanel() {
 // deselecciona, y lo que se mueve bajo el cursor no se puede arrastrar.
 function syncMeshFields() {
   const s = selected >= 0 ? scene.stems[selected] : null;
-  for (const id of ['selMesh','selMeshH','selMeshYaw','selMeshZUp','meshUpBtn'])
+  for (const id of ['selMesh','selMeshH','selMeshYaw','selMeshOff','selMeshZUp','meshUpBtn'])
     $(id).disabled = !s;
   // El nombre en la cabecera del plegable: el bloque ya no está pegado a la lista
   // de músicos, y "3D model" a secas no dice de quién es el modelo que se ve.
@@ -1175,6 +1198,7 @@ function syncMeshFields() {
   // el suyo", que es distinto de haber elegido ese número a mano.
   $('selMeshH').value   = g.heightM != null ? g.heightM : '';
   $('selMeshYaw').value = g.yawDeg  != null ? g.yawDeg  : '';
+  $('selMeshOff').value = g.offsetYM != null ? g.offsetYM : '';
   $('selMeshZUp').checked = !!g.zUp;
   updateMeshPreview();
 }

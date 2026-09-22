@@ -28,6 +28,7 @@ A `mesh` lives on the stem, because it is a property of *that* musician:
                              "heightM": 1.4,                   // metres, default 1.7
                              "yawDeg": 45,                     // default 0
                              "zUp": false,                     // default false
+                             "offsetYM": 1.4,                  // metres off the floor, default 0
                              "clip": "Animation",              // default: the file's first
                              "animOffset": 0,                  // media time of the clip's zero
                              "animate": true } }               // false freezes it
@@ -73,6 +74,7 @@ In the editor, with a musician selected (`editor.html:231`):
 |---|---|---|
 | **Mesh height m** | `heightM` | blank → the player's 1.70 |
 | **Yaw °** | `yawDeg` | blank → 0 (also set by dragging the preview sideways) |
+| **Off floor m** | `offsetYM` | blank → 0, standing on the floor |
 | **Z-up** | `zUp` | off |
 
 A drum kit is 1.1 m, a double bass 1.9 m, a standing player 1.75 m. The preview
@@ -87,6 +89,15 @@ from it down to the floor. Raising the elevation moves the sound and leaves the
 figure standing on the ground; raising the mesh height grows the figure and leaves
 the sound where it was. A seated drummer is a negative elevation with a 1.1 m
 mesh, and neither number implies the other.
+
+**`Off floor m` is the third one.** Hanging from the audio point down to the floor
+is right for a person and wrong for anything else: a trumpet on its own, modelled
+alone, ends up lying at your feet. `offsetYM` lifts the model — in metres of room,
+applied outside the scale, so the number means the same for a file in centimetres
+and one in metres — and touches nothing else. The panner does not move, and the
+focus ring stays on the floor under the musician's spot rather than riding up with
+the figure: the ring marks *where he is*, which a ring floating at chest height
+would not (`src/app/player.js:2129`).
 
 ### Two guards you cannot switch off
 
@@ -108,7 +119,7 @@ Three nodes, because a single `Object3D` applies scale, then rotation, then
 translation — and the order needed here is *rotate to Y-up, recentre, scale, yaw*:
 
 ```
-wrap   scale = k, rotation.y = yaw     ← spins in place
+wrap   scale = k, rotation.y = yaw, position.y = offsetYM   ← spins in place
  └ axis  rotation.x = −90° if zUp, position = −centre, feet on the floor
     └ obj  the model, exactly as the file has it
 ```
