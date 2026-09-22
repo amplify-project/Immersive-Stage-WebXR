@@ -42,12 +42,13 @@ const PATHS = ['/ingest', '/consume'];
  * @param {number} [opt.port=8090]     ignored when `server` is given
  * @param {number} [opt.ttlMs=5000]    presence timeout (player considered gone after this)
  * @param {number} [opt.sweepMs=1000]  presence sweep period
+ * @param {number} [opt.pingMs=2000]   clock-probe period per player (see ClockSync)
  * @param {boolean}[opt.log=true]
  * @param {?{key: Buffer|string, cert: Buffer|string}} [opt.tls=null]  listen over wss:// when set
  * @returns {{ server, wss, players: Map, scheme: string, health: () => object, close: () => void }}
  */
-function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, sweepMs = 1000, log = true, tls = null } = {}) {
-  const players   = new Map();   // id -> { id, t, mt, p, q, gaze, z, f, meta, lastSeen }
+function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, sweepMs = 1000, pingMs = 2000, log = true, tls = null } = {}) {
+  const players   = new Map();   // id -> { id, t, w, srv, mt, p, q, gaze, z, f, meta, lastSeen }
   const consumers = new Set();   // Set<WebSocket>
   const attached  = !!hostServer;
 
@@ -90,31 +91,61 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
   // ── Producers (players) ─────────────────────────────────────────────
   function onProducer(ws) {
     let id = null;
+    const clock = new ClockSync();                  // this player's timeline -> ours
+    let pinger = null;
+
+    const probe = () => { if (ws.readyState === 1) ws.send(JSON.stringify({ ping: Date.now() })); };
+
     ws.on('message', (raw) => {
       let msg; try { msg = JSON.parse(raw); } catch { return; }
+
+      // Clock probe answered. Stamp the arrival before anything else: every
+      // millisecond spent here lands in the round trip and widens the estimate.
+      if (msg.pong !== undefined) return clock.observe(msg.pong, msg.c, Date.now());
 
       if (msg.hello) {                              // handshake
         id = String(msg.hello);
         const prev = players.get(id) || {};
-        players.set(id, { ...prev, id, meta: msg.meta || {}, lastSeen: Date.now() });
+        const meta = msg.meta || {};
+        // Which frame p/q are in travels with every record, not just in the
+        // hello: meta stays server-side, and a consumer that reads `p` without
+        // knowing whether it is this headset's local-floor or the shared room
+        // will silently mix the two the day one spectator is in AR.
+        players.set(id, { ...prev, id, meta, frame: meta.frame || 'local-floor',
+                          lastSeen: Date.now() });
+        // Probe at once and keep probing: the first exchange puts `srv` on the
+        // very first batch, and the rest both refine it (a quieter exchange
+        // measures a tighter round trip) and follow the headset's oscillator
+        // drift, which over a song is worth a few ms.
+        if (!pinger) { probe(); pinger = setInterval(probe, pingMs); }
         return;
       }
       if (!id || !Array.isArray(msg.b)) return;     // data frames need a prior hello
 
       const now = Date.now();
       for (const s of msg.b) {
+        const prev = players.get(id) || { meta: {} };
         const rec = {
-          id, t: s.t, mt: s.mt,
+          id, frame: prev.frame || 'local-floor',
+          // Three clocks, because no single one does the job. `t` and `w` are the
+          // player's own, monotonic and wall, and travel untouched. `srv` is that
+          // sample on OUR clock, which is the only one every player shares:
+          // stamping on arrival would timestamp the batch rather than the sample,
+          // and `w` from two headsets agrees only as well as their NTP does.
+          t: s.t, w: s.w, mt: s.mt,
+          srv: clock.toServer(s.t),
           p: s.p, q: s.q,
           gaze: s.g || forwardFromQuat(s.q),        // real eye-gaze if sent, else head-forward
           z: s.z, f: s.f,
         };
-        const prev = players.get(id) || { meta: {} };
         players.set(id, { ...prev, ...rec, lastSeen: now });
         broadcast({ type: 'update', ...rec });
       }
     });
-    ws.on('close', () => { if (id && players.delete(id)) broadcast({ type: 'leave', id }); });
+    ws.on('close', () => {
+      clearInterval(pinger); pinger = null;
+      if (id && players.delete(id)) broadcast({ type: 'leave', id });
+    });
     ws.on('error', () => { /* close will follow */ });
   }
 
@@ -158,6 +189,43 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
 // ── helpers ─────────────────────────────────────────────────────────────
 function stripPresence(p) { const { lastSeen, meta, ...rest } = p; return rest; }
 
+/**
+ * One player's monotonic clock expressed on ours, Cristian's algorithm with the
+ * round-trip filter NTP uses.
+ *
+ * We send `ping` at t1 (our clock). The player answers immediately with its own
+ * reading `c`, and the answer lands at t2. The player read `c` somewhere inside
+ * [t1, t2]; assuming the trip took the same either way it read it at the middle,
+ * so `offset = (t1 + rtt/2) - c` turns any of its readings into ours.
+ *
+ * That symmetry assumption is the whole error, and it is why the smallest round
+ * trip wins: a fast exchange had little queueing to be lopsided about, while a
+ * slow one may be slow in one direction only. Keeping the best of a WINDOW of
+ * recent exchanges — rather than the best ever — is what lets the estimate track
+ * the headset's oscillator drift instead of clinging to one lucky early packet.
+ */
+class ClockSync {
+  constructor(window = 16) { this._w = window; this._obs = []; this._best = null; }
+
+  observe(t1, c, t2) {
+    if (typeof c !== 'number' || !isFinite(c)) return;      // player predates the probe
+    const rtt = t2 - t1;
+    if (rtt < 0) return;                                    // clock stepped under us; drop it
+    this._obs.push({ rtt, offset: (t1 + rtt / 2) - c });
+    if (this._obs.length > this._w) this._obs.shift();
+    this._best = this._obs.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+  }
+
+  /** Player reading -> our clock (ms). Null until the first exchange lands. */
+  toServer(t) {
+    if (this._best == null || typeof t !== 'number' || !isFinite(t)) return null;
+    return Math.round((t + this._best.offset) * 10) / 10;
+  }
+
+  /** Half the best round trip: the bound on how wrong toServer() can be. */
+  get uncertaintyMs() { return this._best ? this._best.rtt / 2 : null; }
+}
+
 // Head-forward vector = quaternion applied to (0,0,-1). Serves as gaze when no
 // eye-tracking is available (reliable on every Quest today). Real foveal gaze,
 // when present, arrives in `s.g` and is used verbatim instead.
@@ -189,13 +257,14 @@ function resolveTls() {
   return { key: fs.readFileSync(key), cert: fs.readFileSync(cert) };
 }
 
-module.exports = { createRelay, forwardFromQuat, resolveTls };
+module.exports = { createRelay, forwardFromQuat, resolveTls, ClockSync };
 
 if (require.main === module) {
   createRelay({
     port:    process.env.PORT     ? +process.env.PORT     : 8090,
     ttlMs:   process.env.TTL_MS   ? +process.env.TTL_MS   : 5000,
     sweepMs: process.env.SWEEP_MS ? +process.env.SWEEP_MS : 1000,
+    pingMs:  process.env.PING_MS  ? +process.env.PING_MS  : 2000,
     tls:     resolveTls(),
   });
 }

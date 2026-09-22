@@ -16,14 +16,51 @@ let videoEl   = document.getElementById('hidden-video');
 let audioEl   = document.getElementById('hidden-audio');
 let closeupEl = document.getElementById('hidden-closeup');
 let shakaVideo = null;
+let curManifestSrc = null;           // fuente en curso (recarga al entrar/salir de AR)
 let shakaAudio = null;
 let shakaCloseup = null;             // 3ª instancia Shaka: pista de close-up
 let shakaCfg   = null;               // config compartida (la fija loadDualShaka)
+// ¿Sabe el navegador avisar de cada fotograma nuevo? Chrome y el de la Quest sí.
+const HAS_RVFC = typeof HTMLVideoElement !== 'undefined' &&
+                 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+
+// RepresentationID del 360 en los manifests de stream.sh: mapea `-map 0:v:0`
+// primero, así que la esfera es siempre la 0 y los close-ups van del 1 en
+// adelante (ver "AdaptationSets dinámicos" en stream.sh).
+const SPHERE_REP = '0';
+
 // Close-ups (Caso B): plano flotante con el vídeo del músico enfocado.
 let closeupTexture = null, closeupMesh = null;
 let closeupReady = false;            // hay pistas de close-up en el manifest
-let closeupStem  = -1;               // stem mostrado ahora (-1 = ninguno)
+let closeupStem  = -1;               // stem cuya PISTA está seleccionada (-1 = ninguna)
+let closeupWant  = -1;               // stem que pide el foco: destino de la transición
+let closeupArmed = -1;               // stem precargado: decodificando pero aún sin verse
+let closeupArmCand = -1;             // candidato a precargar, aún sin cumplir la espera
+let closeupArmSince = 0;             // desde cuándo es el candidato (performance.now)
+let closeupFade  = 0;                // 0..1, cuánto ha entrado el panel
+let closeupLastT = 0;                // reloj de la transición (performance.now, ms)
 let closeupRepByStem = {};           // índice de stem → RepresentationID del MPD
+
+// Transición del close-up: ni aparece ni desaparece de golpe. Entra subiendo
+// opacidad y escala a la vez —el panel "se acerca" en vez de encenderse— y sale
+// por el mismo camino. Un cuarto de segundo es suficiente para que no dé un
+// respingo y poco para que no llegue tarde a lo que estás mirando.
+const CLOSEUP_FADE_S   = 0.25;
+const CLOSEUP_SCALE_IN = 0.92;       // escala con la que entra y a la que se va
+
+// Histéresis del foco: hace falta un peso de ENTER para sacar el panel, pero
+// basta EXIT para mantenerlo. Con un solo umbral, un peso que oscile alrededor
+// de él enciende y apaga el close-up cada pocos frames, y la mirada oscila
+// siempre: nadie sostiene la cabeza tan quieta.
+const CLOSEUP_ENTER = 0.35;
+const CLOSEUP_EXIT  = 0.20;
+
+// Y el candidato a PRECARGAR no se acepta hasta que se sostiene. La mirada roza
+// el umbral sin parar, y cada cambio de armado es un pause/play sobre el
+// elemento de vídeo —y, si la pista llevaba parada más de medio segundo, además
+// un salto de currentTime, que vacía el decodificador. A 60 Hz eso no es
+// precargar: es una tormenta que tira la reproducción entera.
+const CLOSEUP_ARM_DWELL_S = 0.4;
 let engine     = null;               // ImmersiveAudioEngine (motor de audio)
 let audioCtx   = null, gainNode = null;  // referencias derivadas del engine
 let xrSession  = null;
@@ -61,6 +98,11 @@ function initThree() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
+  // Espacio de color de salida (ver src/app/mesh-fit.js → Colour). Va aquí y no
+  // en las mallas porque es del renderer entero: a partir de esta línea TODA
+  // textura que lleve píxeles sRGB tiene que declararlo, o sale codificada dos
+  // veces. Las nuestras son el vídeo (makeVideoTexture) y los canvas de texto.
+  MeshFit.setupRenderer(renderer);
 
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
@@ -79,7 +121,7 @@ function initThree() {
   // vídeo, audio) coinciden. Se hornea en la geometría porque en XR el bucle de
   // render reposiciona la malla cada frame y podría pisar sphere.rotation.
   geo.rotateY(-Math.PI / 2);
-  sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x111111 }));
+  sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: MeshFit.colour(0x111111) }));
   sphere.position.set(0, 0, 0);  // centrada en el origen
   scene.add(sphere);
 
@@ -94,7 +136,7 @@ function initThree() {
   // hasta que se enfoca a un músico que tenga close-up.
   closeupMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(2.0, 1.125),
-    new THREE.MeshBasicMaterial({ transparent: true, depthTest: false }));
+    new THREE.MeshBasicMaterial({ transparent: true, depthTest: false, opacity: 0 }));
   closeupMesh.position.set(0, 0, -2.5);
   closeupMesh.renderOrder = 999;       // por encima de la esfera 360
   closeupMesh.visible = false;
@@ -123,10 +165,10 @@ function renderLoop() {
     applyRotation();
   }
   if (videoEl && videoEl.readyState >= 2) {
-    if (videoTexture) videoTexture.needsUpdate = true;
+    if (videoTexture && !HAS_RVFC) videoTexture.needsUpdate = true;
     updateProgress();
   }
-  if (closeupReady && closeupMesh.visible && closeupTexture) closeupTexture.needsUpdate = true;
+  updateCloseupAnim();
   updateAmbiViz();
   updateSpotLog();
   renderer.render(scene, camera);
@@ -137,6 +179,205 @@ function renderLoop() {
 // llega al motor (factor congelado), la mirada no lo enfoca (peso 0) o la
 // cadena de audio no obedece (peso alto, ganancia plana). Aquí se ven los tres.
 const SPOTLOG = new URLSearchParams(location.search).get('spotlog') === '1';
+
+// ?arperf=1 — reparto del tiempo de CADA frame de AR, para saber si un bache es
+// nuestro o del sistema. El bucle mide cuatro tramos y cada 2 s resume el peor.
+//
+// Cómo se lee: si `total` se dispara mientras los tramos siguen en décimas de
+// milisegundo, el tiempo NO se va en este JavaScript — se va en el compositor de
+// passthrough o en el hilo de audio (seis panners HRTF interpolando HRIRs
+// mientras te desplazas), y no hay nada que optimizar aquí. Si el que sube es un
+// tramo concreto, ese es el culpable y tiene arreglo.
+const ARPERF = new URLSearchParams(location.search).get('arperf') === '1';
+const _perf = { n: 0, t0: 0, worst: 0, sum: 0, audio: 0, focus: 0, render: 0, worstAt: '', vf0: -1 };
+
+// Fotogramas de vídeo que el navegador lleva DECODIFICADOS. En AR la esfera está
+// oculta y nadie dibuja esa textura, pero el <video> sigue reproduciendo porque
+// de él sale el audio: si esta cuenta avanza, se está decodificando 360 para no
+// enseñarlo a nadie, y ahí hay trabajo que quitar. Si no avanza, el navegador ya
+// se lo ha ahorrado y hay que buscar el bache en otro sitio.
+function decodedFrames() {
+  const q = videoEl && videoEl.getVideoPlaybackQuality && videoEl.getVideoPlaybackQuality();
+  return q ? q.totalVideoFrames : -1;
+}
+
+// El informe se lee DENTRO de las gafas o no se lee: en sesión inmersiva no hay
+// consola, y la pantalla plana de la página no la está mirando nadie. Un sprite
+// colgado delante de la cara es el único sitio donde el dato llega a tiempo.
+let arPerfPanel = null;
+const AR_PERF_PANEL_W = 640, AR_PERF_PANEL_H = 200;   // px de canvas (~4:1.25)
+
+function arPerfPanelDraw(lines) {
+  if (!arPerfPanel) {
+    const c = document.createElement('canvas');
+    c.width = AR_PERF_PANEL_W; c.height = AR_PERF_PANEL_H;
+    const tex = MeshFit.srgb(new THREE.CanvasTexture(c));
+    tex.minFilter = THREE.LinearFilter;
+    arPerfPanel = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+    // Un sprite siempre mira a la cámara, así que basta con colocarlo: 40 cm de
+    // alto a 1.2 m se lee sin esfuerzo y no tapa a los músicos.
+    arPerfPanel.scale.set(0.4 * (AR_PERF_PANEL_W / AR_PERF_PANEL_H), 0.4, 1);
+    arPerfPanel.renderOrder = 999;
+    arPerfPanel.userData.canvas = c;
+    scene.add(arPerfPanel);
+  }
+  const c = arPerfPanel.userData.canvas, cx = c.getContext('2d');
+  cx.clearRect(0, 0, c.width, c.height);
+  cx.fillStyle = 'rgba(0,0,0,0.72)';
+  cx.fillRect(0, 0, c.width, c.height);
+  cx.font = 'bold 30px monospace';
+  cx.textBaseline = 'top';
+  lines.forEach((l, i) => {
+    // La línea del vídeo es la que decide la hipótesis: en verde para que no se
+    // pierda entre las demás.
+    cx.fillStyle = i === lines.length - 1 ? '#5dff8f' : '#00d4ff';
+    cx.fillText(l, 20, 20 + i * 44);
+  });
+  arPerfPanel.material.map.needsUpdate = true;
+}
+
+// Delante de la cara, un poco por debajo del eje de la mirada. Se recoloca cada
+// frame para que andar no lo deje atrás.
+const _panelFwd = new THREE.Vector3();
+const _panelQ   = new THREE.Quaternion();
+function arPerfPanelPlace(pose) {
+  if (!arPerfPanel) return;
+  const p = pose.transform.position, q = pose.transform.orientation;
+  _panelFwd.set(0, 0, -1).applyQuaternion(_panelQ.set(q.x, q.y, q.z, q.w));
+  arPerfPanel.position.set(p.x + _panelFwd.x * 1.2,
+                           p.y + _panelFwd.y * 1.2 - 0.25,
+                           p.z + _panelFwd.z * 1.2);
+}
+
+function arPerfPanelClear() {
+  if (!arPerfPanel) return;
+  scene.remove(arPerfPanel);
+  arPerfPanel.material.map.dispose();
+  arPerfPanel.material.dispose();
+  arPerfPanel = null;
+}
+
+// El mismo problema que el informe, para los avisos sueltos: `toast()` escribe
+// en el DOM de la página, que en sesión inmersiva no se compone, así que dentro
+// de las gafas no se ve NADA de lo que diga. Los avisos del ancla —que son justo
+// los que hay que leer mientras se calibra— van por el sprite de arriba. Es el
+// mismo panel a propósito: dos carteles delante de la cara no caben.
+const AR_NOTICE_MS   = 4000;
+const AR_NOTICE_COLS = 32;      // caben ~34 chars a 30px monospace en 640 px
+let   arNoticeUntil  = 0;
+
+// Lo que se lee dentro de las gafas cabe en cuatro segundos y en 32 columnas, y
+// el error de verdad —nombre Y mensaje— no cabe. Se guarda cada paso aquí y se
+// vuelca en la página al salir de AR, que es donde hay teclado para copiarlo.
+const arLog = [];
+function arLogAdd(msg, e) {
+  const t = arSession ? (performance.now() / 1000).toFixed(1) + 's' : '—';
+  arLog.push(`${t.padStart(7)}  ${msg}` +
+    (e ? `\n         ${e.name || 'error'}: ${e.message || String(e)}` : ''));
+}
+
+function arNotice(msg) {
+  console.log('[ar]', msg);
+  arLogAdd(msg);
+  if (!arSession) { toast(msg); return; }      // fuera de sesión sí hay página
+  const lines = [];
+  let line = '';
+  for (const w of msg.split(' ')) {
+    if (line && (line + ' ' + w).length > AR_NOTICE_COLS) { lines.push(line); line = w; }
+    else line = line ? line + ' ' + w : w;
+  }
+  if (line) lines.push(line);
+  arPerfPanelDraw(lines);
+  arNoticeUntil = performance.now() + AR_NOTICE_MS;
+}
+
+function arPerfReport(now) {
+  // La ventana arranca en el primer frame; sin esto, t0=0 contra un
+  // performance.now() de varios segundos suelta un informe de 1 frame al entrar.
+  if (!_perf.t0) { _perf.t0 = now; _perf.vf0 = decodedFrames(); return; }
+  if (_perf.n && now - _perf.t0 >= 2000) {
+    const avg = (_perf.sum / _perf.n).toFixed(2);
+    // Fotogramas decodificados por segundo en esta ventana. ~24-30 = el vídeo se
+    // está decodificando entero; 0 = el navegador ya no lo decodifica.
+    const vf = decodedFrames();
+    const vfps = (vf >= 0 && _perf.vf0 >= 0) ? ((vf - _perf.vf0) / ((now - _perf.t0) / 1000)).toFixed(1) : '?';
+    console.log(`[arperf] ${_perf.n} frames · medio ${avg} ms · peor ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})` +
+      ` · audio ${(_perf.audio / _perf.n).toFixed(2)} · foco ${(_perf.focus / _perf.n).toFixed(2)}` +
+      ` · render ${(_perf.render / _perf.n).toFixed(2)} · vídeo decodificado ${vfps} fps`);
+    // Un aviso vivo manda sobre el informe: el informe vuelve en 2 s, el aviso no.
+    if (!arNoticeUntil) arPerfPanelDraw([
+      `${_perf.n} frames · avg ${avg} ms`,
+      `worst ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})`,
+      `audio ${(_perf.audio / _perf.n).toFixed(2)} · render ${(_perf.render / _perf.n).toFixed(2)}`,
+      `video decoded ${vfps} fps`,
+    ]);
+    // Cada ventana se guarda además para el volcado de la página al salir, que
+    // sobrevive a quitarse las gafas.
+    window.__arperf = window.__arperf || [];
+    window.__arperf.push({ frames: _perf.n, avgMs: +avg, worstMs: +_perf.worst.toFixed(1),
+                           worstAt: _perf.worstAt, videoFps: +vfps });
+    _perf.n = _perf.sum = _perf.worst = _perf.audio = _perf.focus = _perf.render = 0;
+    _perf.t0 = now; _perf.vf0 = vf;
+  }
+}
+
+// Volcado en la propia página al salir de AR. El toast dura 3 s y se lo come el
+// tiempo de quitarse las gafas; esto se queda hasta que se recarga.
+function arLogDump() {
+  if (!arLog.length) return;
+  let el = document.getElementById('arlog-dump');
+  if (!el) {
+    el = document.createElement('pre');
+    el.id = 'arlog-dump';
+    el.style.cssText = 'position:fixed;left:8px;top:8px;z-index:9999;margin:0;max-height:80vh;' +
+      'overflow:auto;padding:10px 12px;background:rgba(0,0,0,.82);color:#7fd;border-radius:6px;' +
+      'font:12px/1.4 monospace;white-space:pre-wrap;max-width:46vw';
+    el.addEventListener('click', () => el.remove());
+    document.body.appendChild(el);
+  }
+  el.textContent = '[ar] anchor log   (tap to close)\n\n' + arLog.join('\n');
+  arLogSend();
+}
+
+// Al terminal del PC, que es donde hay teclado para copiarlo: la página vive en
+// el navegador del casco y leerla ahí obliga a transcribir a mano. Se manda dos
+// veces —al entrar en AR y al salir— porque la de entrada llega en cuanto te
+// pones las gafas y ya dice si el casco está ejecutando este código; esperar a
+// la de salida deja la duda abierta toda la sesión. Si el player se sirve desde
+// otro sitio (S3) no hay a quién mandarlo, y el fallo se queda en el registro.
+function arLogSend() {
+  if (!arLog.length) return;
+  fetch('/api/arlog', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ log: arLog.join('\n') }),
+  }).catch(e => arLogAdd('POST /api/arlog failed', e));
+}
+
+function arPerfDump() {
+  const w = window.__arperf;
+  if (!w || !w.length) return;
+  let el = document.getElementById('arperf-dump');
+  if (!el) {
+    el = document.createElement('pre');
+    el.id = 'arperf-dump';
+    el.style.cssText = 'position:fixed;right:8px;top:8px;z-index:9999;margin:0;max-height:80vh;' +
+      'overflow:auto;padding:10px 12px;background:rgba(0,0,0,.82);color:#0f0;border-radius:6px;' +
+      'font:12px/1.4 monospace';
+    el.addEventListener('click', () => el.remove());   // molesta poco, se quita de un toque
+    document.body.appendChild(el);
+  }
+  const peor = w.reduce((a, b) => (b.worstMs > a.worstMs ? b : a));
+  const vid  = w.reduce((a, b) => a + b.videoFps, 0) / w.length;
+  el.textContent =
+    `[arperf] ${w.length} windows of 2 s   (tap to close)\n` +
+    `worst frame  ${peor.worstMs} ms  (${peor.worstAt})\n` +
+    `video decoded, average  ${vid.toFixed(1)} fps` +
+    `   → ${vid > 5 ? 'the 360 IS being decoded for nobody' : 'the browser no longer decodes it'}\n\n` +
+    w.map((x, i) => `${String(i * 2).padStart(3)}s  ${String(x.frames).padStart(4)} fr` +
+      `  avg ${String(x.avgMs).padStart(6)}  worst ${String(x.worstMs).padStart(6)}` +
+      `  video ${String(x.videoFps).padStart(5)} fps  (${x.worstAt})`).join('\n');
+}
 let spotLogEl = null, spotLogNext = 0;
 function updateSpotLog() {
   if (!SPOTLOG || !engine || !engine.getSpotlightState) return;
@@ -225,14 +466,15 @@ function loadFile(input) {
 async function startManifest(src) {
   showSpinner(true);
   hideLoader();
+  curManifestSrc = src;         // lo necesita la recarga sin vídeo al entrar en AR
 
   // Limpiar players anteriores
   if (syncInterval) { clearInterval(syncInterval); syncInterval = null; }
   if (shakaVideo) { try { await shakaVideo.destroy(); } catch(e){} shakaVideo = null; }
   if (shakaAudio) { try { await shakaAudio.destroy(); } catch(e){} shakaAudio = null; }
   if (shakaCloseup) { try { await shakaCloseup.destroy(); } catch(e){} shakaCloseup = null; }
-  closeupReady = false; closeupStem = -1; closeupRepByStem = {};
-  if (closeupMesh) closeupMesh.visible = false;
+  closeupReady = false; closeupRepByStem = {};
+  resetCloseup();
 
   videoEl.pause();
   audioEl.pause();
@@ -304,13 +546,23 @@ async function loadDualShaka(src) {
     shakaVideo.configure(shakaConfig);
     await shakaVideo.load(src);
 
+    // Con close-ups el manifest trae VARIAS AdaptationSets de vídeo y ninguna
+    // dice "yo soy el 360". La variante de arranque la elige Shaka por ancho de
+    // banda —también con ABR apagado—, y el 4K (26 Mbps) no cabe en la
+    // estimación inicial (5 Mbps): se quedaba con un close-up de 1,8 Mbps y la
+    // esfera mostraba a un músico en primer plano como si fuera la escena
+    // entera. La esfera se pide por su Representation, no por su bitrate.
+    const _sv = pinSphereTrack();
+
     // Tope de resolución de vídeo (diagnóstico de saturación de decodificado): con
     // ABR off, elegimos a mano la variante de mayor altura ≤ maxh. Si la imagen se
     // retrasa del audio por drops (decoder 4K no llega / throttling térmico),
     // ?maxh=1440 ó ?maxh=1080 lo confirma en vivo. Sin efecto si solo hay 4K.
+    // Solo entre las variantes del 360: un close-up "cabe" en cualquier tope y
+    // sería la forma más tonta de acabar otra vez con la esfera equivocada.
     const _maxh = parseInt(new URLSearchParams(location.search).get('maxh') || '0', 10);
     if (_maxh > 0) {
-      const _vt = shakaVideo.getVariantTracks()
+      const _vt = _sv
         .filter(t => (t.height || 0) <= _maxh)
         .sort((a, b) => (b.height || 0) - (a.height || 0));
       if (_vt.length) { shakaVideo.selectVariantTrack(_vt[0], /*clearBuffer*/ true); toast('vídeo ≤ ' + _maxh + 'p (' + (_vt[0].height || '?') + 'p)'); }
@@ -542,11 +794,41 @@ async function loadDualShaka(src) {
   }
 }
 
+// Textura de vídeo que se sube SOLO cuando hay fotograma nuevo.
+//
+// El three que usamos es la r128, anterior a que VideoTexture conociera
+// requestVideoFrameCallback: su `update()` marca `needsUpdate` en CADA render
+// mientras el elemento tenga datos. Con un 360 de 24 fps eso significa subir a la
+// GPU la MISMA imagen de 8 Mpx 60 veces por segundo en escritorio y 90 dentro de
+// las gafas — más del doble del trabajo necesario, y todo en el hilo principal.
+//
+// Una Texture normal no se auto-marca, así que la marcamos nosotros desde rVFC,
+// que dispara exactamente una vez por fotograma presentado. Sin rVFC volvemos al
+// comportamiento de antes (lo marcan los bucles de render).
+function makeVideoTexture(el) {
+  const tex = new THREE.Texture(el);
+  // El vídeo YA viene en sRGB. Sin decirlo, con outputEncoding puesto se
+  // codificaría a la salida sin haberse decodificado nunca: 360 lavado y negros
+  // lechosos. Diciéndolo, decodificar y codificar se cancelan y pasa intacto.
+  MeshFit.srgb(tex);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;   // 8 Mpx: generar mipmaps por fotograma, ni de broma
+  tex.needsUpdate = true;
+  if (HAS_RVFC) {
+    const tick = () => {
+      if (tex.__stop) return;    // textura ya reemplazada: no resucitarla
+      tex.needsUpdate = true;
+      el.requestVideoFrameCallback(tick);
+    };
+    el.requestVideoFrameCallback(tick);
+  }
+  return tex;
+}
+
 function attachVideoTexture() {
-  if (videoTexture) videoTexture.dispose();
-  videoTexture = new THREE.VideoTexture(videoEl);
-  videoTexture.minFilter = THREE.LinearFilter;
-  videoTexture.magFilter = THREE.LinearFilter;
+  if (videoTexture) { videoTexture.__stop = true; videoTexture.dispose(); }
+  videoTexture = makeVideoTexture(videoEl);
   videoTexture.format = THREE.RGBFormat;
   sphere.material = new THREE.MeshBasicMaterial({ map: videoTexture });
 }
@@ -581,8 +863,17 @@ async function setupFOA() {
       const _r = await fetch('/scene.json', { cache: 'no-store' });
       if (_r.ok) {
         const _sc = await _r.json();
+        // Se copia el stem ENTERO y solo se normaliza lo que hay que normalizar.
+        // Enumerar los campos a mano costó dos funciones que no llegaron nunca a
+        // funcionar: el editor escribía `ar` (posición en metros de la sala) y
+        // `gainDb` (trim por músico) y este map los tiraba, así que en AR todo el
+        // mundo acababa en la esfera de 1,6 m —lo que el partner ve como "sigue
+        // dibujando el círculo"— y el trim no llegaba al motor. Cualquier campo
+        // que el editor añada mañana sobrevive por defecto, que es lo que hay que
+        // dar por supuesto entre dos ficheros que ya comparten formato.
         if (Array.isArray(_sc.stems) && _sc.stems.length)
           _stems = _sc.stems.map(s => ({
+            ...s,
             azimuthDeg: +s.azimuthDeg || 0, elevationDeg: +s.elevationDeg || 0,
             name: s.name, closeup: s.closeup || null }));
         if (_sc.spotlight) _spot = _sc.spotlight;
@@ -602,6 +893,14 @@ async function setupFOA() {
     }
     if (!_stems) _stems = DEFAULT_STEMS;
     stemDefs = _stems;   // el modo AR ancla un objeto 3D por stem con su az/el
+
+    // Entorno de las mallas (MeshFit.environment), calentado AQUÍ y no al colgar
+    // la primera: construirlo es un pase PMREM a un render target, y hacer eso
+    // con una sesión inmersiva en marcha es discutirle el framebuffer al
+    // compositor sin ninguna necesidad. Queda cacheado por renderer, así que
+    // ensureARLights() ya sólo lo asigna. Sólo si la escena declara mallas: una
+    // que no las tiene sigue sin gastar nada.
+    if (_stems.some(s => s.mesh) || arCfg.mesh) MeshFit.environment(renderer);
 
     // ?chmap=identity desactiva el remapeo de canales del decodificador Opus
     // (ver VORBIS_SRC_TO_OUT). Útil si un navegador NO reordena: compruébalo con
@@ -716,13 +1015,33 @@ async function setupCloseups(src) {
 
   try {
     shakaCloseup = new shaka.Player(closeupEl);
-    shakaCloseup.configure(shakaCfg);
+    // El audio de este manifest es el Opus multicanal del motor: que la segunda
+    // instancia no se lo descargue otra vez para tirarlo (va muteada).
+    // Colchón corto: a esta instancia se le pide arrancar pronto, no aguantar.
+    // El 360 no puede permitirse un corte —es toda la escena— pero un close-up
+    // que se atasca está casi siempre oculto, y el fundido ya espera a que haya
+    // imagen. Con el colchón de 2 s del 360, el panel llegaba tarde siempre.
+    shakaCloseup.configure({ ...shakaCfg,
+      streaming: { ...shakaCfg.streaming, rebufferingGoal: 0.5, bufferingGoal: 4 },
+      manifest: { ...shakaCfg.manifest, disableAudio: true } });
     await shakaCloseup.load(src);
     closeupEl.muted = true;   // el audio sale del motor FOA, no de aquí
 
-    closeupTexture = new THREE.VideoTexture(closeupEl);
-    closeupTexture.minFilter = THREE.LinearFilter;
-    closeupTexture.magFilter = THREE.LinearFilter;
+    // Clavarla en un close-up desde el principio. Si la dejamos elegir, puede
+    // quedarse con el 360 y estaríamos decodificando el 4K DOS veces sin que se
+    // vea: el mismo agujero de rendimiento que ya nos comió los frames en AR.
+    const firstRep = Object.values(closeupRepByStem)[0];
+    const firstV = shakaCloseup.getVariantTracks().find(t => t.originalVideoId === firstRep);
+    if (firstV) shakaCloseup.selectVariantTrack(firstV, /*clearBuffer*/ true);
+    closeupEl.pause();        // no se ve nada hasta que el foco lo pida
+
+    // Mismo cuidado que con disableVideo: si el build lo ignora, que se sepa por
+    // consola y no en la factura de ancho de banda.
+    if (shakaCloseup.getConfiguration().manifest.disableAudio !== true)
+      console.warn('[closeup] este build de Shaka ignora manifest.disableAudio: ' +
+                   'la 2ª instancia se bajará el Opus multicanal para tirarlo');
+
+    closeupTexture = makeVideoTexture(closeupEl);
     closeupMesh.material.map = closeupTexture;
     closeupMesh.material.needsUpdate = true;
 
@@ -734,28 +1053,138 @@ async function setupCloseups(src) {
   }
 }
 
-// Muestra el close-up del stem `idx` (o lo oculta con idx<0). Cambia la pista de
-// vídeo de shakaCloseup; al ser el mismo manifest, sigue sincronizado.
+// Variantes del 360 (las que NO son close-up), de mayor a menor altura. Un
+// manifest sin close-ups tiene una sola AdaptationSet de vídeo y entonces valen
+// todas: así esto no cambia nada en las escenas de siempre.
+function sphereVariants() {
+  const all = shakaVideo ? shakaVideo.getVariantTracks() : [];
+  const own = all.filter(t => t.originalVideoId === SPHERE_REP);
+  return (own.length ? own : all).sort((a, b) => (b.height || 0) - (a.height || 0));
+}
+
+// Clava la esfera en su Representation. Hay que llamarlo DESPUÉS DE CADA carga
+// del manifest —son dos caminos, la carga inicial y la recarga al salir de AR—
+// porque cada una vuelve a elegir variante por ancho de banda. Devuelve las
+// variantes del 360 para quien quiera seguir filtrando entre ellas.
+function pinSphereTrack() {
+  const sv = sphereVariants();
+  if (sv.length && !sv.some(t => t.active))
+    shakaVideo.selectVariantTrack(sv[0], /*clearBuffer*/ true);
+  return sv;
+}
+
+// ¿Tiene este stem una pista de close-up? Mira solo el mapa, no el manifest: se
+// pregunta en cada frame y `getVariantTracks()` construye un array cada vez.
+function closeupCanShow(idx) {
+  return idx >= 0 && closeupReady && closeupRepByStem[idx] != null;
+}
+
+// Pide el close-up del stem `idx` (o pide ocultarlo con idx<0). Aquí no se
+// conmuta nada: solo se deja el destino, y la transición lo alcanza en
+// updateCloseupAnim(). Un stem sin pista en el manifest equivale a no pedir nada.
 function showCloseup(idx) {
-  if (idx === closeupStem) return;          // sin cambios
-  closeupStem = idx;
-  const hide = () => { closeupMesh.visible = false; closeupEl.pause(); };
-  if (idx < 0 || !closeupReady) return hide();
+  closeupWant = closeupCanShow(idx) ? idx : -1;
+}
+
+// Conmuta la pista de vídeo de shakaCloseup al stem `idx`; al ser el mismo
+// manifest que el 360, sigue sincronizado. Solo se llama con el panel a cero:
+// cambiar el contenido a media opacidad se vería como un corte.
+function selectCloseupTrack(idx) {
+  closeupStem = -1;
+  if (!closeupCanShow(idx)) return closeupEl.pause();
   const repId = closeupRepByStem[idx];
-  if (repId == null) return hide();
   const v = shakaCloseup.getVariantTracks().find(t => t.originalVideoId === repId);
-  if (!v) return hide();
-  shakaCloseup.selectVariantTrack(v, /*clearBuffer*/ true);
-  closeupEl.currentTime = videoEl.currentTime;
+  if (!v) {
+    // No debería pasar: el mapa se construye a partir del propio manifest. Si
+    // pasa, hay que borrarlo o lo reintentaríamos en CADA frame para siempre.
+    console.warn(`[closeup] el stem ${idx} apunta a la Representation ${repId}, ` +
+                 'que no está en el manifest');
+    delete closeupRepByStem[idx];
+    return closeupEl.pause();
+  }
+  // Reseleccionar la pista que ya está activa cuesta un `clearBuffer` y volver a
+  // bajarse el segmento: justo lo que estamos intentando ahorrar.
+  if (!v.active) shakaCloseup.selectVariantTrack(v, /*clearBuffer*/ true);
+  // Y saltar cuando ya se está en el sitio deja al elemento en `seeking` y para
+  // la imagen sin necesidad. Mismo margen que el lazo de sync.
+  if (Math.abs(closeupEl.currentTime - videoEl.currentTime) > 0.5)
+    closeupEl.currentTime = videoEl.currentTime;
   closeupEl.play().catch(() => {});
-  closeupMesh.visible = true;
+  closeupStem = idx;
+}
+
+// Avanza la transición un frame y refresca la textura. Vive en los DOS bucles de
+// render, no en el foco: el panel tiene que terminar de irse aunque el foco deje
+// de actualizarse —al entrar en AR, o cuando no hay pose— y no quedarse
+// congelado a medio fundido delante de la cara.
+function updateCloseupAnim() {
+  if (!closeupMesh) return;
+  const now = performance.now();
+  // Un dt sin tope convierte cualquier pausa (pestaña de fondo, carga larga) en
+  // un salto: mejor que la transición se coma un frame largo a que se salte.
+  const dt = closeupLastT ? Math.min((now - closeupLastT) / 1000, 0.1) : 0;
+  closeupLastT = now;
+
+  // La pista que queremos DECODIFICANDO no es la que queremos ver. Con el panel
+  // fuera cargamos ya la del candidato —el que la mirada roza pero todavía no ha
+  // ganado—, para que cuando gane no empiece por bajarse un segmento entero. Con
+  // segmentos de 6 s esa descarga es la mayor parte de lo que se tarda en
+  // aparecer, y sucede justo mientras el espectador sigue haciendo zoom.
+  const load = closeupWant >= 0 ? closeupWant : closeupArmed;
+  if (closeupFade <= 0 && closeupStem !== load) selectCloseupTrack(load);
+
+  // Si la pista está parada, que siga parada FUERA de cámara. El elemento se
+  // queda en pausa más a menudo de lo que parece: el salto de `currentTime`
+  // aborta el `play()` anterior, y Shaka no da imagen hasta llenar su colchón.
+  if (closeupStem >= 0 && closeupEl.paused && !videoEl.paused)
+    closeupEl.play().catch(() => {});
+
+  // No empezar a entrar hasta que la pista nueva tenga imagen Y esté corriendo:
+  // selectVariantTrack con clearBuffer más el salto de currentTime dejan unos
+  // frames sin decodificar, y el panel entraría con el fotograma congelado del
+  // músico ANTERIOR, que es justo el corte que este fundido viene a evitar. Solo
+  // condiciona el arranque: una vez dentro, un rebuffer no lo echa fuera y lo
+  // vuelve a meter, que se vería peor que un parón de medio segundo.
+  const fresh  = closeupEl.readyState >= 3 && !closeupEl.seeking && !closeupEl.paused;
+  const want   = closeupStem >= 0 && closeupStem === closeupWant;
+  const target = (want && (closeupFade > 0 || fresh)) ? 1 : 0;
+  const step   = dt / CLOSEUP_FADE_S;
+  closeupFade  = target > closeupFade ? Math.min(target, closeupFade + step)
+                                      : Math.max(target, closeupFade - step);
+
+  closeupMesh.visible = closeupFade > 0.001;
+  if (!closeupMesh.visible) return;
+  const e = closeupFade * closeupFade * (3 - 2 * closeupFade);   // smoothstep
+  closeupMesh.material.opacity = e;
+  closeupMesh.scale.setScalar(CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e);
+  if (closeupTexture && !HAS_RVFC) closeupTexture.needsUpdate = true;
+}
+
+// Deja el close-up a cero de golpe, sin transición: cambio de manifest o entrada
+// en AR, donde no hay nada que fundir porque la escena entera desaparece.
+function resetCloseup() {
+  closeupStem = -1; closeupWant = -1; closeupFade = 0;
+  closeupArmed = closeupArmCand = -1; closeupArmSince = 0;
+  if (closeupMesh) { closeupMesh.visible = false; closeupMesh.material.opacity = 0; }
 }
 
 // Selecciona el close-up del músico enfocado (mirada × zoom) o lo oculta. No
-// actúa en AR (allí ya te acercas al objeto 3D real). Barato: solo conmuta.
+// actúa en AR (allí ya te acercas al objeto 3D real). Barato: dos barridos de
+// los stems y una asignación; el trabajo de verdad lo hace la transición.
 function updateCloseupFocus() {
-  if (!closeupReady || arSession) return;
-  showCloseup(engine ? engine.getFocusedStem(0.3) : -1);
+  if (!closeupReady || arSession || !engine) { closeupArmed = -1; return showCloseup(-1); }
+  const enter = engine.getFocusedStem(CLOSEUP_ENTER);   // quién se lo gana de sobra
+  const stay  = engine.getFocusedStem(CLOSEUP_EXIT);    // quién manda con el listón bajo
+  // Cruzar EXIT no saca el panel, pero sí manda ir cargando esa pista... si el
+  // candidato se sostiene CLOSEUP_ARM_DWELL_S. Ver el comentario de la constante.
+  const cand = closeupCanShow(stay) ? stay : -1;
+  const now = performance.now();
+  if (cand !== closeupArmCand) { closeupArmCand = cand; closeupArmSince = now; }
+  if (closeupArmed !== cand && now - closeupArmSince >= CLOSEUP_ARM_DWELL_S * 1000)
+    closeupArmed = cand;
+  if (closeupWant < 0)                          showCloseup(enter);
+  else if (enter >= 0 && enter !== closeupWant) showCloseup(enter);   // otro se lo gana
+  else                                          showCloseup(stay === closeupWant ? closeupWant : -1);
 }
 
 // ══════════════════════════════════════════════════════
@@ -958,7 +1387,7 @@ function initDebugPanel() {
   debugCanvas.width = 512;
   debugCanvas.height = 256;
 
-  debugTexture = new THREE.CanvasTexture(debugCanvas);
+  debugTexture = MeshFit.srgb(new THREE.CanvasTexture(debugCanvas));
 
   const geo = new THREE.PlaneGeometry(1.2, 0.6);
   const mat = new THREE.MeshBasicMaterial({
@@ -1047,7 +1476,8 @@ async function enterXR() {
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(xrSession);
 
-    if (telemetry) { telemetry.meta.mode = 'vr'; telemetry.start(); }
+    // frame: en qué marco viajan p/q. En VR es el del propio casco (ver arTelemetryPose).
+    if (telemetry) { telemetry.meta.mode = 'vr'; telemetry.meta.frame = 'local-floor'; telemetry.start(); }
 
     document.getElementById('xr-btn').textContent = 'EXIT VR';
 
@@ -1068,9 +1498,9 @@ async function enterXR() {
 
       // ── Actualizar textura vídeo ──────────────────
       if (videoEl && videoEl.readyState >= 2) {
-        if (videoTexture) videoTexture.needsUpdate = true;
+        if (videoTexture && !HAS_RVFC) videoTexture.needsUpdate = true;
       }
-      if (closeupReady && closeupMesh.visible && closeupTexture) closeupTexture.needsUpdate = true;
+      updateCloseupAnim();
 
       let hasPose = false;
       let yawDeg = 0;
@@ -1195,8 +1625,57 @@ async function enterXR() {
 // su canal de audio se espacializa en esa posición con el PannerNode HRTF del
 // motor (bindStemToObject + update). La cabeza se mueve por el espacio y el
 // sonido viene de cada objeto, con atenuación natural por distancia.
+//
+// Una sala NO es la esfera del 360. En VR el oyente está en el centro y un stem
+// es una DIRECCIÓN (azimut/elevación): la distancia no se oye, porque la fuente
+// va siempre a `_stemRadius` de la cabeza. En AR el músico es un PUNTO de la
+// sala, con su distancia y su altura reales sobre el suelo, y el espectador se
+// mueve entre ellos. Por eso un stem puede traer un bloque `ar: {x,y,z}` en
+// metros de sala; sin él caemos a la proyección de abajo, que coloca la
+// dirección del 360 sobre una esfera a AR_RADIUS. Esa proyección es un apaño
+// razonable para una escena sin colocar —todos a la misma distancia inventada—,
+// no la geometría de la sala.
 const AR_RADIUS = 1.6;    // distancia de colocación inicial (m)
 const AR_HEIGHT = 1.3;    // altura base de los objetos (m)
+
+// Telemetría en coordenadas de SALA (ver arTelemetryPose). Temporales de módulo:
+// el bucle de AR pasa por aquí en cada frame y no conviene asignar ahí.
+const _telP = new THREE.Vector3();
+const _telQ = new THREE.Quaternion();
+const _telR = new THREE.Quaternion();
+
+// Pose de cabeza pasada del marco del casco al de la sala.
+//
+// `local-floor` pone el origen donde arrancó cada sesión: en bruto, la pose de
+// dos espectadores no es comparable entre sí, ni con los músicos, que viven en
+// el marco de roomGroup (stem.ar). Como T ya existe —ES roomGroup— basta con
+// deshacerla: la posición al espacio local del grupo, y la orientación sin su
+// yaw. En VR no aplica y se sigue enviando la pose tal cual: allí no hay sala,
+// el oyente está en el centro de la esfera. El hello lleva `frame` para que el
+// consumidor sepa cuál de los dos marcos está recibiendo.
+const _telPair = [_telP, _telQ];     // se devuelve siempre el mismo par: sin basura por frame
+function arTelemetryPose(pose) {
+  const p = pose.transform.position, q = pose.transform.orientation;
+  _telP.set(p.x, p.y, p.z);
+  roomGroup.worldToLocal(_telP);                 // usa matrixWorld: actualizarla antes
+  _telQ.set(q.x, q.y, q.z, q.w)
+       .premultiply(_telR.copy(roomGroup.quaternion).invert());
+  return _telPair;
+}
+
+// Punto de sala de un stem, en el marco de roomGroup: el bloque `ar` si lo trae,
+// y si no la dirección del 360 proyectada sobre la esfera.
+function arPosition(s) {
+  const p = s.ar;
+  if (p && isFinite(p.x) && isFinite(p.y) && isFinite(p.z)) return [p.x, p.y, p.z];
+  const D2R = Math.PI / 180;
+  const az = (s.azimuthDeg || 0) * D2R, el = (s.elevationDeg || 0) * D2R;
+  const ce = Math.cos(el), se = Math.sin(el);
+  // misma convención que el motor: frente = −Z, izquierda = −X, arriba = +Y.
+  return [-ce * Math.sin(az) * AR_RADIUS,
+          AR_HEIGHT + se * AR_RADIUS,
+          -ce * Math.cos(az) * AR_RADIUS];
+}
 
 // Etiqueta de texto como sprite (nombre del músico, sobre el objeto).
 function makeLabelSprite(text) {
@@ -1213,7 +1692,7 @@ function makeLabelSprite(text) {
   cx.fillStyle = '#00d4ff';
   cx.textBaseline = 'middle';
   cx.fillText(text || '', pad, c.height / 2);
-  const tex = new THREE.CanvasTexture(c);
+  const tex = MeshFit.srgb(new THREE.CanvasTexture(c));
   tex.minFilter = THREE.LinearFilter;
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
   sp.scale.set((c.width / c.height) * 0.16, 0.16, 1);   // ~16 cm de alto
@@ -1222,13 +1701,272 @@ function makeLabelSprite(text) {
 }
 
 // Marcador de fuente: esfera de alambre emisiva + etiqueta con el nombre.
+const AR_MARK_IDLE  = 0x00d4ff;   // marcador en reposo
+const AR_MARK_FOCUS = 0xffd24a;   // marcador del músico enfocado
+
 function makeSourceMarker(name) {
   const g = new THREE.Group();
   g.add(new THREE.Mesh(
     new THREE.IcosahedronGeometry(0.08, 1),
-    new THREE.MeshBasicMaterial({ color: 0x00d4ff, wireframe: true })));
+    // Material por marcador (no compartido): el realce del foco pinta solo uno.
+    new THREE.MeshBasicMaterial({ color: MeshFit.colour(AR_MARK_IDLE), wireframe: true })));
   g.add(makeLabelSprite(name));
   return g;
+}
+
+// ── Mallas de los músicos ────────────────────────────────────────────────────
+//
+// Un GLB por músico en lugar de la esfera de alambre. Va en scene.json, junto al
+// stem al que representa, porque es una propiedad de ESE músico:
+//
+//   "stems": [ { "name": "DR", "mesh": "meshes/bateria.glb" }, … ]
+//   "stems": [ { "name": "DR", "mesh": { "url": "…", "heightM": 1.7, "yawDeg": 90 } } ]
+//   "ar": { "mesh": "meshes/generico.glb" }        ← por defecto para todos
+//
+// El punto del stem sigue siendo el del AUDIO (la altura a la que suena, sobre
+// AR_HEIGHT o el `ar.y` que traiga), mientras que la malla representa a alguien
+// DE PIE en el suelo. Por eso la malla no se coloca en ese punto sino colgando de
+// él hacia abajo: así el panner no se entera de que hemos puesto un muñeco, y el
+// audio de una escena con mallas es idéntico al de la misma escena sin ellas.
+// El cargador y el ajuste de escala viven en src/app/mesh-fit.js (window.MeshFit),
+// no aquí: el editor tiene que colocar el modelo EXACTAMENTE igual que las gafas
+// para que su vista previa sirva de algo, y dos copias de esta función son dos
+// copias que se separan. `MeshFit.fit()` devuelve un grupo envoltorio con el
+// modelo dentro —nunca toca la transformación propia del GLB— y dentro de
+// `userData.fit` deja lo que midió, que es lo que el editor enseña por pantalla.
+
+// Aro en el suelo, bajo los pies. Con malla propia el foco no puede marcarse
+// repintando el material —el GLB trae los suyos, y teñirlos estropea la textura
+// del músico y encima puede no verse—, así que el ámbar se va al aro, que se lee
+// igual de bien sea cual sea el modelo.
+function makeFocusRing() {
+  const r = new THREE.Mesh(
+    new THREE.RingGeometry(0.34, 0.42, 32),
+    new THREE.MeshBasicMaterial({ color: MeshFit.colour(AR_MARK_IDLE), side: THREE.DoubleSide,
+                                  transparent: true, opacity: 0.75, depthWrite: false }));
+  r.rotation.x = -Math.PI / 2;
+  // Un centímetro por encima del suelo, y no en y=0: ahí la base de la malla es
+  // coplanar con el aro y las dos se disputan el mismo píxel — parpadeo al mover
+  // la cabeza, que en las gafas se ve fatal.
+  r.position.y = 0.01;
+  return r;
+}
+
+// Luz para las mallas. El player no tenía ninguna, y no le hacía falta: la esfera
+// del 360, los marcadores y las etiquetas son MeshBasicMaterial, que se dibuja
+// tal cual. Un GLB llega con materiales PBR, y un PBR sin luces sale NEGRO —
+// dentro de las gafas eso son bultos negros en medio del passthrough.
+//
+// Hemisférica más una direccional suave: la primera da un ambiente parejo que no
+// deja ninguna cara a oscuras (en AR no hay escenario que iluminar, hay una sala
+// real cuya luz no conocemos), y la segunda marca volumen para que una figura no
+// se lea como una silueta plana. Sin sombras: cuestan y aquí no aportan.
+//
+// Y el entorno, que no es un adorno de las luces sino lo único que ilumina un
+// metal: un material metálico no tiene difuso que iluminar, así que con luces y
+// sin entorno sale negro igual. La hemisférica baja a la mitad al entrar el
+// entorno, que ya hace el ambiente; con las dos a tope la malla se lava.
+let arLights = null;
+function ensureARLights() {
+  if (arLights) return arLights;
+  arLights = new THREE.Group();
+  arLights.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5));
+  const key = new THREE.DirectionalLight(0xffffff, 0.5);
+  key.position.set(1, 3, 2);
+  arLights.add(key);
+  scene.environment = MeshFit.environment(renderer);
+  return arLights;
+}
+
+// Cuelga la malla del marcador ya colocado. Asíncrono a propósito: la sesión de AR
+// arranca con las esferas de alambre y cada músico aparece cuando su fichero
+// termina de bajar, en vez de esperar todos a que baje el último.
+// ?nomesh=1 → vuelven las esferas de alambre. Para separar un problema de las
+// mallas de uno del passthrough sin tener que editar la escena y volver a entrar.
+const AR_NO_MESH = new URLSearchParams(location.search).get('nomesh') === '1';
+
+function attachMeshTo(marker, cfg, floorY) {
+  const spec = MeshFit.spec(cfg);
+  if (!spec.url || AR_NO_MESH) return;
+  MeshFit.load(spec.url).then(src => {
+    // Mientras bajaba el fichero se puede haber salido de AR (o recolocado la
+    // sala): si este marcador ya no está en la escena, el GLB no pinta nada aquí.
+    if (!arSources.includes(marker)) return;
+    const holder = new THREE.Group();
+    // clone(): varios músicos pueden compartir fichero (el `ar.mesh` común) y cada
+    // uno necesita su propio nodo. Ojo, un clon plano no arrastra el esqueleto de
+    // una malla animada — cuando toque animar habrá que ir a SkeletonUtils.clone.
+    holder.add(MeshFit.fit(src.clone(true), { ...spec, name: spec.url }));
+    holder.position.y = floorY;               // del punto de audio al suelo
+    holder.add(makeFocusRing());
+    marker.add(holder);
+    // Al colgar la primera malla, y no antes: una escena sin mallas no gasta ni
+    // una luz, que es como ha funcionado el player hasta ahora.
+    scene.add(ensureARLights());
+    marker.userData.focusRing = holder.children[1];
+    // La esfera de alambre era el sitio del músico mientras no había músico.
+    marker.children[0].visible = false;
+    marker.updateMatrixWorld(true);
+    // El aro nace en reposo, y este músico puede estar enfocado YA: si su fichero
+    // tardó más que el dwell, sin esto se le vería apagado estando en foco.
+    paintARFocus();
+  }).catch(e => {
+    // Un GLB que no carga deja al músico con su esfera: se sigue oyendo y se
+    // sigue pudiendo enfocar, que es lo que no puede perderse por un fichero malo.
+    console.warn(`[ar] malla "${spec.url}":`, e.message || e);
+  });
+}
+
+// ══════════════════════════════════════════════════════
+// FOCO EN AR (mirada sostenida)
+// ══════════════════════════════════════════════════════
+// En VR el foco es puntería × zoom, y el zoom es la intención declarada: "quiero
+// a ése". En AR no hay zoom, así que la intención hay que leerla del tiempo —
+// mirar a alguien un rato— y del sitio, que ya está en las coordenadas de sala.
+//
+// Dos conos y dos tiempos, asimétricos a propósito. Con un solo umbral el foco
+// parpadea entre dos músicos vecinos con el temblor natural de la cabeza, y ese
+// parpadeo llega tal cual a la telemetría: una atención compartida que salta 5
+// veces por segundo no es un dato, es ruido. Entrar cuesta (cono estrecho +
+// permanencia); quedarse es fácil (cono ancho + margen para soltar).
+//
+// Del foco cuelgan tres cosas: la telemetría, el marcador ámbar y el realce del
+// stem enfocado (boostDb/duckDb, que el motor aplica sobre la mezcla). El realce
+// pende del MISMO veredicto que el marcador a propósito: lo que se oye subir es
+// exactamente lo que se ve encenderse, así que se ajusta con las gafas puestas.
+const AR_FOCUS = {
+  coneDeg:    12,   // semiángulo para captar el foco
+  keepDeg:    22,   // semiángulo, más ancho, para conservarlo
+  dwellMs:   400,   // hay que sostener la mirada para que cuente
+  releaseMs: 350,   // y perderla este rato para soltarlo
+  boostDb:     6,   // cuánto sube el enfocado
+  duckDb:      0,   // cuánto bajan los demás (0 = no se les toca)
+};
+// Los seis números salen de scene.json → `ar.focus` si están, porque son justo lo
+// que hay que ajustar probándolo en la sala: la permanencia buena depende de la
+// separación entre músicos y de lo lejos que esté el público, y el realce que hace
+// falta, de cuánto tapa el ruido de la sala real. Se ignora en silencio lo que no
+// sea un número: un valor suelto mal escrito no debe dejar el foco sin cono.
+function loadARFocusCfg() {
+  const c = arCfg.focus;
+  if (c) for (const k of Object.keys(AR_FOCUS)) if (typeof c[k] === 'number' && isFinite(c[k])) AR_FOCUS[k] = c[k];
+  // Los conos que se le pasan al motor son objetos reutilizados (ver más abajo):
+  // hay que rehacerlos aquí o la escena ajustaría AR_FOCUS y el motor seguiría
+  // preguntando por los grados de fábrica.
+  _coneEnter.coneDeg = AR_FOCUS.coneDeg;
+  _coneKeep.coneDeg  = AR_FOCUS.keepDeg;
+  engine?.setFocusParams({ boostDb: AR_FOCUS.boostDb, duckDb: AR_FOCUS.duckDb });
+}
+
+let arFocus      = -1;   // músico enfocado (índice de stem) o -1
+let arFocusCand  = -1;   // candidato en observación
+let arFocusSince = 0;    // ms en que el candidato pasó a serlo
+let arFocusLost  = 0;    // ms en que el enfocado salió del cono ancho (0 = dentro)
+
+function resetARFocus() {
+  arFocus = arFocusCand = -1;
+  arFocusSince = arFocusLost = 0;
+  engine?.setFocusedStem(-1);   // que no quede un músico realzado de la sesión anterior
+}
+
+// Los dos conos, como objetos fijos: se consultan 2 veces por frame y crear el
+// literal ahí dentro es basura para el recolector 144 veces por segundo.
+const _coneEnter = { coneDeg: AR_FOCUS.coneDeg };
+const _coneKeep  = { coneDeg: AR_FOCUS.keepDeg };
+
+// Un frame de foco. `now` es el timestamp del bucle de render (ms).
+function updateARFocus(now) {
+  if (!engine) return -1;
+  const prev = arFocus;
+  const cand = engine.getGazedStem(_coneEnter);
+
+  if (cand !== arFocusCand) { arFocusCand = cand; arFocusSince = now; }
+
+  // Soltar: el enfocado deja de ser el mejor del cono ANCHO. Se mide "el mejor"
+  // y no "sigue dentro" para que un músico claramente más centrado te lo quite,
+  // en vez de tener que salir del cono de uno para poder entrar en el del otro.
+  //
+  // Y no se suelta mientras haya candidato: como releaseMs < dwellMs, soltar en
+  // cuanto sales del cono de A mete un -1 de unos frames antes de que B confirme
+  // —el parpadeo que esto viene a evitar, y encima en el momento más informativo,
+  // el del relevo. Sin candidato al que pasar, el foco se pierde de verdad.
+  if (arFocus >= 0) {
+    const stillOn = engine.getGazedStem(_coneKeep) === arFocus;
+    if (stillOn || cand >= 0) arFocusLost = 0;
+    else {
+      if (!arFocusLost) arFocusLost = now;
+      if (now - arFocusLost >= AR_FOCUS.releaseMs) { arFocus = -1; arFocusLost = 0; }
+    }
+  }
+
+  // Coger: candidato sostenido durante dwellMs, venga de -1 o de otro músico.
+  if (cand >= 0 && cand !== arFocus && now - arFocusSince >= AR_FOCUS.dwellMs) {
+    arFocus = cand; arFocusLost = 0;
+  }
+
+  if (arFocus !== prev) { paintARFocus(); engine?.setFocusedStem(arFocus); }
+  return arFocus;
+}
+
+function paintARFocus() {
+  arSources.forEach((m, i) => {
+    // Con malla manda el aro del suelo; sin ella, la esfera de alambre. Nunca las
+    // dos: la esfera está oculta en cuanto hay músico que mirar.
+    const mark = m.userData.focusRing || m.children[0];
+    if (mark && mark.material) mark.material.color.copy(MeshFit.colour(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE));
+  });
+}
+
+// ══════════════════════════════════════════════════════
+// EN AR NO SE DECODIFICA EL 360
+// ══════════════════════════════════════════════════════
+// Medido con `?arperf=1` en la Quest: en passthrough el bucle va a 90 fps y
+// nuestro JavaScript cuesta 0,52 ms de media —un 5% del frame— mientras el
+// contador de `getVideoPlaybackQuality()` marca 24 fps, que es exactamente la
+// tasa del manifest. Es decir: la esfera está oculta, nadie mira esa textura, y
+// aun así se decodifica el 4K entero. Ese trabajo lo hace el decodificador
+// hardware fuera del hilo principal, por eso no salía en el reparto por tramos y
+// sí se notaba en el compositor de passthrough al andar.
+//
+// Shaka lee `manifest.disableVideo` SOLO al cargar, así que quitarlo obliga a
+// recargar la fuente. Sale a cuenta: entrar en AR es un gesto explícito y poco
+// frecuente, y el manifest trae el audio en su propio AdaptationSet (Opus
+// multicanal en WebM), así que la variante sin vídeo se sostiene sola —el
+// <video> sigue siendo el elemento del que cuelga Web Audio, solo que ya sin
+// pista de imagen que decodificar.
+//
+// En directo se recarga al borde, que es donde quieres estar de todas formas. En
+// VOD hay que guardar el `currentTime` y volver a él.
+//
+// `?arnovideo=0` lo desactiva, para comparar contra el comportamiento anterior
+// sin tener que tocar código.
+const AR_CUT_VIDEO = new URLSearchParams(location.search).get('arnovideo') !== '0';
+let videoDisabled = false;
+
+async function setVideoDisabled(off) {
+  if (!shakaVideo || !curManifestSrc || off === videoDisabled) return;
+  const wasPlaying = !videoEl.paused;
+  const t = videoEl.currentTime;
+  let live = false;
+  try { live = shakaVideo.isLive(); } catch (_) { /* aún sin manifest */ }
+  shakaVideo.configure({ manifest: { disableVideo: off } });
+  // Shaka ignora en silencio las claves que no conoce (solo un warning en
+  // consola, que aquí no ve nadie). Si el build del CDN no la tuviera, la
+  // recarga saldría igual de cara y pareceríamos tontos midiendo lo mismo.
+  if (shakaVideo.getConfiguration().manifest.disableVideo !== off)
+    throw new Error('este build de Shaka no soporta manifest.disableVideo');
+  // En directo, sin startTime: se entra por el borde. En VOD se vuelve al mismo
+  // punto, o la recarga se sentiría como un salto al principio.
+  await shakaVideo.load(curManifestSrc, live ? undefined : t);
+  videoDisabled = off;
+  // Al recuperar el vídeo hay pista nueva: la textura vieja apunta al mismo
+  // elemento, pero re-crearla es barato y evita quedarse con el último fotograma
+  // congelado de antes de entrar en AR. Y hay que volver a clavar la esfera: esta
+  // recarga elige variante igual que la carga inicial, así que sin esto se vuelve
+  // del passthrough con un close-up envolviendo la escena.
+  if (!off) { pinSphereTrack(); attachVideoTexture(); }
+  if (wasPlaying) videoEl.play().catch(() => {});
+  if (audioEl && audioEl !== videoEl && wasPlaying) audioEl.play().catch(() => {});
 }
 
 // ══════════════════════════════════════════════════════
@@ -1293,7 +2031,8 @@ function rotateRoomAroundUser(dYaw, head) {
 // Un frame de calibración. Solo con el grip apretado, para no descolocar la sala
 // sin querer con el joystick. Izquierdo desplaza, derecho gira, y pulsar el
 // joystick vuelve al punto de partida si uno se pierde.
-function updateARCalib(session, pose) {
+function updateARCalib(frame, refSpace, pose) {
+  const session = frame.session;
   const head = pose.transform.position;
   const q = pose.transform.orientation;
   // Yaw de la cabeza: el bucle de AR no mantiene la global `yaw` (esa es la del
@@ -1323,9 +2062,393 @@ function updateARCalib(session, pose) {
     }
   }
   if (active) roomGroup.updateMatrixWorld(true);   // los panners la leen ya movida
-  // Al soltar el grip se da por buena la posición y se guarda.
-  if (arCalibrating && !active) { saveARCalib(); toast('Calibración guardada'); }
+  // El ancla NO se suelta al empezar a mover: el bucle ya deja de seguirla
+  // mientras `arCalibrating` esté puesto, y soltarla obligaba a crear otra al
+  // terminar. Lo que cambia con el joystick es el desfase de la sala respecto al
+  // ancla, no el ancla, que es un punto físico de la sala y no se mueve.
+  // Al soltar el grip se da por buena la posición: se guarda y se fija como
+  // ancla, que es lo que hace que esto no haya que repetirlo nunca más.
+  if (arCalibrating && !active) { saveARCalib(); saveRoomAnchor(frame, refSpace); }
+  // Reintento tras barrer el cupo (ver saveRoomAnchor): necesita este `frame`,
+  // vivo, y que no se esté moviendo la sala otra vez.
+  else if (arAnchorRedo && !active) { arAnchorRedo = false; saveRoomAnchor(frame, refSpace); }
   arCalibrating = active;
+}
+
+// ══════════════════════════════════════════════════════
+// ANCLA PERSISTENTE DE SALA
+// ══════════════════════════════════════════════════════
+// La calibración de arriba se guarda en localStorage, pero esos tres números
+// están medidos desde el origen de `local-floor`, que cae donde arrancó la
+// sesión: en el arranque siguiente ese origen está en otro sitio y el mismo
+// {x,z,yaw} deja la sala en cualquier parte. Por eso había que recalibrar cada
+// vez — no es falta de precisión, es que el número guardado no significa nada
+// fuera de su sesión.
+//
+// Lo que falta es un punto de referencia FÍSICO al que colgarlo, y el navegador
+// del Quest lo da: createAnchor() crea un ancla, requestPersistentHandle()
+// devuelve un UUID que guardamos nosotros, y en la sesión siguiente
+// restorePersistentAnchor() devuelve un ancla en el mismo sitio real, porque el
+// casco la re-localiza contra su propio mapa de la sala (el Space Setup). Se
+// guarda el UUID en lugar de las coordenadas y la sala vuelve sola.
+//
+// Y de paso resuelve lo de varios espectadores sin que hablen entre ellos: si
+// cada casco ancló una vez al mismo sitio de la sala, todos coinciden en cada
+// arranque sin canal compartido, sin servidor y sin cámaras. Las anclas
+// compartidas entre dispositivos (colocation) NO están expuestas a WebXR; el
+// truco es justo que cada uno persista por su cuenta contra el mismo punto.
+//
+// Límites del runtime: 8 anclas persistentes por sitio (usamos 1), ninguna
+// persiste en modo privado, y borrar el historial del navegador las borra. En
+// todos esos casos se cae a los joysticks de arriba, que siguen siendo además
+// el camino para poner el ancla la primera vez. ?noanchor=1 los fuerza.
+
+let arAnchor        = null;    // XRAnchor de la sala en esta sesión, si lo hay
+let arAnchorPending = false;   // creación en vuelo: no encadenar dos guardados
+let arAnchorPruned  = false;   // el barrido del cupo, una vez por sesión
+let arAnchorRedo    = false;   // reintento pendiente: lo lanza el frame siguiente
+let arAnchorTries   = 0;      // reintentos gastados, para no repetir sin fin
+let arAnchorLogged  = false;  // la primera colocación de la sesión, ya registrada
+const AR_ANCHOR_TRIES = 30;   // ~medio segundo de frames buscando pose del ancla
+
+// Umbral para no repasar el subárbol de la sala por ruido de tracking: el ancla
+// está quieta casi siempre y updateMatrixWorld(true) no es gratis.
+const AR_ANCHOR_EPS_M   = 0.002;    // 2 mm
+const AR_ANCHOR_EPS_RAD = 0.002;    // ~0.1°
+const AR_NO_ANCHOR = new URLSearchParams(location.search).get('noanchor') === '1';
+// Salida manual por si el cupo se llena de una forma que el barrido automático
+// de saveRoomAnchor no cubre: entra con ?resetanchors=1, borra todas las anclas
+// del sitio y alinea una vez más. Vale también para empezar de cero en una sala
+// nueva sin bucear en el almacenamiento del navegador.
+const AR_RESET_ANCHORS = new URLSearchParams(location.search).get('resetanchors') === '1';
+
+// Un ancla por sala, con la misma clave que la calibración a mano.
+function arAnchorKey() { return 'arAnchorId:' + (arCfg.venue || 'default'); }
+function arOffsetKey() { return 'arAnchorOff:' + (arCfg.venue || 'default'); }
+function arAnchorIdsKey() { return 'arAnchorIds:' + (arCfg.venue || 'default'); }
+
+// TODO el historial de UUID que hemos persistido, no solo el vigente. Borrar es
+// lo único que libera el cupo de 8 y solo funciona con un UUID válido: los de
+// `persistentAnchors` vienen vacíos en el Quest, así que los únicos buenos son
+// los nuestros. Si uno se pierde —un borrado que falla, una sesión que se cierra
+// entre crear y borrar—, esa ancla se queda en el cupo PARA SIEMPRE y la única
+// salida es borrar los datos del sitio a mano. Guardarlos todos hace que siempre
+// se pueda barrer lo nuestro; el vigente se mantiene aparte en arAnchorKey().
+function loadAnchorIds() {
+  try {
+    const v = JSON.parse(localStorage.getItem(arAnchorIdsKey()));
+    if (Array.isArray(v)) return v.filter(x => typeof x === 'string' && x);
+  } catch (_) { /* nada guardado o corrupto */ }
+  return [];
+}
+
+function rememberAnchorId(id) {
+  const ids = loadAnchorIds();
+  if (ids.includes(id)) return;
+  ids.push(id);
+  try { localStorage.setItem(arAnchorIdsKey(), JSON.stringify(ids)); } catch (_) { /* modo privado */ }
+}
+
+// Borra las nuestras menos `keep`, y solo saca de la lista las que el runtime
+// confirma: una que falle hoy se vuelve a intentar en la sesión siguiente, que es
+// justo lo que no pasaba cuando el único registro era el UUID vigente.
+async function pruneOwnAnchors(session, keep) {
+  if (!session.deletePersistentAnchor) return { ok: 0, fail: 0 };
+  const ids = loadAnchorIds();
+  const quedan = [], fallidas = [];
+  let ok = 0;
+  for (const id of ids) {
+    if (id === keep) { quedan.push(id); continue; }
+    try {
+      await session.deletePersistentAnchor(id);
+      ok++;
+      arLogAdd(`own anchor deleted (${id})`);
+      // Si era la vigente, el puntero deja de apuntar a nada: dejarlo haría que
+      // la sesión siguiente intentara restaurar un ancla que ya no existe.
+      try {
+        if (localStorage.getItem(arAnchorKey()) === id) localStorage.removeItem(arAnchorKey());
+      } catch (_) { /* modo privado */ }
+    }
+    catch (e) { quedan.push(id); fallidas.push(id); arLogAdd(`could not delete own anchor (${id})`, e); }
+  }
+  if (ok) { try { localStorage.setItem(arAnchorIdsKey(), JSON.stringify(quedan)); } catch (_) { /* modo privado */ } }
+  return { ok, fail: fallidas.length };
+}
+
+// El ancla marca UN punto físico de la sala; dónde queda la escena respecto a ese
+// punto es otra cosa, y es la que cambia al recalibrar. Guardarlas juntas —un
+// ancla nueva por cada suelta de grip— agota en una tarde de pruebas el cupo de 8
+// anclas por sitio, y cuando se llena, persistir falla con "Maximum number of
+// anchors reached!" y ya no hay forma de arreglarlo desde la página: el runtime
+// enumera las anclas pero devuelve sus UUID vacíos, así que no se pueden borrar.
+// Con el desfase aparte se ancla UNA vez y las recalibraciones son tres números
+// en localStorage, que no tienen cupo.
+let arRoomOff = { dx: 0, dz: 0, dyaw: 0 };
+
+function loadRoomOffset() {
+  arRoomOff = { dx: 0, dz: 0, dyaw: 0 };
+  try {
+    const o = JSON.parse(localStorage.getItem(arOffsetKey()));
+    if (o && isFinite(o.dx) && isFinite(o.dz) && isFinite(o.dyaw)) arRoomOff = o;
+  } catch (_) { /* nada guardado o corrupto → sala sobre el ancla */ }
+}
+
+// Yaw de una pose alrededor de Y, que es el único giro que se hereda del ancla.
+function poseYaw(q) {
+  return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
+}
+
+// Desfase = la posición actual de la sala LEÍDA DESDE el ancla, para que deje de
+// depender del origen de la sesión igual que el ancla. Es la inversa exacta de la
+// composición que hace followRoomAnchor.
+function saveRoomOffset(pose) {
+  const p = pose.transform.position;
+  const ayaw = poseYaw(pose.transform.orientation);
+  const c = Math.cos(ayaw), s = Math.sin(ayaw);
+  const ex = roomGroup.position.x - p.x, ez = roomGroup.position.z - p.z;
+  arRoomOff = { dx: ex * c - ez * s, dz: ex * s + ez * c, dyaw: roomGroup.rotation.y - ayaw };
+  try { localStorage.setItem(arOffsetKey(), JSON.stringify(arRoomOff)); } catch (_) { /* modo privado */ }
+  arLogAdd(`offset saved  dx=${arRoomOff.dx.toFixed(2)} dz=${arRoomOff.dz.toFixed(2)}` +
+           ` dyaw=${(arRoomOff.dyaw * 180 / Math.PI).toFixed(1)}°` +
+           `  · anchor at x=${p.x.toFixed(2)} z=${p.z.toFixed(2)} yaw=${(ayaw * 180 / Math.PI).toFixed(1)}°`);
+}
+
+// Recupera el ancla al entrar en AR. No coloca nada todavía: leer su pose exige
+// un XRFrame, así que la aplica el bucle en el primer frame que la tenga (ver
+// followRoomAnchor). Hasta entonces vale el {x,z,yaw} guardado.
+async function restoreRoomAnchor(session) {
+  arAnchor = null;
+  if (AR_NO_ANCHOR) return;
+  // Cada salida de aquí deja la sala en el {x,z,yaw} viejo, o sea EN CUALQUIER
+  // PARTE, que desde dentro de las gafas se lee igual en los cuatro casos. Sin
+  // decir cuál ha sido no hay forma de distinguir "no se guardó" de "no se
+  // recuperó", así que ninguna se va callando.
+  if (!session.restorePersistentAnchor) return arNotice('No anchors on this headset: align every session');
+  // La pregunta de fondo cuando nada de esto funciona, y no hay consola dentro de
+  // las gafas para responderla: ¿concedió el runtime 'anchors'?
+  const feats = session.enabledFeatures ? Array.from(session.enabledFeatures) : null;
+  const n = session.persistentAnchors ? session.persistentAnchors.length : '?';
+  const lista = session.persistentAnchors ? Array.from(session.persistentAnchors) : null;
+  console.log('[ar] features:', feats || 'no expuestas', '· anclas persistentes:', lista || 'no expuestas');
+  arLogAdd(`features: ${feats ? feats.join(' ') : 'not exposed'}`);
+  arLogAdd(`persistentAnchors: ${lista ? lista.length + ' · ' + (typeof lista[0]) + ' ' + lista[0] : 'not exposed'}`);
+  arLogAdd(`methods: create=${typeof (window.XRFrame && XRFrame.prototype.createAnchor)}` +
+           ` restore=${typeof session.restorePersistentAnchor}` +
+           ` delete=${typeof session.deletePersistentAnchor}`);
+  arLogSend();      // el entorno ya está: que llegue sin esperar a salir de AR
+  if (feats && !feats.includes('anchors'))
+    return arNotice(`'anchors' not granted: the room cannot be saved`);
+  if (AR_RESET_ANCHORS) {
+    const { ok, fail, why, err } = await pruneOrphanAnchors(session, null);
+    try { localStorage.removeItem(arAnchorKey()); } catch (_) { /* modo privado */ }
+    return arNotice(why ? `Cannot delete the anchors: ${why}`
+                        : `${ok} deleted${fail ? `, ${fail} failed: ${err}` : ''}`);
+  }
+  let id = null;
+  try { id = localStorage.getItem(arAnchorKey()); } catch (_) { /* modo privado */ }
+  // Este sitio usa UNA ancla: cualquier otra es un resto de una recalibración
+  // cuyo borrado se perdió, y son las que llenan el cupo de 8 hasta que persistir
+  // deja de funcionar. Se barren al entrar, que es cuando sobra tiempo, en vez de
+  // esperar a que el fallo aparezca a mitad de una calibración. Sin await: la
+  // sala no depende de esto. Sin `id` guardado no hay ninguna que salvar — sin su
+  // UUID un ancla ya no se puede recuperar, así que caen todas.
+  // Las NUESTRAS primero, que son las únicas con UUID bueno. La lista del runtime
+  // solo sirve donde sí devuelva UUID, así que queda de refuerzo para otros
+  // visores, no para el Quest.
+  if (loadAnchorIds().length > (id ? 1 : 0))
+    pruneOwnAnchors(session, id).then(({ ok }) => ok && console.log('[ar] anclas propias borradas:', ok));
+  else if (session.persistentAnchors && session.persistentAnchors.length > (id ? 1 : 0))
+    pruneOrphanAnchors(session, id).then(({ ok }) => ok && console.log('[ar] anclas huérfanas borradas:', ok));
+  if (!id) return arNotice(`No anchor saved (${n} on this site): align and release the grip`);
+  let a = null;
+  try { a = await session.restorePersistentAnchor(id); }
+  catch (e) { arLogAdd('restorePersistentAnchor', e); console.warn('[ar] ancla no restaurada:', e); return arNotice(`Headset does not recognise the anchor · ${n} on this site`); }
+  // Puede resolverse tarde, cuando el usuario ya ha recalibrado a mano y puesto
+  // un ancla nueva: entonces la vieja ya no manda.
+  loadRoomOffset();
+  if (session === arSession && !arAnchor && !arCalibrating) { arAnchor = a; arNotice(`Room restored from its anchor · ${n} on this site`); }
+}
+
+// Coloca `roomGroup` sobre el ancla, en cada frame. Hacerlo por frame sale gratis
+// y absorbe solo lo que un estimador tendría que perseguir: la deriva de
+// `local-floor` y los `reset` del espacio de referencia (recentrar, quitarse las
+// gafas) mueven el origen de la sesión, no el ancla, así que la sala se queda
+// donde está en vez de saltar.
+//
+// Del ancla se toman X, Z y yaw y nada más: los 4 GdL del comentario de arriba
+// siguen valiendo, la Y la pone el suelo de `local-floor` y la vertical la
+// alinea la IMU. Heredar del ancla un par de grados de inclinación torcería la
+// sala sin corregir ningún error real.
+function followRoomAnchor(frame, refSpace) {
+  if (!arAnchor) return;
+  let pose = null;
+  try { pose = frame.getPose(arAnchor.anchorSpace, refSpace); }
+  catch (_) { arAnchor = null; return; }   // borrada a mitad de sesión
+  if (!pose) return;               // sin tracking este frame: se queda donde estaba
+  const p = pose.transform.position;
+  const ayaw = poseYaw(pose.transform.orientation);
+  // La sala cuelga del ancla: su sitio es el del ancla más el desfase, girado por
+  // el yaw del ancla para que el desfase se lea en el marco de la propia ancla.
+  const c = Math.cos(ayaw), s = Math.sin(ayaw);
+  const x = p.x + arRoomOff.dx * c + arRoomOff.dz * s;
+  const z = p.z - arRoomOff.dx * s + arRoomOff.dz * c;
+  const yaw = ayaw + arRoomOff.dyaw;
+  // Diferencia de ángulos envuelta: rotation.y viene de acumular giros de
+  // joystick y puede haberse ido de (-π, π].
+  const d = yaw - roomGroup.rotation.y;
+  const dYaw = Math.atan2(Math.sin(d), Math.cos(d));
+  if (Math.abs(x - roomGroup.position.x) < AR_ANCHOR_EPS_M &&
+      Math.abs(z - roomGroup.position.z) < AR_ANCHOR_EPS_M &&
+      Math.abs(dYaw) < AR_ANCHOR_EPS_RAD) return;
+  if (!arAnchorLogged) {
+    arAnchorLogged = true;
+    arLogAdd(`anchor placed  anchor x=${p.x.toFixed(2)} z=${p.z.toFixed(2)} yaw=${(ayaw * 180 / Math.PI).toFixed(1)}°` +
+             `  · offset dx=${arRoomOff.dx.toFixed(2)} dz=${arRoomOff.dz.toFixed(2)} dyaw=${(arRoomOff.dyaw * 180 / Math.PI).toFixed(1)}°` +
+             `  → room x=${x.toFixed(2)} z=${z.toFixed(2)} yaw=${(yaw * 180 / Math.PI).toFixed(1)}°`);
+  }
+  applyARCalib({ x, z, yaw });
+  roomGroup.updateMatrixWorld(true);     // la leen worldToLocal y los panners
+}
+
+// La cuota del runtime son 8 anclas persistentes por sitio y nosotros usamos
+// una: las demás son restos de recalibraciones cuyo borrado falló (va con
+// `.catch()` vacío) o de sesiones que se cerraron entre crear y borrar. Con el
+// cupo lleno, persistir la siguiente falla con InvalidStateError y desde dentro
+// de las gafas eso se lee como "el ancla no funciona" — cuando lo que pasa es
+// que sobran. Aquí no hay ancla de nadie más, así que todo lo que no sea `keep`
+// se puede borrar.
+async function pruneOrphanAnchors(session, keep) {
+  const list = session.persistentAnchors ? Array.from(session.persistentAnchors) : null;
+  // Las tres salidas de aquí son distintas y hay que poder contarlas: no hay API
+  // para listar, no hay API para borrar, o el borrado falla ancla por ancla.
+  if (!list) return { ok: 0, fail: 0, why: 'no list', err: '' };
+  if (!session.deletePersistentAnchor) return { ok: 0, fail: 0, why: 'no delete API', err: '' };
+  // El runtime del Quest enumera las anclas pero devuelve sus UUID VACÍOS, y sin
+  // identificador no hay nada que borrar: `deletePersistentAnchor('')` contesta
+  // OperationError tantas veces como anclas haya. Se detecta aquí en vez de
+  // gastar una llamada por ancla para acabar en el mismo sitio, y sobre todo para
+  // poder decirlo: con el cupo lleno y sin UUID, esto no se arregla desde la
+  // página. Los únicos UUID buenos son los que guardamos nosotros al persistir.
+  if (list.length && !list.some(u => u))
+    return { ok: 0, fail: 0, why: 'the headset gives no UUIDs', err: '' };
+  console.log('[ar] a borrar:', list.length, 'entradas, la primera es', typeof list[0], list[0]);
+  let ok = 0, fail = 0, err = '';
+  for (const uuid of list) {
+    if (!uuid || uuid === keep) continue;
+    try { await session.deletePersistentAnchor(uuid); ok++; }
+    catch (e) {
+      fail++;
+      // El primero basta: nueve rechazos del mismo runtime son el mismo motivo,
+      // y ese motivo es lo único que no sabemos todavía.
+      if (!err) err = (e && (e.name || e.message)) ? (e.name || e.message) : String(e);
+      if (fail === 1) arLogAdd(`deletePersistentAnchor(${uuid})`, e);
+      console.warn('[ar] no se pudo borrar el ancla', uuid, e);
+    }
+  }
+  return { ok, fail, why: '', err };
+}
+
+// Fija como ancla persistente la calibración que se acaba de hacer a mano. A
+// partir de aquí esta sala ya no se vuelve a calibrar en este casco.
+async function saveRoomAnchor(frame, refSpace) {
+  if (arAnchorPending) return;
+  if (AR_NO_ANCHOR) { arNotice('Alignment saved (?noanchor=1)'); return; }
+  if (!frame.createAnchor) { arNotice('Saved for this session only: no anchors'); return; }
+  // Con un ancla ya puesta —recién restaurada o creada en esta sesión— no se crea
+  // ninguna: lo que ha cambiado es dónde está la sala respecto a ella. Este es el
+  // camino normal de toda recalibración a partir de la primera, y el que hace que
+  // el cupo de 8 no se vuelva a tocar.
+  if (arAnchor) {
+    let pose = null;
+    try { pose = frame.getPose(arAnchor.anchorSpace, refSpace); } catch (_) { /* ancla borrada */ }
+    if (pose) { arAnchorTries = 0; saveRoomOffset(pose); arNotice('Alignment saved onto the anchor'); return; }
+    // Sin pose del ancla en ESTE frame no hay desde dónde medir. Se reintenta en
+    // el siguiente en vez de crear otra ancla, que es lo que llenó el cupo. Con
+    // tope: reintentar sin fin repintaría el cartel en cada frame, y media
+    // segundo sin pose ya no es un hueco de tracking sino un ancla perdida.
+    if (arAnchorTries++ < AR_ANCHOR_TRIES) { arAnchorRedo = true; return; }
+    arNotice('The anchor gives no pose: align again');
+    return;
+  }
+  arAnchorPending = true;
+  const session = frame.session;
+  // Aquí se crea ancla nueva: o es la primera de este sitio, o la guardada no se
+  // ha podido restaurar. Lo segundo, repetido, es lo que llena el cupo, y como
+  // las ajenas no se pueden borrar conviene decirlo antes de que no quepa
+  // ninguna, no cuando ya falle.
+  const usadas = session.persistentAnchors ? session.persistentAnchors.length : 0;
+  if (usadas >= 6) arLogAdd(`WARNING: ${usadas} anchors on this site and the quota is 8`);
+  let old = null;
+  try { old = localStorage.getItem(arAnchorKey()); } catch (_) { /* modo privado */ }
+  // Los dos pasos fallan distinto y hasta ahora se veían igual: crear el ancla
+  // es cosa del frame, persistirla es cosa de la cuota del sitio.
+  let step = 'create the anchor';
+  try {
+    // Antes del primer await: `frame` solo vale dentro de su callback, y la
+    // llamada a createAnchor tiene que salir de aquí. La promesa ya resuelve
+    // cuando quiera.
+    const yaw = roomGroup.rotation.y;
+    const a = await frame.createAnchor(new XRRigidTransform(
+      { x: roomGroup.position.x, y: 0, z: roomGroup.position.z },
+      { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }), refSpace);
+    step = 'persist the anchor';
+    const id = await a.requestPersistentHandle();
+    arAnchor = a;
+    // Se ha creado EN la posición de la sala, así que no hay desfase todavía.
+    arRoomOff = { dx: 0, dz: 0, dyaw: 0 };
+    try { localStorage.setItem(arOffsetKey(), JSON.stringify(arRoomOff)); } catch (_) { /* modo privado */ }
+    try { localStorage.setItem(arAnchorKey(), id); } catch (_) { /* modo privado */ }
+    rememberAnchorId(id);
+    // Solo con la nueva ya en la mano: son 8 como mucho por sitio, y dejar las
+    // viejas colgando acabaría llenando el cupo. Este es el ÚNICO borrado que se
+    // hace con un UUID bueno —el que guardamos al persistir— porque los de
+    // `persistentAnchors` vienen vacíos; que fallara en silencio es lo que dejó
+    // que se acumularan nueve sin que nadie se enterara.
+    if (old && old !== id && session.deletePersistentAnchor)
+      session.deletePersistentAnchor(old)
+        .then(() => {
+          arLogAdd(`previous anchor deleted (${old})`);
+          const ids = loadAnchorIds().filter(x => x !== old);
+          try { localStorage.setItem(arAnchorIdsKey(), JSON.stringify(ids)); } catch (_) { /* modo privado */ }
+        })
+        .catch(e => arLogAdd(`could not delete the previous one (${old})`, e));
+    arNotice('Room anchored: no need to do this again');
+  } catch (e) {
+    const name = (e && (e.name || e.message)) ? (e.name || e.message) : String(e);
+    const n = session.persistentAnchors ? session.persistentAnchors.length : '?';
+    arLogAdd(`failed to ${step}, ${n} persistent`, e);
+    console.warn(`[ar] fallo al ${step} el ancla (${n} persistentes):`, e);
+    // Cupo lleno: se barren las anclas del sitio y se reintenta. No se mira QUÉ
+    // error fue: el runtime lo llama InvalidStateError, pero atar la limpieza a
+    // ese nombre exacto ya falló una vez —basta con que la excepción no traiga
+    // `name`— y el barrido no estropea nada si la causa era otra, porque el
+    // reintento vuelve a crear la única ancla que este sitio usa.
+    //
+    // El reintento no puede ser aquí: tras el await `frame` ya está muerto y
+    // createAnchor exige uno vivo, así que lo recoge el bucle en el frame
+    // siguiente. Una vez por sesión: si tras limpiar sigue fallando, la causa es
+    // otra y repetir solo taparía el error de verdad.
+    if (step === 'persist the anchor' && !arAnchorPruned) {
+      arAnchorPruned = true;
+      // Sin `keep`: la creación acaba de fallar, así que no hay ancla nueva que
+      // proteger y todo lo nuestro sobra. Las nuestras primero porque con el cupo
+      // lleno son las únicas que se pueden liberar de verdad — las de la lista
+      // del runtime vienen sin UUID. Un UUID solo se olvida cuando el runtime
+      // confirma el borrado: tirarlo antes deja esa ancla en el cupo para
+      // siempre, sin nadie que sepa ya su identificador.
+      const propias = await pruneOwnAnchors(session, null);
+      const { ok: ajenas, fail, why, err } = propias.ok
+        ? { ok: 0, fail: 0, why: '', err: '' }
+        : await pruneOrphanAnchors(session, null);
+      const ok = propias.ok + ajenas;
+      if (ok) { arAnchorRedo = true; arNotice(`Quota full (${n}): ${ok} deleted, retrying`); }
+      else arNotice(`Could not ${step}: ${name} · ${n} anchors · delete: ${why || err || fail + ' failures'}`);
+    } else {
+      arNotice(`Could not ${step}: ${name} · ${n} anchors`);
+    }
+  } finally {
+    arAnchorPending = false;
+  }
 }
 
 // Coloca un objeto por stem alrededor del usuario (usando su az/el) y lo vincula
@@ -1338,24 +2461,29 @@ function buildARSources() {
   // colocada (si no, el primer frame suena en el sitio equivocado).
   applyARCalib(loadARCalib());
   roomGroup.updateMatrixWorld(true);
-  const D2R = Math.PI / 180;
   stemDefs.forEach((s, i) => {
-    const az = (s.azimuthDeg || 0) * D2R, el = (s.elevationDeg || 0) * D2R;
-    const ce = Math.cos(el), se = Math.sin(el);
-    // misma convención que el motor: frente = −Z, izquierda = −X, arriba = +Y.
-    const dir = [-ce * Math.sin(az), se, -ce * Math.cos(az)];
     const m = makeSourceMarker(s.name);
-    m.position.set(dir[0] * AR_RADIUS, AR_HEIGHT + dir[1] * AR_RADIUS, dir[2] * AR_RADIUS);
+    const p = arPosition(s);
+    m.position.fromArray(p);
     roomGroup.add(m);
     m.updateMatrixWorld(true);          // matrixWorld válido antes de leerla en bind
     engine.bindStemToObject(i, m);
     arSources.push(m);
+    // Después del bind: la malla es decorado y no debe estar en el camino de lo
+    // que suena. `-p[1]` baja del punto de audio al suelo de la sala.
+    attachMeshTo(m, s.mesh || arCfg.mesh, -p[1]);
   });
 }
 
 function clearARSources() {
   for (const m of arSources) roomGroup.remove(m);
   arSources = [];
+  // Fuera las luces con las mallas: en el 360 no hay nada que iluminar y una luz
+  // de más es trabajo del shader por cada fotograma que nadie ve. El entorno se
+  // suelta igual (la textura sigue cacheada: volver a AR no la reconstruye).
+  if (arLights) { scene.remove(arLights); scene.environment = null; }
+  // El foco indexa este array: dejarlo vivo señalaría a un músico que ya no está.
+  resetARFocus();
   // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,
   // que es la geometría del 360 al que estamos regresando
   if (engine) for (let i = 0; i < engine.stemCount; i++) engine.unbindStem(i);
@@ -1368,16 +2496,25 @@ async function enterAR() {
 
     arSession = await navigator.xr.requestSession('immersive-ar', {
       requiredFeatures: ['local-floor'],
-      optionalFeatures: ['hand-tracking'],
+      // 'anchors': el ancla persistente de sala (ver restoreRoomAnchor). Va en
+      // opcionales para no dejar sin AR a un runtime que no la traiga: sin ella
+      // se cae a la calibración a mano, que sigue entera.
+      optionalFeatures: ['hand-tracking', 'anchors'],
     });
+    // Lo primero a descartar cuando la sala no vuelve a su sitio: sin 'anchors'
+    // concedida no hay nada que persistir, y como va en optionalFeatures la
+    // sesión arranca igual sin decir ni pío.
+    const arFeats = arSession.enabledFeatures ? Array.from(arSession.enabledFeatures) : null;
+    console.log('[ar] features:', arFeats ? arFeats.join(' ') : 'no expuestas');
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(arSession);
-    if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.start(); }
+    // 'room': mismo marco que stem.ar y que las posiciones que publicarán las cámaras.
+    if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room'; telemetry.start(); }
     renderer.setClearAlpha(0);                    // deja ver el passthrough
     document.getElementById('ar-btn').textContent = 'EXIT AR';
 
     if (sphere) sphere.visible = false;           // el mundo real sustituye al 360
-    if (closeupMesh) { closeupMesh.visible = false; closeupStem = -1; }   // sin close-ups en AR
+    resetCloseup();                               // sin close-ups en AR
 
     // En AR cada fuente debe oírse desde su sitio (no solo al "mirar + zoom"):
     // subimos restGain a tope y anulamos el boost por zoom; la espacialización y
@@ -1394,16 +2531,40 @@ async function enterAR() {
       engine.setSpotlightParams({ restGain: 1 });
       engine.setBedLevel(arCfg.bedGain != null ? arCfg.bedGain : AR_BED_GAIN);
     }
+    // Después del bloque de arriba: los dos escriben ganancias en el motor, y
+    // hacerlo antes sería calcularlas con el restGain del 360 para pisarlas acto
+    // seguido. El foco arranca suelto en cada sesión: entrar en AR no debe heredar
+    // al músico que se estuviera mirando en la anterior.
+    loadARFocusCfg();                             // ar.focus de la escena, si lo trae
+    resetARFocus();
+    // Sin await: no hay pose de ancla que leer hasta que haya un XRFrame, así
+    // que la sala arranca con el {x,z,yaw} guardado y el bucle la corrige en
+    // cuanto el ancla esté. Un frame en el sitio viejo no lo ve nadie.
+    restoreRoomAnchor(arSession);
     buildARSources();
 
     arSession.addEventListener('end', () => {
+      // ?arperf=1: el resumen se enseña aquí, que es cuando vuelve a haber pantalla.
+      // Salir con un aviso en pantalla dejaría el sprite colgado en el 360.
+      arNoticeUntil = 0;
+      arPerfPanelClear();
+      arLogDump();       // sin depender de ?arperf=1: esto es lo que hay que leer
+      if (ARPERF) {
+        arPerfDump();
+        console.log('[arperf] ventanas:', window.__arperf);
+      }
       telemetry?.stop();
+      // Vuelve la esfera, así que vuelve a hacer falta la imagen.
+      if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
       if (arCalibrating) { saveARCalib(); arCalibrating = false; }   // salir con el grip apretado
-      clearARSources();
+      resetARFocus();          // suelta el realce: el músico enfocado no puede
+      clearARSources();        // seguir 6 dB arriba en el 360 al que se vuelve
       renderer.setClearAlpha(1);
       if (sphere) sphere.visible = true;
       if (engine && arPrevSpot) engine.setSpotlightParams(arPrevSpot);
       if (engine && arPrevBed != null) engine.setBedLevel(arPrevBed);
+      arAnchor = null; arAnchorPending = false;   // el XRAnchor muere con la sesión
+      arAnchorPruned = false; arAnchorRedo = false; arAnchorTries = 0; arAnchorLogged = false;
       arSession = null;
       document.getElementById('ar-btn').textContent = 'AR';
       renderer.setAnimationLoop(null);
@@ -1411,28 +2572,80 @@ async function enterAR() {
     });
 
     renderer.setAnimationLoop((time, frame) => {
-      if (videoEl && videoEl.readyState >= 2 && videoTexture) videoTexture.needsUpdate = true;
+      // La esfera del 360 está oculta en passthrough, así que su textura no se
+      // dibuja: marcarla sucia cada frame solo sirve para que el día que se
+      // vuelva a ver suba un fotograma viejo. El <video> sigue corriendo igual
+      // (es el mismo elemento del que sale el audio).
+      if (sphere && sphere.visible && videoEl && videoEl.readyState >= 2 && videoTexture)
+        videoTexture.needsUpdate = true;
+      const _p0 = ARPERF ? performance.now() : 0;
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
-          updateARCalib(frame.session, pose);                     // recolocar la sala (grip + joysticks)
+          updateARCalib(frame, refSpace, pose);                   // recolocar la sala (grip + joysticks)
+          // El ancla manda salvo mientras la mano la está moviendo.
+          if (!arCalibrating) followRoomAnchor(frame, refSpace);
+          // La sala solo se mueve mientras se calibra, y es entonces cuando su
+          // matriz tiene que estar al día en el propio frame: la leen worldToLocal
+          // y los panners, que siguen la matrixWorld de los marcadores. El resto
+          // del tiempo ya la refresca el render, y forzarla aquí era repetir el
+          // recorrido del subárbol 72 veces por segundo para nada.
+          if (arCalibrating) roomGroup.updateMatrixWorld(true);
           engine?.update();                                       // panners siguen a los objetos anclados
+          const _p1 = ARPERF ? performance.now() : 0;
 
-          // Telemetría: pose de cabeza en AR passthrough (sin zoom/foco).
-          telemetry?.sample(pose.transform.position, pose.transform.orientation,
-                            0, -1, videoEl?.currentTime || 0);
+          // Telemetría: pose de cabeza en coordenadas de sala + músico mirado.
+          // El zoom sigue siendo 0: en AR no existe, y mandar otra cosa mentiría
+          // al consumidor sobre en qué rango leer `z`.
+          const [tp, tq] = arTelemetryPose(pose);
+          telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
+          if (ARPERF) {
+            _perf.audio += _p1 - _p0; _perf.focus += performance.now() - _p1;
+          }
+          // El panel sigue a la cabeza mientras haya algo que enseñar: el
+          // informe de ?arperf=1, o un aviso hasta que caduque.
+          if (ARPERF || arNoticeUntil) arPerfPanelPlace(pose);
+          if (arNoticeUntil && performance.now() > arNoticeUntil) {
+            arNoticeUntil = 0;
+            if (!ARPERF) arPerfPanelClear();   // con ?arperf=1 el panel se queda
+          }
         }
       }
-      updateAmbiViz();
+      // Sin updateAmbiViz(): es un canvas 2D del HUD de la página, que en sesión
+      // inmersiva no se compone y por tanto nadie ve. Cuesta cuatro lecturas de
+      // analyser y un bucle sobre el buffer entero (getDominantDirection) en cada
+      // frame, en el hilo principal, para no dibujar nada. Al salir de AR vuelve
+      // el bucle de escritorio y se repinta solo.
+      const _p2 = ARPERF ? performance.now() : 0;
       renderer.render(scene, camera);
+      if (ARPERF) {
+        const end = performance.now(), total = end - _p0;
+        _perf.render += end - _p2; _perf.sum += total; _perf.n++;
+        if (total > _perf.worst) {
+          _perf.worst = total;
+          // El reparto del PEOR frame es lo que dice dónde se fue el tiempo.
+          _perf.worstAt = `audio ${(_p2 - _p0).toFixed(1)} / render ${(end - _p2).toFixed(1)}`;
+        }
+        arPerfReport(end);
+      }
     });
 
     if (videoEl) videoEl.play();
     if (audioEl) audioEl.play().catch(() => {});
     if (audioCtx) audioCtx.resume();
     toast(`AR · ${arSources.length} fuentes · grip + joystick para alinear la sala`);
+    // El panel no tiene nada que enseñar hasta cerrar la primera ventana de 2 s.
+    // Sin este cartel, esos dos segundos se leen como "?arperf=1 no funciona".
+    if (ARPERF) { arPerfPanelDraw(['[arperf] measuring…', '', 'first window in 2 s', '']); }
+    // Después de arrancar la sesión: la recarga corta el audio un instante y es
+    // menos molesta con el passthrough ya puesto que retrasando la entrada.
+    if (AR_CUT_VIDEO) {
+      setVideoDisabled(true)
+        .then(() => toast('vídeo 360 desactivado en AR'))
+        .catch(e => { console.warn('[ar] cortar vídeo:', e); toast('no se pudo cortar el vídeo: ' + e.message); });
+    }
 
   } catch (e) {
     toast('Error WebXR AR: ' + e.message);

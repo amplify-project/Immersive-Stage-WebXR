@@ -1,12 +1,14 @@
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn, execFile } = require('child_process');
 
 const PORT = process.env.PORT || 60000;
 const ROOT = __dirname;
 const MEDIA_DIR = path.join(ROOT, 'media');
+const MESH_DIR = path.join(ROOT, 'meshes');
 const SCENE_FILE = path.join(ROOT, 'scene.json');
 
 const MIME = {
@@ -29,6 +31,12 @@ const MIME = {
   '.jpg':  'image/jpeg',
   '.svg':  'image/svg+xml',
   '.ico':  'image/x-icon',
+  // Mallas de los músicos (scene.json → stems[i].mesh). Con octet-stream también
+  // cargarían —GLTFLoader lee el cuerpo como ArrayBuffer y no mira la cabecera—,
+  // pero un tipo correcto es lo que hace que se cacheen y se depuren como es debido.
+  '.glb':  'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.bin':  'application/octet-stream',
 };
 
 const VIDEO_EXT = ['.mp4', '.mov', '.webm', '.mkv', '.m4v'];
@@ -146,6 +154,111 @@ function probeChannels(file) {
   });
 }
 
+// Cuántas entradas devuelve /api/browse por carpeta. Un directorio con miles de
+// ficheros no se navega en un desplegable, y mandarlo entero solo sirve para
+// hacer esperar al navegador.
+const BROWSE_MAX = 500;
+
+// Destino libre dentro de media/ para un fichero llamado `base`.
+//
+// Si ya hay uno con ese nombre y el MISMO tamaño damos por hecho que es el mismo
+// fichero y se reutiliza: la alternativa es duplicar medios de gigabytes cada vez
+// que alguien vuelve a elegir el mismo vídeo. Si el tamaño no cuadra es OTRO
+// fichero que se llama igual, y entonces se numera — machacar un medio que ya
+// está en una escena sería estropear el trabajo de alguien sin preguntar.
+function destInMedia(base, size) {
+  const ext  = path.extname(base);
+  const stem = base.slice(0, base.length - ext.length);
+  for (let n = 1; n < 1000; n++) {
+    const name = n === 1 ? base : `${stem}-${n}${ext}`;
+    const full = path.join(MEDIA_DIR, name);
+    let st; try { st = fs.statSync(full); } catch (_) { return { full, name, exists: false }; }
+    if (st.isFile() && st.size === size) return { full, name, exists: true };
+  }
+  throw new Error(`demasiados ficheros llamados ${base} en media/`);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Mallas de los músicos (scene.json → stems[i].mesh). Viven en meshes/, no en
+//  media/: no son material de la toma, son la representación del músico, y el
+//  editor las lista por separado porque se eligen en otro sitio y otro momento.
+// ════════════════════════════════════════════════════════════════════════════
+const MESH_EXT = ['.glb'];
+const MESH_MAX_BYTES = 64 * 1024 * 1024;
+
+function listMeshes() {
+  let files = [];
+  try { files = fs.readdirSync(MESH_DIR); } catch (_) { /* aún no existe */ }
+  return files
+    .filter(f => !f.startsWith('.') && MESH_EXT.includes(path.extname(f).toLowerCase()))
+    .map(f => {
+      let st; try { st = fs.statSync(path.join(MESH_DIR, f)); } catch (_) { return null; }
+      return st.isFile() ? { file: 'meshes/' + f, name: f, size: st.size } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Nombre de fichero seguro a partir de lo que mande el navegador. Se queda con el
+// basename y tira todo lo que no sea alfanumérico: el nombre viaja en la URL y
+// acaba en una ruta del disco, así que un "../../algo" no puede llegar a fs.
+function safeMeshName(raw) {
+  const base = path.basename(String(raw || '')).replace(/[^\w.-]+/g, '_');
+  const ext = path.extname(base).toLowerCase();
+  if (!MESH_EXT.includes(ext)) return null;
+  const stem = base.slice(0, -ext.length).replace(/^[.]+/, '') || 'mesh';
+  return stem.slice(0, 80) + ext;
+}
+
+// Cuerpo binario a fichero. No usa readBody() a propósito: aquél acumula texto y
+// corta a 5 MB, que es lo correcto para una escena JSON y absurdo para un GLB.
+function saveMeshUpload(req, dest, maxBytes) {
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(MESH_DIR, { recursive: true });
+    const tmp = dest + '.part';                  // el editor lista este directorio:
+    const out = fs.createWriteStream(tmp);       // un fichero a medias no debe aparecer
+    let size = 0, failed = false;
+    // Un WriteStream que falla emite 'error', y sin oyente eso NO es una promesa
+    // rechazada: es un throw que se lleva por delante el proceso entero. El
+    // servidor del player se caería —para todos— por una subida de más.
+    out.on('error', () => { /* ya se está abortando; el fichero se borra abajo */ });
+    const abort = (err, statusCode) => {
+      if (failed) return; failed = true;
+      err.statusCode = statusCode;
+      out.destroy(); fs.unlink(tmp, () => {});
+      // Sin req.destroy(): la petición se sigue drenando hasta 'end' para que la
+      // respuesta de error llegue de verdad al editor. Matar el socket aquí deja
+      // al navegador con una conexión caída y sin motivo que enseñar.
+      reject(err);
+    };
+    req.on('data', c => {
+      if (failed) return;                        // el stream ya no existe: escribir aquí era el crash
+      size += c.length;
+      if (size > maxBytes) return abort(new Error(`la malla pasa de ${Math.round(maxBytes / 1048576)} MB`), 413);
+      out.write(c);
+    });
+    req.on('error', e => abort(e, 400));
+    req.on('end', () => {
+      if (failed) return;
+      out.end(() => {
+        // glTF binario empieza por el magic "glTF". Comprobarlo aquí evita que un
+        // .zip renombrado se quede en el disco y falle luego dentro de las gafas,
+        // que es el peor sitio para enterarse.
+        let head = Buffer.alloc(4);
+        try { const fd = fs.openSync(tmp, 'r'); fs.readSync(fd, head, 0, 4, 0); fs.closeSync(fd); } catch (_) {}
+        if (head.toString('latin1') !== 'glTF') {
+          fs.unlink(tmp, () => {});
+          const e = new Error('no es un .glb (falta la cabecera glTF)');
+          e.statusCode = 415;
+          return reject(e);
+        }
+        fs.renameSync(tmp, dest);
+        resolve(size);
+      });
+    });
+  });
+}
+
 async function listMedia() {
   let files = [];
   try { files = fs.readdirSync(MEDIA_DIR); } catch (_) {}
@@ -169,10 +282,15 @@ async function listMedia() {
 //  (la de producción, con la Insta360 y la X32 conectadas), no en el navegador.
 //    vídeo → v4l2 (/dev/video*)   ·   audio → ALSA (hw:CARD,DEV con nº canales)
 // ════════════════════════════════════════════════════════════════════════════
+// LC_ALL/LANG=C: `arecord -l` está traducido, y en una máquina en italiano o en
+// español imprime "scheda"/"tarjeta" en vez de "card". El parser de más abajo no
+// casa nada y la lista de dispositivos ALSA sale vacía sin ningún error — mientras
+// el vídeo sigue funcionando, porque v4l2-ctl no está localizado. Fijamos el locale
+// solo para los comandos que enumeramos.
 function run(cmd, args) {
   return new Promise(res => {
-    execFile(cmd, args, { timeout: 5000 }, (err, out, errout) =>
-      res(err ? '' : String(out || '') + String(errout || '')));
+    execFile(cmd, args, { timeout: 5000, env: { ...process.env, LC_ALL: 'C', LANG: 'C' } },
+      (err, out, errout) => res(err ? '' : String(out || '') + String(errout || '')));
   });
 }
 
@@ -235,6 +353,129 @@ async function handleAPI(req, res, pathname) {
     // ── Medios disponibles ──────────────────────────────────────────────────
     if (pathname === '/api/media' && req.method === 'GET') {
       return sendJSON(res, 200, { media: await listMedia() });
+    }
+
+    // ── Explorador de ficheros DE LA MÁQUINA DEL SERVER ─────────────────────
+    //  Mismo principio que /api/devices: el editor puede estar en otro equipo,
+    //  pero lo que se va a encodear tiene que estar donde está ffmpeg. Un
+    //  <input type="file"> elige en la máquina del NAVEGADOR, así que para dejar
+    //  un vídeo en la carpeta de al lado habría que subirlo entero por HTTP;
+    //  aquí solo viaja la ruta y la copia la hace quien tiene el fichero al lado.
+    //
+    //  Esto enseña el árbol de directorios a quien alcance el editor. Es el mismo
+    //  trato que ya hay con /api/encode (que lanza ffmpeg) y /api/devices: este
+    //  backend asume una red de confianza y no debe exponerse a internet.
+    if (pathname === '/api/browse' && req.method === 'GET') {
+      const q = new URL(req.url, 'http://x').searchParams.get('dir');
+      const dir = q ? path.resolve(q) : os.homedir();
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch (e) { return sendJSON(res, 400, { error: `No se puede leer ${dir}: ${e.code || e.message}` }); }
+
+      const dirs = [], files = [];
+      for (const d of entries) {
+        if (d.name.startsWith('.')) continue;
+        const full = path.join(dir, d.name);
+        // Por stat y no por dirent: un enlace simbólico dice "symlink", no si
+        // lleva a una carpeta o a un vídeo. Lo que no se pueda mirar (roto, sin
+        // permiso) simplemente no aparece, que es mejor que romper el listado.
+        let st; try { st = fs.statSync(full); } catch (_) { continue; }
+        if (st.isDirectory()) { dirs.push({ name: d.name, path: full }); continue; }
+        if (!st.isFile()) continue;
+        const ext = path.extname(d.name).toLowerCase();
+        const kind = VIDEO_EXT.includes(ext) ? 'video' : AUDIO_EXT.includes(ext) ? 'audio' : null;
+        if (!kind) continue;              // solo medios: lo demás no se puede encodear
+        files.push({ name: d.name, path: full, kind, size: st.size });
+      }
+      const cmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
+      dirs.sort(cmp); files.sort(cmp);
+
+      const parent = path.dirname(dir);
+      return sendJSON(res, 200, {
+        path: dir,
+        parent: parent === dir ? null : parent,   // en la raíz no hay "subir"
+        home: os.homedir(),
+        mediaDir: MEDIA_DIR,
+        dirs: dirs.slice(0, BROWSE_MAX),
+        files: files.slice(0, BROWSE_MAX),
+        truncated: dirs.length > BROWSE_MAX || files.length > BROWSE_MAX,
+      });
+    }
+
+    // ── Traerse un medio a media/ ───────────────────────────────────────────
+    //  Se elige de cualquier sitio, pero solo se escribe aquí: es la carpeta que
+    //  lee listMedia() y la única ruta que las escenas saben nombrar.
+    if (pathname === '/api/media/import' && req.method === 'POST') {
+      const { src } = await readBody(req);
+      if (!src) return sendJSON(res, 400, { error: 'Falta src' });
+      const from = path.resolve(src);
+
+      let st; try { st = fs.statSync(from); }
+      catch (_) { return sendJSON(res, 404, { error: `No existe: ${from}` }); }
+      if (!st.isFile()) return sendJSON(res, 400, { error: 'No es un fichero' });
+
+      const ext = path.extname(from).toLowerCase();
+      if (!VIDEO_EXT.includes(ext) && !AUDIO_EXT.includes(ext))
+        return sendJSON(res, 400, { error: `Extensión no admitida: ${ext || '(sin extensión)'}` });
+
+      // Ya está dentro: no se copia nada. Pasa en cuanto alguien navega hasta la
+      // propia media/ desde el explorador, que es lo más natural del mundo.
+      if (from.startsWith(MEDIA_DIR + path.sep)) {
+        const name = path.basename(from);
+        return sendJSON(res, 200, { ok: true, file: 'media/' + name, name, size: st.size, copied: false });
+      }
+
+      // El nombre sale del origen, pero limpio: sin separadores (no queremos que
+      // el nombre invente subcarpetas) y sin puntos delante (listMedia() los
+      // salta, así que el fichero se copiaría para no aparecer luego en la lista).
+      const base = path.basename(from).replace(/[/\\]/g, '_').replace(/^\.+/, '') || ('media' + ext);
+      try {
+        const dest = destInMedia(base, st.size);
+        if (!dest.exists) {
+          fs.mkdirSync(MEDIA_DIR, { recursive: true });
+          // COPYFILE_FICLONE: en Btrfs/XFS esto es un reflink —instantáneo y sin
+          // ocupar el doble— y en el resto degrada a una copia normal.
+          await fs.promises.copyFile(from, dest.full, fs.constants.COPYFILE_FICLONE);
+        }
+        console.log(`[media] ${dest.exists ? 'ya estaba' : 'copiado'}: ${from} → media/${dest.name}` +
+                    ` (${(st.size / 1e6).toFixed(1)} MB)`);
+        return sendJSON(res, 200, { ok: true, file: 'media/' + dest.name, name: dest.name,
+                                    size: st.size, copied: !dest.exists });
+      } catch (e) {
+        return sendJSON(res, 500, { error: `No se pudo copiar: ${e.message}` });
+      }
+    }
+
+    // ── Mallas de los músicos ───────────────────────────────────────────────
+    if (pathname === '/api/meshes' && req.method === 'GET') {
+      return sendJSON(res, 200, { meshes: listMeshes() });
+    }
+    // Subida cruda: el nombre va en la query y el GLB en el cuerpo. Sin multipart
+    // a propósito — es UN fichero, y parsearlo a mano (o traerse una dependencia)
+    // para envolverlo sería trabajo de más para el mismo resultado.
+    if (pathname === '/api/mesh' && req.method === 'POST') {
+      const name = safeMeshName(new URL(req.url, 'http://x').searchParams.get('name'));
+      if (!name) return sendJSON(res, 400, { error: 'Nombre no válido: se admite .glb' });
+      try {
+        const size = await saveMeshUpload(req, path.join(MESH_DIR, name), MESH_MAX_BYTES);
+        console.log(`[mesh] ${name} (${(size / 1e6).toFixed(1)} MB)`);
+        return sendJSON(res, 200, { ok: true, file: 'meshes/' + name, name, size });
+      } catch (e) {
+        return sendJSON(res, e.statusCode || 400, { error: e.message });
+      }
+    }
+
+    // ── Registro del ancla de AR ────────────────────────────────────────────
+    // El player lo manda al salir de AR. Dentro del casco el error se lee en un
+    // cartel de 32 columnas que dura 4 s, y la consola del navegador del Quest
+    // solo se alcanza por chrome://inspect: sacarlo por aquí lo pone en el
+    // terminal del PC, que es donde se está mirando de todas formas.
+    if (pathname === '/api/arlog' && req.method === 'POST') {
+      const { log } = await readBody(req);
+      console.log('\n[arlog] ── anchor log ' + '─'.repeat(46));
+      console.log(String(log || '').split('\n').map(l => '[arlog] ' + l).join('\n'));
+      console.log('[arlog] ' + '─'.repeat(58) + '\n');
+      return sendJSON(res, 200, { ok: true });
     }
 
     // ── Dispositivos de captura para LIVE (v4l2 + ALSA) ─────────────────────
@@ -567,7 +808,10 @@ const handler = (req, res) => {
     // Código del player/editor: no cachear, o el navegador sirve una versión
     // vieja tras editar (ya pasó: "sigue igual" = index.html cacheado). Los
     // segmentos de media (.m4s/.webm/.mp4) sí se pueden cachear con normalidad.
-    const noCache = ['.html', '.js', '.mjs', '.css', '.json'].includes(ext);
+    // .glb entra aquí con el código, y no con los segmentos: una malla se sustituye
+    // mientras se ajusta la escena, siempre con el mismo nombre, y un modelo viejo
+    // servido de caché se depura dentro de las gafas creyendo que es el nuevo.
+    const noCache = ['.html', '.js', '.mjs', '.css', '.json', '.glb', '.gltf'].includes(ext);
     const total = stat.size;
     const range = req.headers.range;
     if (range) {

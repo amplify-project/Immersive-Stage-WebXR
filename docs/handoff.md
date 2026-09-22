@@ -26,14 +26,36 @@ no GPU for video, no A/V drift to manage.
 `index.html` (`enterAR()` / `buildARSources()`) + the engine:
 
 - `immersive-ar` session with passthrough (`renderer.setClearAlpha(0)`, 360
-  sphere hidden).
-- One 3D marker per musician (wireframe ball + name label), placed **around the
-  user by azimuth/elevation** at a fixed radius (`AR_RADIUS = 1.6 m`,
-  `AR_HEIGHT = 1.3 m`).
+  sphere hidden **and no longer decoded** — entering AR reloads the source with
+  `manifest.disableVideo`, so the paragraph above is now true at runtime and not
+  only on paper; see [`core-api.md`](core-api.md) §7).
+- One 3D marker per musician (wireframe ball + name label), placed at its **room
+  point in metres** — `stem.ar = {x, y, z}` in `scene.json`, authored in the
+  editor's *AR room* panel, and the same frame the cameras will publish into.
+  A stem without that block falls back to its **360 direction projected onto a
+  sphere** (`AR_RADIUS = 1.6 m`, `AR_HEIGHT = 1.3 m`, `arPosition()` in
+  `player.js`): a scene that was never placed still sounds like something, with
+  everyone at the same invented distance.
+
+  > The 360 sphere and the room are **not the same model**. In VR the listener
+  > sits at the centre and a stem is a *direction* — distance is not heard,
+  > because an unanchored source always rides `_stemRadius`. In AR the spectator
+  > walks among the sources, so distance and height above the floor are heard and
+  > have to be real. That is why placement is authored twice, and why `ar` is a
+  > separate block rather than a reinterpretation of `azimuthDeg`/`elevationDeg`.
 - Each marker bound to its stem: `engine.bindStemToObject(i, marker)` +
   `engine.update()` per frame → the HRTF `PannerNode` follows the object, with
   natural distance attenuation.
 - Head moves through the room (`engine.setRotationFromMatrix4(pose.transform.matrix)`).
+- **Focus by sustained gaze.** No zoom exists in AR, so the musician being
+  attended to is the one held near the centre of view for `dwellMs`
+  (`engine.getGazedStem` + the dwell/hysteresis in `updateARFocus`). Three things
+  hang off that one verdict: their marker turns amber, their stem is raised by
+  `ar.focus.boostDb` (with the rest optionally lowered by `duckDb`, via
+  `engine.setFocusParams`), and the index travels in the telemetry `f` field, in
+  the same room frame as everything else. Sight and sound commit together on
+  purpose — what lights up is what got louder, so both are tuned in one pass with
+  the headset on. Tunable per venue in `scene.json` → `ar.focus`.
 - The FOA bed drops to `scene.json` → `ar.bedGain` (default `0.35`) via
   `engine.setBedLevel()`, and back to its old level on exit. The bed is the whole
   concert, musicians included: at full level it competes with the real room and
@@ -62,19 +84,120 @@ Nothing is computed today: holding the **grip**, the left stick translates and t
 right stick rotates the room until the wireframe markers sit on the real
 musicians (pressing a stick resets). Rotation is applied **around the head**, not
 around the group origin — otherwise the scene orbits an arbitrary point and
-alignment is impossible. Releasing the grip stores the three numbers in
-`localStorage` under `arCalib:<ar.venue|default>`, so the next session starts
-aligned. Tolerance is generous: the ear resolves ~5-10° off-axis, ~40 cm at 3 m.
+alignment is impossible. Tolerance is generous: the ear resolves ~5-10° off-axis,
+~40 cm at 3 m.
 
 This is the same mechanism Case C drives later — the cameras just set those three
 numbers instead of the hand, and everything downstream is unchanged.
 
+For **two spectators in the same room** this is as good as two people eyeballing
+the same floor mark, and no better: each headset still measures from its own
+origin. The way out of that is a shared coordinate system from the runtime, which
+the Quest browser offers experimentally — researched, untested, and written up with
+its traps in [`shared-spaces.md`](shared-spaces.md).
+
+### Persistence: the room anchor
+
+Releasing the grip stores the three numbers in `localStorage` under
+`arCalib:<ar.venue|default>`, but **that alone does not survive a restart**: they
+are measured from the `local-floor` origin, which lands wherever the session
+started. Next launch that origin is somewhere else and the same `{x,z,yaw}` puts
+the room anywhere. They need a *physical* reference to hang off.
+
+The Quest Browser provides one. The **first** time a room is aligned the player
+calls `frame.createAnchor()` at the room transform and `requestPersistentHandle()`,
+storing the returned UUID under `arAnchorId:<ar.venue|default>`. On the next AR
+session `restorePersistentAnchor()` returns an anchor **at the same real-world
+spot** — the headset re-localizes it against its own map of the room (the Space
+Setup the user already did) — and `followRoomAnchor()` drives `roomGroup` from
+its pose. So each headset is aligned by hand **once per room, ever**.
+
+The anchor is a *physical point of the room*, not the alignment. Where the scene
+sits with respect to that point is a separate thing, and it is the one that
+changes on every re-alignment: releasing the grip with an anchor already in place
+does **not** create another one, it recomputes the offset `{dx,dz,dyaw}` — the
+room read *from* the anchor — and stores it under `arAnchorOff:<ar.venue|default>`.
+`followRoomAnchor()` composes anchor ∘ offset every frame and `saveRoomOffset()`
+is its exact inverse, so re-aligning costs three numbers in `localStorage`.
+
+Keeping the two apart is not tidiness, it is what makes this usable at all. A site
+may hold **8 persistent anchors**, and one anchor per grip release burns that in a
+single afternoon of testing. With the quota full `requestPersistentHandle()` fails
+with `InvalidStateError: Maximum number of anchors reached!` and **the page cannot
+dig itself out**: on Quest `XRSession.persistentAnchors` returns the right number
+of entries with **empty UUIDs**, so `deletePersistentAnchor()` has nothing to
+delete and answers `OperationError` once per anchor. The [spec][anchors-spec]
+requires that list to carry the keys of the persistent-anchor map, so this looks
+like a browser bug — and note that [Meta's own documentation][meta-mr] documents
+neither of those two members, only `createAnchor`, `requestPersistentHandle` and
+`restorePersistentAnchor`. The only usable UUIDs are the ones we stored
+ourselves when persisting.
+
+Recovery is documented by Meta: **clearing the site's history deletes the
+persistent anchors**. That clears `localStorage` too, so the room gets aligned one
+more time afterwards. Serving the player from another origin (a different port)
+also gives a fresh quota, at the same cost.
+
+That manual step should never be needed again, because deleting *does* work with
+a valid UUID — the ones we mint ourselves. Every UUID ever persisted is kept in
+`arAnchorIds:<ar.venue|default>`, not just the current one, and a UUID is dropped
+from that list only once the runtime confirms its deletion. So anything this site
+created stays deletable, even if the delete failed the day it was made or the
+session died between creating and replacing. `pruneOwnAnchors()` sweeps the list
+on entering AR and again if the quota ever refuses a new anchor. What cannot be
+recovered is what a *previous* build left behind without recording its UUID: for
+those, clearing the site's history is the only way, since the spec's enumeration
+is the part Quest gets wrong.
+
+This is also what makes several spectators share one mixed world without talking
+to each other: if every headset anchored once to the same physical spot, they all
+agree on every launch — no shared channel, no server, no cameras. Meta's
+cross-device *shared* spatial anchors are **not** exposed to WebXR; the trick is
+precisely that each headset persists on its own against the same place.
+
+`followRoomAnchor()` runs every frame, which is what absorbs reference-space
+`reset` events (recentering, taking the headset off): those move the session
+origin, not the anchor, so the room stays put instead of jumping. Only X, Z and
+yaw are taken from the anchor — the 4-DoF argument above still holds, and
+inheriting a couple of degrees of anchor tilt would skew the room for nothing.
+
+Expect the room to land a few centimetres off from one session to the next. The
+headset re-localizes the anchor against a map of the room it rebuilds every time,
+and that map is not identical twice — light changes, furniture moves, people walk
+in. WebXR exposes nothing to sharpen it; it is the precision the runtime gives.
+Nudging it back is cheap, though, since a re-alignment only rewrites the offset.
+
+**State, as of 2026-08-21.** Verified on the headset: the room comes back on a
+reload, on a new session and after closing the browser, landing within a few
+centimetres. Re-aligning no longer creates an anchor. Not yet seen with our own
+eyes: `deletePersistentAnchor()` succeeding with a valid UUID — nothing has
+needed replacing since the sweep was written. The log says which it was, so
+whoever hits it first will know without going looking.
+
+Runtime limits, all of which fall back to the thumbsticks: **8** persistent
+anchors per site (we now create exactly 1, ever), none persist in **private
+mode**, and clearing the browser's site history deletes them. `?noanchor=1` forces
+the manual path for testing; `?resetanchors=1` deletes the site's anchors on
+entering AR — those with a usable UUID, which per the bug above may be none.
+
+**Reading what happened.** None of this is visible from inside the headset:
+`toast()` writes to the DOM and an immersive session does not compose the flat
+page, and there is no console either — which is why the first version of this
+feature reported every outcome to nobody. Each anchor step now goes to a sprite
+panel in front of the user (`arNotice()`, 4 s, reusing the `?arperf=1` panel) and
+to a log that is dumped into the page on exiting AR *and* POSTed to
+`/api/arlog`, which prints it in the terminal running `server.js`: granted
+features, the anchor list, the anchor pose, the offset and the full exception
+behind every failure. That is the loop that turned "it doesn't persist" into a
+one-line runtime bug.
+
 ### What's missing (partner work)
 
-- **Anchoring to the real world.** Beyond the manual alignment above, the markers
-  are not *tracked* to the room. Add WebXR **hit-test** + **anchors** (and/or
-  **plane / mesh detection**) so each musician sticks to a real surface. If
-  instead the positions come from an external camera rig, see **Case C**.
+- **Per-surface anchoring.** The room as a whole is anchored (see above), but
+  individual markers are not *tracked* to real surfaces. Add WebXR **hit-test**
+  (and/or **plane detection**, which on Quest exposes the Space Setup walls as
+  axis-aligned `XRPlane` rectangles) so each musician sticks to a real surface.
+  If instead the positions come from an external camera rig, see **Case C**.
 - **Interactive placement.** Drag / position *individual* markers (`roomGroup`
   moves them all as a block). `hand-tracking` is requested as an `optionalFeature`
   but is **not used** yet.
@@ -328,3 +451,6 @@ engine.setSourceParams({ distanceModel: 'inverse', refDistance: 1,
 engine.unbindStem('violin');
 ```
 | Player | `setupCloseups()` / `closeupRepByStem` and `shakaCloseup` are the multi-track + single-decoder pattern to build on. |
+
+[anchors-spec]: https://immersive-web.github.io/anchors/
+[meta-mr]: https://developers.meta.com/horizon/documentation/web/webxr-mixed-reality/

@@ -29,12 +29,32 @@ Unity are touched** — you swap the relay's internals for a Redis-backed one.
 
 ## Coordinate frame (read this)
 
-Each player's pose is in **its own `local-floor` space** — origin wherever that
-headset established the floor at session start. Poses from different players are
-**not** in a shared world. Since players are only shown in the external render
-(and don't see each other), the render places each one independently (per seat /
-per viewport). If you ever need them co-located in one scene, add a shared
-spatial anchor — that is a render-side decision, not a telemetry-pipeline one.
+Which frame `p`/`q` are in **depends on the mode**: `"local-floor"` in VR,
+`"room"` in AR. The player declares it in the `hello` (`meta.frame`) and the relay
+puts it on **every** player record it emits, snapshot and update alike, as
+`frame`. Read it rather than assuming — the day one spectator joins in AR, a
+consumer that assumes will mix two frames with no error anywhere.
+
+**VR — `local-floor`.** Origin wherever that headset established the floor at
+session start, so poses from different players are **not** in a shared world.
+That is fine here: the listener sits at the centre of the 360 sphere and never
+walks, players don't see each other, and the external render places each one
+independently (per seat / per viewport).
+
+**AR — `room`.** Passthrough is the opposite case: the spectators share one
+physical room and walk around in it. The player already holds the room→headset
+transform (`roomGroup`, the manual alignment), so it publishes the head pose with
+that transform undone — the **same frame as `stem.ar`**, the musicians' room
+coordinates in `scene.json`, and the frame the partner's cameras will publish
+into. Two headsets calibrated differently therefore report the *same* numbers for
+someone standing in the same spot, and distance from a listener to a musician is
+a subtraction. A session that never calibrated has an identity transform, so its
+poses are unchanged — `room` is then just its own `local-floor`, and the pose is
+only comparable across headsets once each has been aligned.
+
+Consumers that place players per seat keep working unchanged in VR; in AR they
+now receive co-located poses, which is what makes several spectators renderable
+in one scene without a spatial anchor of their own.
 
 ## Gaze
 
@@ -78,45 +98,124 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 
 ```jsonc
 // once, on connect
-{ "hello": "player-42", "meta": { "ua": "...", "mode": "vr" } }
+{ "hello": "player-42", "meta": { "ua": "...", "mode": "vr", "frame": "local-floor" } }
 
 // data frames (batched)
 { "b": [
-  { "t": 12345.6, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "z": 0, "f": -1 }
+  { "t": 12345.6, "w": 1785500757720, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "z": 0, "f": -1 }
 ] }
+
+// clock probe — the relay asks, the player answers at once with its own reading
+// ← { "ping": 1785500757000 }
+// → { "pong": 1785500757000, "c": 12295.4 }
 ```
 
 | field | meaning                                             |
 |-------|-----------------------------------------------------|
 | `t`   | client monotonic time (ms, `performance.now`)       |
+| `w`   | client wall clock at capture (ms, `Date.now`)       |
 | `mt`  | media presentation time (s) — what they were seeing |
-| `p`   | head position `[x,y,z]`                             |
-| `q`   | head orientation quaternion `[x,y,z,w]`            |
+| `p`   | head position `[x,y,z]`, in the frame named by `meta.frame` |
+| `q`   | head orientation quaternion `[x,y,z,w]`, same frame |
 | `z`   | zoom / attention depth, normalized `0..1`            |
 | `f`   | focused musician: index into `scene.json` → `stems` (`-1` = none) |
 | `g`   | *optional* real eye-gaze `[x,y,z]` (else omitted)   |
 
-`f` is whichever musician the spotlight weighs most (`engine.getFocusedStem`), so
-it is reported whether or not the scene defines `closeup` tracks — a viewer can
-attend to a musician without a close-up video existing for them. It stays `-1`
-until `z` is high enough for one stem to dominate, and in AR (all sources audible
-at their own place) it is always `-1`.
+`f` is derived differently in each mode, because attention is declared
+differently.
+
+**In VR** it is whichever musician the spotlight weighs most
+(`engine.getFocusedStem`, aim × zoom), reported whether or not the scene defines
+`closeup` tracks — a viewer can attend to a musician without a close-up video
+existing for them. It stays `-1` until `z` is high enough for one stem to
+dominate.
+
+**In AR** there is no zoom to declare intent (`z` is always `0`), so the signal is
+**sustained gaze**: `engine.getGazedStem` picks the musician nearest the centre of
+view — ties going to the closer one, since at 6 m a 12° cone covers 1.3 m and
+several musicians share it — and the player only reports them after the gaze has
+held for `dwellMs`, releasing after `releaseMs` outside a wider cone. The two
+cones and two timers are deliberately asymmetric: with a single threshold, `f`
+flickers between neighbouring musicians on natural head tremor, and an aggregated
+attention that jumps five times a second is noise, not data. The focus is never
+dropped while another musician is already dwelling, so a handover reads `A → B`
+and never `A → nobody → B`.
+
+Tune them per venue in `scene.json` — the right dwell depends on how far apart
+the musicians are and how far away the audience stands:
+
+```json
+"ar": { "focus": { "coneDeg": 12, "keepDeg": 22, "dwellMs": 400, "releaseMs": 350,
+                   "boostDb": 6, "duckDb": 0 } }
+```
+
+The focused musician's marker turns amber in passthrough **and** their stem is
+raised by `boostDb` (the rest dropping by `duckDb`, if set), which is how you tune
+these numbers: put the headset on and watch — and listen for — when the highlight
+commits. `f` therefore records more than attention in AR: it records what the
+listener was actually hearing louder, so a session can be read as the sequence of
+musicians each spectator chose to bring forward.
 
 ### Relay → consumer (`/consume`)
 
 ```jsonc
 // on connect: current state of every live player
-{ "type": "snapshot", "players": [ { "id": "...", "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "mt": 0 } ] }
+{ "type": "snapshot", "players": [ { "id": "...", "frame": "room", "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "w": 0, "srv": 0, "mt": 0 } ] }
 
 // live stream
-{ "type": "update", "id": "player-42", "t": 12345.6, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
+{ "type": "update", "id": "player-42", "frame": "room", "t": 12345.6, "w": 1785500757720, "srv": 1785500757719.4, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
 { "type": "leave",  "id": "player-42" }
 ```
 
 The consumer keeps a `Dictionary<id, pose>`, applies `snapshot` then `update`s,
 removes on `leave`, and **interpolates** between updates for smooth avatars
-(updates arrive ~every 1000/`rateHz` ms). Align players in time with the relay's
-receive order, not client `t` (headset clocks are unsynced).
+(updates arrive ~every 1000/`rateHz` ms). For a live render, drive it off arrival
+order: it is the freshest thing you have and one batch of lag does not show.
+
+## Putting two headsets on one time axis
+
+Use **`srv`**. It is the sample expressed on the relay's clock — the only clock
+every player shares — and it is what the recorder writes as `server_ms`.
+
+Neither of the alternatives works, and both are tempting:
+
+- **Stamping on arrival** timestamps the *batch*. Every sample in a `flushMs`
+  window lands in the same millisecond, so a recording has far fewer distinct
+  timestamps than rows, and no amount of care afterwards recovers the order
+  inside a batch.
+- **The headset's own wall clock** (`w`) is honest about the instant but not
+  about the hour: two Quests agree only as well as their NTP does, and nothing
+  in the system measures that.
+
+So the relay measures it. Every `pingMs` (2 s) it sends `ping` with its own
+clock; the player answers immediately with its monotonic reading; the relay
+knows how long the round trip took and places that reading on its own timeline —
+Cristian's algorithm, keeping the exchange with the **smallest round trip** out
+of the last 16, which is NTP's filter and for the same reason: a fast exchange
+had no time to queue up asymmetrically. The residual error is bounded by half
+that best round trip (sub-ms on the LAN in the smoke test, a few ms over Quest
+WiFi). Drift is handled by construction, since the window keeps re-measuring.
+
+`srv` is `null` until the first probe completes — one round trip after `hello`,
+so in practice only if a player sends data before answering a ping. Every
+`/ingest` client should reply to `ping`; `Telemetry.js` and the simulator do.
+
+That leaves four clocks in a recording, each with one job:
+
+| column       | what it is                          | use it for |
+|--------------|-------------------------------------|------------|
+| `server_ms`  | sample on the relay's clock (`srv`) | **anything involving more than one player** |
+| `client_ms`  | headset monotonic (`t`)             | deltas within one player — no steps, no estimate in the way |
+| `capture_ms` | headset wall clock (`w`)            | tying a session to the outside world: a camera, a log, a notebook |
+| `wall_ms`    | when the recorder saw the row       | debugging the transport; it repeats per batch |
+
+## Sampling rate
+
+`rateHz` is a real rate, not a per-frame budget: the client keeps a fixed grid of
+deadlines and serves each one on the first render frame past it. Each sample is
+therefore up to one frame late (≤14 ms at 72 Hz) but the lateness does not
+accumulate, so 20 Hz records ~20 rows per second and `client_ms` deltas alternate
+around 50 ms rather than sitting on a rounded-up 55.5 ms.
 
 ## Running the relay
 
@@ -190,6 +289,7 @@ using System.Collections.Generic;
 
 [System.Serializable] public class Pose {
     public string type, id;
+    public string frame;         // "local-floor" (VR) or "room" (AR) — see above
     public float[] p, q, gaze;   // JsonUtility handles float[]
     public float z, mt; public int f;
 }

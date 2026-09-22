@@ -19,9 +19,26 @@ const URL     = args.url || 'ws://localhost:8090/consume';
 const OUT     = args.out || `session-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
 const SECONDS = args.seconds ? +args.seconds : 0;
 
+// New columns are appended on purpose: they don't move the ones anybody is
+// already parsing. `frame` says what px/py/pz mean — this headset's local-floor
+// (VR) or the shared room (AR) — which a recording of several spectators cannot
+// be read without.
+//
+// Four clocks, and only one of them lines two headsets up. Use `server_ms`:
+//
+//   server_ms   the sample on the RELAY's clock, the one every player shares.
+//               The relay measures each headset's offset against its own clock
+//               (round-trip probe, see ClockSync) instead of trusting arrival
+//               time or the headset's NTP.            ← for anything cross-player
+//   capture_ms  the headset's own wall clock at capture. Correlates a session
+//               with things outside the system — a camera, a log, a notebook.
+//   client_ms   the headset's monotonic clock. Per-device only, but the one to
+//               use for deltas within a player: no steps, no offset estimate.
+//   wall_ms     when THIS process saw the row. A whole batch shares it, so it
+//               repeats; kept for debugging the transport, not for analysis.
 const COLS = ['wall_iso', 'wall_ms', 'id', 'client_ms', 'media_s',
               'px', 'py', 'pz', 'qx', 'qy', 'qz', 'qw',
-              'gx', 'gy', 'gz', 'zoom', 'focus'];
+              'gx', 'gy', 'gz', 'zoom', 'focus', 'frame', 'capture_ms', 'server_ms'];
 
 const out = fs.createWriteStream(OUT, { flags: 'w' });
 out.write(COLS.join(',') + '\n');
@@ -56,7 +73,7 @@ function row(m) {
     n(p[0]), n(p[1]), n(p[2]),
     n(q[0]), n(q[1]), n(q[2]), n(q[3]),
     n(g[0]), n(g[1]), n(g[2]),
-    n(m.z), m.f ?? '',
+    n(m.z), m.f ?? '', m.frame || '', n(m.w), n(m.srv),
   ].join(',') + '\n');
   rows++;
   seen.add(m.id);
