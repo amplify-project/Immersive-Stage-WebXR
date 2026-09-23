@@ -56,6 +56,35 @@ Consumers that place players per seat keep working unchanged in VR; in AR they
 now receive co-located poses, which is what makes several spectators renderable
 in one scene without a spatial anchor of their own.
 
+## `rec`: which voice recording these poses belong to
+
+`null` unless that player is having their voice recorded
+([`voice-recording.md`](voice-recording.md)), and otherwise the name the
+recording service gave the files:
+
+```
+recordings/2026-09-21T07-40-29-861Z_p-pao9ev33.webm    ← rec is the part before the extension
+recordings/2026-09-21T07-40-29-861Z_p-pao9ev33.jsonl
+```
+
+It travels exactly like `frame` — declared in the `hello`'s `meta`, promoted by
+the relay onto **every** record it emits — and for the same kind of reason. Poses
+and voice are two files written by two different processes, and something has to
+say they are the same session. Putting it on every record rather than in a
+manifest means any single row, anywhere it ends up, names the audio it belongs
+to: `telemetry/recorder.js` writes it as the `rec` column, and a CSV is then
+self-describing with nothing to keep in step.
+
+**This is additive and consumers can ignore it.** It does not change a field that
+was there before, and a render that never reads it behaves exactly as it did.
+What it is worth reading it for is knowing that a participant is being recorded
+— which is a thing worth showing in a render.
+
+The player names nothing itself: the recording service answers its hello with the
+name it actually opened, and that is what gets published. The alternative — the
+player composing the name from its own id and clock — advertises a reference to a
+file that may not be the one on disk, since the sanitising is the service's.
+
 ## Gaze
 
 `gaze` is the **head-forward vector** (quaternion applied to `(0,0,-1)`),
@@ -97,8 +126,9 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 ### Player → relay (`/ingest`)
 
 ```jsonc
-// once, on connect
-{ "hello": "player-42", "meta": { "ua": "...", "mode": "vr", "frame": "local-floor" } }
+// once, on connect — and again whenever `meta` changes mid-session (the relay
+// keys on the id and merges, so a second hello is an update, not a new player)
+{ "hello": "player-42", "meta": { "ua": "...", "mode": "vr", "frame": "local-floor", "rec": "2026-09-21T07-40-29-861Z_player-42" } }
 
 // data frames (batched)
 { "b": [
@@ -160,10 +190,10 @@ musicians each spectator chose to bring forward.
 
 ```jsonc
 // on connect: current state of every live player
-{ "type": "snapshot", "players": [ { "id": "...", "frame": "room", "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "w": 0, "srv": 0, "mt": 0 } ] }
+{ "type": "snapshot", "players": [ { "id": "...", "frame": "room", "rec": null, "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "w": 0, "srv": 0, "mt": 0 } ] }
 
 // live stream
-{ "type": "update", "id": "player-42", "frame": "room", "t": 12345.6, "w": 1785500757720, "srv": 1785500757719.4, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
+{ "type": "update", "id": "player-42", "frame": "room", "rec": "2026-09-21T07-40-29-861Z_player-42", "t": 12345.6, "w": 1785500757720, "srv": 1785500757719.4, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
 { "type": "leave",  "id": "player-42" }
 ```
 

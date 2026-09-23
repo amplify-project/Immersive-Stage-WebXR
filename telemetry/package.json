@@ -11,7 +11,8 @@
     "record": "node recorder.js",
     "demo:producer": "node producer-demo.js",
     "demo:consumer": "node consumer-demo.js",
-    "test": "node smoke-test.js"
+    "test": "node smoke-test.js",
+    "test:voice": "node voice-smoke.js && node voice-client-smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

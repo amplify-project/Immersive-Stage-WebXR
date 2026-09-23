@@ -23,6 +23,10 @@ x4_bridge/insta360_v4l2_bridge
 *.sw[a-p]
 *~
 
+# Recorded participant voice (telemetry/voice.js). Personal data: it never goes
+# near the repository, and server.js refuses to serve it over HTTP either.
+recordings/
+
 # Recorded telemetry sessions (telemetry/recorder.js)
 telemetry/*.csv
 session-*.csv

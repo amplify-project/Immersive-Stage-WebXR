@@ -91,6 +91,24 @@ function ok(msg) { console.log('  ✓ ' + msg); }
   else fail('AR frame not propagated: ' + JSON.stringify(arUpd && arUpd.frame));
   arProducer.close();
 
+  // A player that is having its voice recorded says so in the hello, and the
+  // relay must put it on the records the way it does `frame` — otherwise the
+  // poses arrive with no way of telling which audio file they belong to.
+  const recProducer = new WebSocket(`${BASE}/ingest`);
+  await once(recProducer, 'open');
+  recProducer.send(JSON.stringify({ hello: 'smoke-rec', meta: { mode: 'vr', frame: 'local-floor', rec: '2026-09-21T07-40-29-861Z_smoke-rec' } }));
+  await wait(50);
+  recProducer.send(JSON.stringify({ b: [{ t: 1, mt: 0, p: [0, 1.6, 0], q: [0, 0, 0, 1], z: 0, f: -1 }] }));
+  await wait(150);
+  const recUpd = events.find(e => e.type === 'update' && e.id === 'smoke-rec');
+  if (recUpd && recUpd.rec === '2026-09-21T07-40-29-861Z_smoke-rec') ok('the voice recording reference rides on every pose record');
+  else fail('rec not propagated: ' + JSON.stringify(recUpd && recUpd.rec));
+  // And a player with no recording says null rather than nothing: a consumer
+  // reading `rec === undefined` cannot tell "not recorded" from "old relay".
+  if (recUpd && arUpd && arUpd.rec === null) ok('and it is null, not absent, when nobody is recording');
+  else fail('rec should be null for a player that is not recording: ' + JSON.stringify(arUpd && arUpd.rec));
+  recProducer.close();
+
   // drop producer -> expect a leave (either on close or via TTL sweep)
   producer.close();
   await wait(1600);

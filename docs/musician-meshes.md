@@ -27,14 +27,18 @@ A `mesh` lives on the stem, because it is a property of *that* musician:
   { "name": "SAX", "mesh": { "url": "meshes/sax.glb",         // …or tuned
                              "heightM": 1.4,                   // metres, default 1.7
                              "yawDeg": 45,                     // default 0
-                             "zUp": false } }                  // default false
+                             "zUp": false,                     // default false
+                             "offsetYM": 1.4,                  // metres off the floor, default 0
+                             "clip": "Animation",              // default: the file's first
+                             "animOffset": 0,                  // media time of the clip's zero
+                             "animate": true } }               // false freezes it
 ],
 "ar": { "mesh": "meshes/generic.glb" }        // fallback for every stem without one
 ```
 
 The bare string and the object are the same thing at two levels of detail. The
-editor writes the object **only** once you touch height, yaw or Z-up
-(`editor.html:646`), so a scene does not fill up with `{"heightM":1.7,"yawDeg":0}`
+editor writes the object **only** once something other than the url is set, so a
+scene does not fill up with `{"heightM":1.7,"yawDeg":0}`
 entries that say nothing — those two defaults belong to the player, and writing
 them down would freeze today's default into every old scene.
 
@@ -70,6 +74,7 @@ In the editor, with a musician selected (`editor.html:231`):
 |---|---|---|
 | **Mesh height m** | `heightM` | blank → the player's 1.70 |
 | **Yaw °** | `yawDeg` | blank → 0 (also set by dragging the preview sideways) |
+| **Off floor m** | `offsetYM` | blank → 0, standing on the floor |
 | **Z-up** | `zUp` | off |
 
 A drum kit is 1.1 m, a double bass 1.9 m, a standing player 1.75 m. The preview
@@ -84,6 +89,15 @@ from it down to the floor. Raising the elevation moves the sound and leaves the
 figure standing on the ground; raising the mesh height grows the figure and leaves
 the sound where it was. A seated drummer is a negative elevation with a 1.1 m
 mesh, and neither number implies the other.
+
+**`Off floor m` is the third one.** Hanging from the audio point down to the floor
+is right for a person and wrong for anything else: a trumpet on its own, modelled
+alone, ends up lying at your feet. `offsetYM` lifts the model — in metres of room,
+applied outside the scale, so the number means the same for a file in centimetres
+and one in metres — and touches nothing else. The panner does not move, and the
+focus ring stays on the floor under the musician's spot rather than riding up with
+the figure: the ring marks *where he is*, which a ring floating at chest height
+would not (`src/app/player.js:2129`).
 
 ### Two guards you cannot switch off
 
@@ -105,7 +119,7 @@ Three nodes, because a single `Object3D` applies scale, then rotation, then
 translation — and the order needed here is *rotate to Y-up, recentre, scale, yaw*:
 
 ```
-wrap   scale = k, rotation.y = yaw     ← spins in place
+wrap   scale = k, rotation.y = yaw, position.y = offsetYM   ← spins in place
  └ axis  rotation.x = −90° if zUp, position = −centre, feet on the floor
     └ obj  the model, exactly as the file has it
 ```
@@ -260,7 +274,84 @@ tomorrow survives by default.
 
 ---
 
-## 6. State
+## 6. Animation
+
+A GLB may carry its own clips, and the loader has always parsed them — until
+now `MeshFit.load()` dropped them on the line that resolved the scene. They are
+kept, and one of them plays.
+
+### The clock is media time, and that is the whole design
+
+```js
+mixer.setTime(videoEl.currentTime - animOffset)      // every frame, per mesh
+```
+
+Not `mixer.update(dt)`. This player has **one** media element: the multichannel
+audio hangs off it through Web Audio, and the close-up video is already slaved
+to its `currentTime`. A mixer told that same number therefore follows a seek, a
+pause, and the playback-rate nudges `TimingMediaController` makes for a late
+joiner ([`motion-sync.md`](motion-sync.md)) — for free, and with nothing
+synchronised twice. A free-running mixer drifts against the music from the first
+bar, and that drift is exactly what someone watching one musician is looking at.
+
+`setTime()` resets its actions to zero and re-advances, so a **backwards** seek
+costs the same as a forward one and needs no special case, the looping is the
+action's own, and no error accumulates over a long session. It is also
+idempotent: the same media time always gives the same pose.
+
+`animOffset` is the media time at which the clip's own zero falls — how a loop
+gets put on the beat. Before it, the model holds its first frame rather than
+running backwards, so a musician who starts playing at 0:12 stands still until
+then.
+
+### Finding the clip name
+
+You cannot guess it, and a GLB may hold several. Two places say it:
+
+- The editor's mesh readout, under the measurements: `animated · clip "MusicBox"
+  · 10.0 s`.
+- The player's console on attaching: `[mesh] "meshes/x.glb" animada · clip
+  "MusicBox" · 10.0s`. Name one that is not there and it says so, with the list
+  of the ones that are, and leaves the model still.
+
+The preview does not play the clip — the editor's viewer draws on events, not on
+a loop — but it does **pose the model at the clip's first frame**, which matters
+for more than looking right: that is the pose the fit measures.
+
+### Two traps, both handled, both worth knowing
+
+**A plain `clone(true)` cannot carry a skeleton.** The copy keeps a *reference*
+to the source's skeleton while its bones are new objects, so it ends up driven
+by bones nobody animates: it renders in bind pose or folds toward the origin.
+`MeshFit.clone()` routes skinned models through `SkeletonUtils.clone()`
+(vendored beside `GLTFLoader`, same r128) and leaves everything else on the
+plain path. Note it bites a skinned model used **once** — every musician gets a
+clone either way — and that of the two files here, `low_poly_music_box.glb`
+animates plain nodes (`skins: 0`) while the guitarist has a skeleton, so a test
+with the music box proves nothing about the guitarist.
+
+Worse, it bites **in the headset only**: the editor's preview holds the single
+original and looks perfectly right. Both paths have since been seen working on a
+Quest — the music box's plain nodes and the guitarist's skeleton — but the rule
+for the next animated model stands: whichever of the two you tested says nothing
+about the other.
+
+**The fit used to measure the rest pose.** `fitMeshToRoom` normalises height
+from the bounding box, and a model exported in a T-pose whose clip is a seated
+drummer would be scaled against a height nobody ever sees — and stood on a floor
+its feet never touch. The model is now posed at the clip's zero before it is
+measured.
+
+### Cost
+
+Measure it rather than assume: AR is where the budget is already tight — the 4K
+sphere decodes at 24 fps with the sphere hidden — so `?arperf=1` belongs in the
+first headset test, not in the post-mortem. `?nomesh=1` still takes every mesh
+out, which separates a mesh problem from a passthrough one.
+
+---
+
+## 7. State
 
 **Verified on this machine (2026-08-19):** all files parse; `/api/meshes` lists;
 `.glb` is served with the right type and `no-cache`; upload accepts a good file,
@@ -270,12 +361,22 @@ rejects a renamed non-GLB (415), rejects a bad name (400) and contains traversal
 against real people, the focus ring, the lighting, and frame cost with the two
 heavy models (3.9 MB guitarist, 6.1 MB drum kit).
 
+**Animation, verified against three r128 outside the browser (2026-09-21):** the
+clip is picked by name or by position and a missing name leaves the model still;
+media time maps to the pose, including a backwards seek, a wrap past the end and
+the offset; the same time always gives the same pose; and two musicians sharing
+one file move independently.
+
+**Animation, verified on a Quest (2026-09-21):** both models animate — the music
+box, which drives plain nodes, and the guitarist, which is skinned and therefore
+the one that exercises `SkeletonUtils.clone`. The frame cost is still an
+impression rather than a figure; see Pending.
+
 **Pending:**
 
-- **Animation.** The guitarist GLB carries clips that nothing plays yet. Note that
-  `attachMeshTo` uses a plain `clone(true)`, which does **not** carry a skinned
-  mesh's skeleton — animating means moving to `SkeletonUtils.clone` and an
-  `AnimationMixer` driven from the render loop.
+- **What animation costs per frame.** Both models look right on a Quest, but
+  "looks right" is not a measurement: nobody has yet run `?arperf=1` with
+  several animated meshes at once, and AR is where the budget is already tight.
 - **S3 publishing — not needed as things are deployed today.** Publishing sends
   the *media* to S3: `upload-s3.sh` syncs `encoded/`, and the player is pointed at
   it with `?src=<manifest URL>`. The player **page** is still served by

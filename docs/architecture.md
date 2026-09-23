@@ -6,6 +6,7 @@ in new features.
 
 - To **run / operate** the system → [`../README.md`](../README.md).
 - The **audio engine API** → [`core-api.md`](core-api.md).
+- **How the audio is built**, mic to ears (for audio people) → [`audio-pipeline.md`](audio-pipeline.md).
 - The **two pending partner features** (AR tracking, zoom-quality) → [`handoff.md`](handoff.md).
 - **Live 360 capture** (Insta360 X4 bridge) → [`../x4_bridge/README.md`](../x4_bridge/README.md).
 
