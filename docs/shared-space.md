@@ -8,6 +8,10 @@ sensible, which is a separate problem — see *The origin is arbitrary*.
 Turned on with `?sharedspace=1`. Off by default, and the fallback is exactly the
 behaviour that was there before: each person aligns the room by hand.
 
+The in-headset readout (the panel and the cube at the shared origin, see *How to
+tell it is not working*) is a separate flag: add `?sharedlog=1`. Without it the
+shared frame works the same and nothing is drawn in front of the viewer.
+
 ## What it gives, and what it does not
 
 A **common origin**, and nothing else. One transform.
@@ -102,7 +106,7 @@ similar boundaries put the rooms nearly on top of each other — which reads as
 success — and a different boundary sends the room somewhere else. When it really
 works the boundary is irrelevant, which is the whole point.
 
-Three readings, all on the in-headset panel under `?sharedspace=1`:
+Three readings, all on the in-headset panel under `?sharedspace=1&sharedlog=1`:
 
 - `shared IDENTITY` — S is within 2 cm and a degree of nothing, so we are drawing
   in this headset's own frame whatever the feature says it granted.

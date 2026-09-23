@@ -242,6 +242,12 @@ const SYNCLOG = new URLSearchParams(location.search).get('synclog') === '1';
 // permiso del sistema en cada casco (Settings → Privacy → Device Permissions →
 // Enhanced Spatial Services), porque por debajo son los Shared Spatial Anchors.
 const SHAREDSPACE = new URLSearchParams(location.search).get('sharedspace') === '1';
+
+// ?sharedlog=1 — the shared-frame readout in the headset: the panel (uuid, pose
+// and null counts, resets, S) and the magenta cube with axes at the common
+// origin. They are how you judge whether the frame is right, and they get in the
+// way once it is, so they come only when asked for. Needs ?sharedspace=1.
+const SHAREDLOG = SHAREDSPACE && new URLSearchParams(location.search).get('sharedlog') === '1';
 let sharedGroup = null;      // S: origen compartido → mi local-floor
 let arSharedSpace = null;    // el XRReferenceSpace de tipo 'shared'
 let arViewerSpace = null;    // 'viewer', el puente para leer el marco común
@@ -329,7 +335,7 @@ function syncPanelReport(now) {
   // vista conjunta se queda con lo que se mira EN MARCHA —quién soy en el marco y
   // cuánto me separo de la sesión— y suelta los resets y el `lead`, que son de
   // mientras se monta. Cada flag por su cuenta sigue enseñando lo suyo entero.
-  if (SHAREDSPACE && SYNCLOG) {
+  if (SHAREDLOG && SYNCLOG) {
     const d = syncReading();
     const uu = _shared.uuid ? _shared.uuid.slice(-6) : 'pending';
     arPerfPanelDraw([
@@ -340,7 +346,7 @@ function syncPanelReport(now) {
     ]);
     return;
   }
-  if (SHAREDSPACE) {
+  if (SHAREDLOG) {
     // Lo que decide no es cuántos resets hubo, sino si han PARADO: un marco que
     // se resetea cada pocos segundos no se ha asentado, y la sala no puede estar
     // quieta encima de él.
@@ -1762,7 +1768,7 @@ async function enterXR() {
       telemetry?.stop();
       voice?.mark('exit-vr');   // la grabación sigue: lo que se dice al salir vale tanto como lo de dentro
       if (debugMesh) debugMesh.visible = false;
-      if (SYNCLOG || SHAREDSPACE) arPerfPanelClear();
+      if (SYNCLOG || SHAREDLOG) arPerfPanelClear();
       document.getElementById('xr-btn').textContent = 'VR';
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
@@ -1862,7 +1868,7 @@ async function enterXR() {
             // ?synclog=1: el error de sincronía delante de la cara, el mismo
             // sprite que en AR. Aquí no hay avisos del ancla con los que
             // turnarse, así que va derecho.
-            if (SYNCLOG || SHAREDSPACE) {
+            if (SYNCLOG || SHAREDLOG) {
               arPerfPanelPlace(pose);
               syncPanelReport(performance.now());
             }
@@ -2383,7 +2389,7 @@ function requestSharedSpace(session) {
       arSharedSpace = shared; arViewerSpace = viewer;
       sharedActive = true;
       attachSharedReset(shared);
-      showSharedOrigin(true);
+      if (SHAREDLOG) showSharedOrigin(true);
       arLogAdd(`shared space: concedido (${shared.constructor && shared.constructor.name})`);
       arLogAdd('shared space: ' + describeSpace(shared));
     })
@@ -3135,15 +3141,15 @@ async function enterAR() {
           }
           // El panel sigue a la cabeza mientras haya algo que enseñar: el
           // informe de ?arperf=1, o un aviso hasta que caduque.
-          if (ARPERF || SYNCLOG || SHAREDSPACE || arNoticeUntil) arPerfPanelPlace(pose);
+          if (ARPERF || SYNCLOG || SHAREDLOG || arNoticeUntil) arPerfPanelPlace(pose);
           if (arNoticeUntil && performance.now() > arNoticeUntil) {
             arNoticeUntil = 0;
             // Con ?arperf=1 o ?synclog=1 el panel se queda: tiene qué enseñar.
-            if (!ARPERF && !SYNCLOG && !SHAREDSPACE) arPerfPanelClear();
+            if (!ARPERF && !SYNCLOG && !SHAREDLOG) arPerfPanelClear();
           }
           // Después del aviso, no encima: los carteles del ancla son de cuatro
           // segundos y son los que se leen mientras se calibra.
-          if ((SYNCLOG || SHAREDSPACE) && !ARPERF && !arNoticeUntil) syncPanelReport(performance.now());
+          if ((SYNCLOG || SHAREDLOG) && !ARPERF && !arNoticeUntil) syncPanelReport(performance.now());
         }
       }
       // Sin updateAmbiViz(): es un canvas 2D del HUD de la página, que en sesión
