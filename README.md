@@ -121,7 +121,7 @@ granting authority can be held responsible for them.
 
 ## Licence
 
-The **code** is BSD 2-Clause — see [`LICENSE`](LICENSE). Third-party components
+The **code** is GPLv3 — see [`LICENSE`](LICENSE). Third-party components
 keep their own terms, listed in [`THIRD-PARTY.md`](THIRD-PARTY.md); that file
 also flags the two things to check before reusing this in another project.
 
