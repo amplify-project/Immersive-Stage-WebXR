@@ -249,6 +249,31 @@ simulator that fakes N headsets so the Unity client can be built without one. Se
 
 ---
 
+## Recording the participant's voice
+
+What somebody says while they are inside the piece — *"I can't see the sax"* —
+is the observation the pose telemetry cannot make. `?voice=1` streams the
+microphone to `/voice` on this same server in Opus chunks, each stamped with the
+player's **media time**: the same column the pose recorder writes as `media_s`,
+so the sentence and the head that was turning while it was said join on it.
+
+```bash
+https://<host>:60000/index.html?voice=1     # press REC, grant the mic, then enter VR
+```
+
+Recordings land in `recordings/` as a `.webm` plus a `.jsonl` sidecar. Off by
+default, git-ignored, and never served over HTTP: it records a person. The
+microphone is asked for on the flat page and never on entering XR — a permission
+prompt cannot be painted inside an immersive session, and awaiting one spends
+the user activation `requestSession()` needs.
+
+Working on a Quest 3 (21 Sep 2026): the microphone survives entering VR, and
+the recording joined the pose CSV to 19 ms — the pose grid, not the audio. See
+[`docs/voice-recording.md`](docs/voice-recording.md) for the file format, the
+join, and what is still open.
+
+---
+
 ## Player controls
 
 | Action | Desktop | WebXR (Quest) |
@@ -315,6 +340,8 @@ docs/core-api.md        Engine API + AR mode + close-up multi-track reference
 docs/musician-meshes.md 3D models per musician in AR: sizing, editor, upload
 docs/closeup-panel.md   Close-up panel: transition, preload, sphere-track trap
 tools/docs-bundle.sh    Concatenate every doc into one file (for NotebookLM etc.)
+docs/motion-sync.md     Synchronised playback across devices (Motion) — spike + findings
+docs/voice-recording.md Recording what the participant says, joined to the pose telemetry
 docs/shared-spaces.md   One origin for two headsets: what Quest offers, and its traps
 docs/handoff.md         Pending partner features (AR tracking, zoom quality)
 LICENSE                 BSD 2-Clause — the code only
@@ -359,11 +386,14 @@ THIRD-PARTY.md          Libraries, vendored files and derived code, with licence
     // "mesh" is optional (AR only): the 3D model shown instead of the wireframe
     // marker. A bare path uses the defaults; the object form tunes them. The size
     // is NOT the file's own — the model is scaled so it is "heightM" metres tall,
-    // because a .glb's units cannot be trusted. See docs/musician-meshes.md.
+    // because a .glb's units cannot be trusted. It stands on the floor unless
+    // "offsetYM" lifts it, which is what an instrument modelled on its own needs.
+    // See docs/musician-meshes.md.
     { "file": "media/DR - stem - sync.mp3", "name": "DR", "azimuthDeg": -50, "elevationDeg": 0,
       "gainDb": 0, "closeup": "media/dr_cu.mp4", "mesh": "meshes/drums.glb" },
     { "file": "media/SAX - stem - sync.mp3", "name": "SAX", "azimuthDeg": 50, "elevationDeg": 0,
-      "mesh": { "url": "meshes/sax.glb", "heightM": 1.4, "yawDeg": 45, "zUp": false } }
+      "mesh": { "url": "meshes/sax.glb", "heightM": 1.4, "yawDeg": 45, "zUp": false,
+                "offsetYM": 0 } }
   ],
   // `bedDuck` pulls the FOA bed down as you focus a musician. Without it the
   // spotlight can only add a stem on top of the bed's own copy of that same

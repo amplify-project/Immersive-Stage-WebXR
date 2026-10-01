@@ -28,10 +28,58 @@
       if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader !== 'function')
         return reject(new Error('GLTFLoader not loaded (check the <script> tags)'));
       _loader = _loader || new THREE.GLTFLoader();
-      _loader.load(url, function (g) { resolve(g.scene); }, undefined, reject);
+      _loader.load(url, function (g) {
+        // The clips arrive parsed in the same file and used to be dropped on
+        // this line. They hang on the scene object — three's own convention for
+        // exactly this — so load() still resolves one Object3D and nothing
+        // downstream has to change shape.
+        g.scene.animations = g.animations || [];
+        resolve(g.scene);
+      }, undefined, reject);
     });
     _cache.set(url, p);
     return p;
+  }
+
+  // Every musician gets a CLONE: several can share one file (the common
+  // `ar.mesh`), and each needs nodes of its own for the mixer to drive.
+  //
+  // A plain clone(true) is wrong the moment the model is skinned. The copy keeps
+  // a REFERENCE to the source's skeleton while its bones are new objects, so it
+  // ends up driven by bones nobody animates: it renders in bind pose, or folds
+  // toward the origin. SkeletonUtils.clone rebuilds the binding against the
+  // cloned bones. Note this bites a skinned model used ONCE — the clone happens
+  // either way — and it bites inside the headset while the editor's preview,
+  // which holds the only instance, looks perfectly fine.
+  function cloneMesh(src) {
+    var skinned = false;
+    src.traverse(function (o) { if (o.isSkinnedMesh) skinned = true; });
+
+    var out;
+    if (skinned && THREE.SkeletonUtils && typeof THREE.SkeletonUtils.clone === 'function') {
+      out = THREE.SkeletonUtils.clone(src);
+    } else {
+      if (skinned) console.warn('[mesh] skinned model cloned without SkeletonUtils — ' +
+                                'it will not animate (check the <script> tag)');
+      out = src.clone(true);
+    }
+    // clone() carries no arbitrary property, and a clip is read-only data: every
+    // instance shares the same clips and each mixer binds them to its own root
+    // by node name.
+    out.animations = src.animations || [];
+    return out;
+  }
+
+  // Which clip, out of what the file happens to carry. Named in scene.json
+  // because a GLB may hold several and "the first one" is not a decision.
+  function pickClip(clips, want) {
+    if (!clips || !clips.length) return null;
+    if (want == null || want === '') return clips[0];
+    if (typeof want === 'number') return clips[want] || null;
+    for (var i = 0; i < clips.length; i++) if (clips[i].name === want) return clips[i];
+    console.warn('[mesh] no clip named "' + want + '"; the file has: ' +
+                 clips.map(function (c) { return '"' + c.name + '"'; }).join(', '));
+    return null;
   }
 
   // Meshes get replaced under the same name while a scene is being tuned, and
@@ -52,12 +100,24 @@
       heightM: isFinite(+m.heightM) && +m.heightM > 0 ? +m.heightM : AR_MESH_HEIGHT,
       yawDeg:  isFinite(+m.yawDeg) ? +m.yawDeg : 0,
       zUp:     !!m.zUp,
+      // How far off the floor the model hangs. The fit stands everything on the
+      // floor, which is right for a person and wrong for anything a person
+      // holds: a trumpet on its own belongs at playing height, not at your feet.
+      offsetYM: isFinite(+m.offsetYM) ? +m.offsetYM : 0,
+      // Animation. `clip` is a name or an index, null meaning "the first one";
+      // `animOffset` is the media time at which the clip's own zero falls, which
+      // is how a loop gets put on the beat; `animate:false` freezes a model that
+      // moves when this scene would rather it did not.
+      clip:       (typeof m.clip === 'string' && m.clip) ? m.clip
+                  : (isFinite(+m.clip) && m.clip !== '' && m.clip != null ? +m.clip : null),
+      animOffset: isFinite(+m.animOffset) ? +m.animOffset : 0,
+      animate:    m.animate !== false,
     };
   }
 
   // ── The fit ───────────────────────────────────────────────────────────────
   // Normalises whatever arrives: the model is scaled to `heightM`, centred in
-  // plan, stood on the floor and turned to `yawDeg`.
+  // plan, stood on the floor (or `offsetYM` above it) and turned to `yawDeg`.
   //
   // Without this, anyone's first mesh shows up 100× too big or invisibly small,
   // because a GLB does not declare its units and every tool exports in its own.
@@ -72,7 +132,7 @@
   // translation — and the order this needs is rotate to Y-up, recentre, scale,
   // then yaw:
   //
-  //     wrap   scale = k, rotation.y = yaw      ← spins in place
+  //     wrap   scale = k, rotation.y = yaw, position.y = offset   ← spins in place
   //      └ axis  rotation.x = zUp, position = −centre
   //         └ obj  the model, exactly as the file has it
   function fitMeshToRoom(obj, opts) {
@@ -89,6 +149,19 @@
     // height is along Z, so measuring first would scale by the wrong dimension
     // and the model would come out lying down AND the wrong size.
     if (o.zUp) axis.rotation.x = -Math.PI / 2;
+
+    // Pose it at the clip's own zero BEFORE measuring. A model exported in a
+    // T-pose whose clip is a seated drummer would otherwise be normalised
+    // against a height nobody ever sees, and stood on a floor its feet never
+    // touch. The mixer is thrown away — the pose it wrote stays — and the caller
+    // builds its own on the same nodes.
+    var clip = o.animate ? pickClip(obj.animations, o.clip) : null;
+    if (clip) {
+      var poser = new THREE.AnimationMixer(obj);
+      poser.clipAction(clip).play();
+      poser.setTime(0);
+    }
+
     axis.updateMatrixWorld(true);
 
     // Measured through matrixWorld, so `wrap` must not be parented yet — a
@@ -131,11 +204,18 @@
     axis.position.set(-c.x, -box.min.y, -c.z);   // centred in plan, feet on the floor
     wrap.scale.setScalar(k);
     wrap.rotation.y = o.yawDeg * Math.PI / 180;
+    // Outside the scale, so it is metres of room and not metres of model: inside
+    // it, the same number would mean something different for every file.
+    wrap.position.y = o.offsetYM;
 
     info.scale = k;
     info.spanM = span;
     info.heightM = size.y * k;                   // what it actually ended up being
+    info.offsetYM = o.offsetYM;
+    info.clip = clip ? (clip.name || '(unnamed)') : null;
+    info.clipSecs = clip ? clip.duration : 0;
     wrap.userData.fit = info;
+    wrap.userData.anim = clip ? { clip: clip, offset: o.animOffset } : null;
     for (var i = 0; i < info.warnings.length; i++)
       console.warn('[mesh] "' + name + '": ' + info.warnings[i]);
     return wrap;
@@ -250,6 +330,42 @@
     return tex;
   }
 
+  // ── The animation clock ───────────────────────────────────────────────────
+  // Driven by MEDIA TIME, never by a frame delta, and that is the whole design.
+  // This player has ONE media element: the multichannel audio hangs off it
+  // through Web Audio and the close-up video is already slaved to its
+  // currentTime. A mixer told that same number follows a seek, a pause, and the
+  // playback-rate nudges the Motion controller makes for a late joiner — for
+  // free, with nothing synchronised twice. A free-running mixer.update(dt)
+  // drifts against the music from the first bar, and the drift is exactly what
+  // anyone watching one musician is looking at.
+  //
+  // setTime() resets its actions to zero and re-advances, so a BACKWARDS seek
+  // costs the same as a forward one and needs no special case; the looping is
+  // the action's own. Absolute time also means no error accumulates and there
+  // is nothing to resynchronise after a stall.
+  function animator(wrap) {
+    var a = wrap && wrap.userData && wrap.userData.anim;
+    if (!a || !a.clip) return null;
+    var mixer = new THREE.AnimationMixer(wrap);
+    mixer.clipAction(a.clip).play();
+    var offset = a.offset || 0;
+    return {
+      mixer: mixer,
+      name: a.clip.name || '(unnamed)',
+      duration: a.clip.duration || 0,
+      offset: offset,
+      // Before the offset the model simply holds its first frame: a musician
+      // who starts playing at 0:12 stands still until then, which is what the
+      // offset is for in the first place.
+      setMediaTime: function (t) {
+        var s = (t || 0) - offset;
+        mixer.setTime(s > 0 ? s : 0);
+      },
+      dispose: function () { mixer.stopAllAction(); mixer.uncacheRoot(wrap); },
+    };
+  }
+
   global.MeshFit = {
     AR_MESH_HEIGHT: AR_MESH_HEIGHT,
     AR_MESH_MAX_SPAN: AR_MESH_MAX_SPAN,
@@ -257,6 +373,8 @@
     invalidate: invalidate,
     spec: spec,
     fit: fitMeshToRoom,
+    clone: cloneMesh,
+    animator: animator,
     setupRenderer: setupRenderer,
     environment: environment,
     srgb: srgb,

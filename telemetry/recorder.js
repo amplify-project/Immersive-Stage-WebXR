@@ -8,6 +8,10 @@
 //
 // One row per `update`. Ctrl-C (or --seconds N) closes the file cleanly and
 // prints a summary. `leave` events go to stderr, not the CSV.
+//
+// The `rec` column names the voice recording each row belongs to, when there is
+// one (docs/voice-recording.md). It is what makes a CSV self-describing: any row
+// says which audio goes with it, and nobody has to keep a manifest in step.
 
 const fs = require('fs');
 const { WebSocket } = require('ws');
@@ -38,7 +42,7 @@ const SECONDS = args.seconds ? +args.seconds : 0;
 //               repeats; kept for debugging the transport, not for analysis.
 const COLS = ['wall_iso', 'wall_ms', 'id', 'client_ms', 'media_s',
               'px', 'py', 'pz', 'qx', 'qy', 'qz', 'qw',
-              'gx', 'gy', 'gz', 'zoom', 'focus', 'frame', 'capture_ms', 'server_ms'];
+              'gx', 'gy', 'gz', 'zoom', 'focus', 'frame', 'capture_ms', 'server_ms', 'rec'];
 
 const out = fs.createWriteStream(OUT, { flags: 'w' });
 out.write(COLS.join(',') + '\n');
@@ -73,7 +77,7 @@ function row(m) {
     n(p[0]), n(p[1]), n(p[2]),
     n(q[0]), n(q[1]), n(q[2]), n(q[3]),
     n(g[0]), n(g[1]), n(g[2]),
-    n(m.z), m.f ?? '', m.frame || '', n(m.w), n(m.srv),
+    n(m.z), m.f ?? '', m.frame || '', n(m.w), n(m.srv), m.rec || '',
   ].join(',') + '\n');
   rows++;
   seen.add(m.id);

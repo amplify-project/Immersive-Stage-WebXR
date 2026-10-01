@@ -66,6 +66,7 @@ let audioCtx   = null, gainNode = null;  // referencias derivadas del engine
 let xrSession  = null;
 let arSession  = null;               // sesión WebXR immersive-ar (passthrough)
 let arSources  = [];                 // Object3D por stem, anclados en la sala
+let arMeshAnims = [];                // MeshFit.animator() por malla animada (se mueven con el medio)
 let roomGroup  = null;               // marco de sala: padre de las fuentes ancladas
 let arCalibrating = false;           // grip apretado: se está recolocando la sala
 let arPrevSpot = null;               // spotlight previo (restaurar al salir de AR)
@@ -84,6 +85,8 @@ let syncInterval = null;
 let xrZoomDist = 0;   // acercamiento en VR (joystick derecho), 0 = sin zoom
 let telemetry    = null;             // Telemetry: pose de cabeza → relay externo (opt-in)
 let telemetryCfg = null;             // bloque telemetry de scene.json
+let voice        = null;             // VoiceRecorder: micro del participante → /voice (opt-in)
+let voiceCfg     = null;             // bloque voice de scene.json
 // Diagnóstico: ?audiotest=spin → el campo sonoro gira solo (ignora la cabeza).
 const AUDIO_SPIN_TEST = new URLSearchParams(location.search).get('audiotest') === 'spin';
 
@@ -128,8 +131,14 @@ function initThree() {
   // Marco de sala: de él cuelgan las fuentes ancladas en AR. Su transformada ES
   // la calibración (ver applyARCalib), así que moverlo mueve a la vez los
   // marcadores y sus panners, que siguen la matrixWorld.
+  // El marco compartido entre cascos (ver SHAREDSPACE). Sin él es la identidad y
+  // esto es exactamente lo de siempre: roomGroup colgando de la escena.
+  sharedGroup = new THREE.Group();
+  sharedGroup.matrixAutoUpdate = false;   // su matriz la pone la pose, no un TRS
+  scene.add(sharedGroup);
+
   roomGroup = new THREE.Group();
-  scene.add(roomGroup);
+  sharedGroup.add(roomGroup);
 
   // Close-up (Caso B): plano 16:9 ~2.5 m delante de la cámara. Como es hijo de
   // la cámara, queda siempre centrado en la vista (escritorio y XR). Oculto
@@ -189,6 +198,69 @@ const SPOTLOG = new URLSearchParams(location.search).get('spotlog') === '1';
 // mientras te desplazas), y no hay nada que optimizar aquí. Si el que sube es un
 // tramo concreto, ese es el culpable y tiene arreglo.
 const ARPERF = new URLSearchParams(location.search).get('arperf') === '1';
+
+// ?synclog=1 — el error de sincronía, DENTRO de las gafas.
+//
+// `syncDiag()` se lee en la consola, y en sesión inmersiva no hay consola: el
+// número que dice si dos cascos van juntos es justo el que no se puede mirar
+// cuando hay dos cascos puestos.
+//
+// Va al mismo sprite en VR y en AR. El panel XR DEBUG de más abajo parecía el
+// sitio natural en VR, pero `initDebugPanel()` empieza con un `return`: lleva
+// desactivado desde hace tiempo y escribir ahí no enseña nada. El sprite,
+// además, es lo que queremos: mira siempre a la cámara y se recoloca cada frame,
+// así que girarse no lo deja atrás. Se comparte con ?arperf=1 y con los avisos
+// del ancla —dos carteles delante de la cara no caben—, así que espera detrás de
+// un aviso y se aparta entero si ?arperf=1 pide el mismo sitio.
+//
+// Cómo se lee: `err` es contra la SESIÓN, no contra el otro casco. Leídos los dos
+// a la vez, la resta es el desfase entre ellos. Y `lead` es lo que el controlador
+// ha medido que cuesta un seek en ESTE aparato — en escritorio son ~640 ms, y si
+// en la Quest sale otra cosa o no para quieto, ahí está la respuesta a si el que
+// llega tarde aterriza donde debe.
+const SYNCLOG = new URLSearchParams(location.search).get('synclog') === '1';
+
+// ?sharedspace=1 — un marco común entre cascos, sin calibrar cada uno el suyo.
+//
+// Hoy `roomGroup` guarda la calibración {x, z, yaw} en el `local-floor` de ESTE
+// casco, que es distinto en cada uno: por eso cada persona tiene que alinear la
+// sala a mano. El navegador de la Quest sabe dar un marco común a los cascos de
+// una misma habitación (feature `shared`), y con él la misma T significa lo
+// mismo en todos.
+//
+// La montamos SIN quitarle a three su reference space, que en la r128 no se
+// puede cambiar: `roomGroup` pasa a colgar de `sharedGroup`, cuya matriz es
+// `frame.getPose(espacio compartido, mi local-floor)` — o sea, dónde cae el
+// origen común en mi marco. Esa S es distinta en cada casco; la T de dentro es
+// la misma para todos, y es la que habrá que repartir por el relay (Caso C).
+//
+// Recalcular S cada frame sale casi gratis y además se come el `reset` que el
+// navegador dispara a los pocos segundos —cambia coordenadas y UUID— sin
+// tratarlo como caso especial: la sala simplemente sigue al origen nuevo.
+//
+// Hace falta el flag del navegador (chrome://flags → "WebXR experiments") Y el
+// permiso del sistema en cada casco (Settings → Privacy → Device Permissions →
+// Enhanced Spatial Services), porque por debajo son los Shared Spatial Anchors.
+const SHAREDSPACE = new URLSearchParams(location.search).get('sharedspace') === '1';
+
+// ?sharedlog=1 — the shared-frame readout in the headset: the panel (uuid, pose
+// and null counts, resets, S) and the magenta cube with axes at the common
+// origin. They are how you judge whether the frame is right, and they get in the
+// way once it is, so they come only when asked for. Needs ?sharedspace=1.
+const SHAREDLOG = SHAREDSPACE && new URLSearchParams(location.search).get('sharedlog') === '1';
+let sharedGroup = null;      // S: origen compartido → mi local-floor
+let arSharedSpace = null;    // el XRReferenceSpace de tipo 'shared'
+let arViewerSpace = null;    // 'viewer', el puente para leer el marco común
+let sharedActive = false;
+// Salud del marco: sin esto, "la sala está girada" no distingue entre no haber
+// tenido nunca una pose (y estar dibujando en la identidad, o sea en el origen
+// de ESTE casco) y tenerla y estar mal.
+const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0, lastResetAt: 0,
+                  x: 0, z: 0, uuid: '' };
+
+function syncReading() {
+  return (window.syncDiag && window.syncDiag()) || null;
+}
 const _perf = { n: 0, t0: 0, worst: 0, sum: 0, audio: 0, focus: 0, render: 0, worstAt: '', vf0: -1 };
 
 // Fotogramas de vídeo que el navegador lleva DECODIFICADOS. En AR la esfera está
@@ -247,6 +319,70 @@ function arPerfPanelPlace(pose) {
   arPerfPanel.position.set(p.x + _panelFwd.x * 1.2,
                            p.y + _panelFwd.y * 1.2 - 0.25,
                            p.z + _panelFwd.z * 1.2);
+}
+
+// El informe de sincronía en el sprite de AR, una vez por segundo. La última
+// línea la pinta arPerfPanelDraw en verde, y aquí es la que toca: `lead` es el
+// dato que venimos a buscar a las gafas.
+let _syncPanelAt = 0;
+function syncPanelReport(now) {
+  if (now - _syncPanelAt < 1000) return;
+  _syncPanelAt = now;
+  // Con ?sharedspace=1 el panel enseña el marco: es lo que se está mirando, y
+  // `pose` a cero con la sala girada dice por sí solo que estamos dibujando en la
+  // identidad, o sea en el origen de este casco y no en el común.
+  // Los dos flags a la vez: caben cuatro líneas en el sprite y no más, así que la
+  // vista conjunta se queda con lo que se mira EN MARCHA —quién soy en el marco y
+  // cuánto me separo de la sesión— y suelta los resets y el `lead`, que son de
+  // mientras se monta. Cada flag por su cuenta sigue enseñando lo suyo entero.
+  if (SHAREDLOG && SYNCLOG) {
+    const d = syncReading();
+    const uu = _shared.uuid ? _shared.uuid.slice(-6) : 'pending';
+    arPerfPanelDraw([
+      `shared ${sharedActive ? 'ON' : 'off'} · ${uu}`,
+      d ? `sync ${d.errMs}ms x${d.rate.toFixed(4)}` : 'sync: sin ?sync=',
+      `pose ${_shared.ok} · null ${_shared.nulls}`,
+      `S ${_shared.x.toFixed(2)},${_shared.z.toFixed(2)} y${_shared.yawDeg.toFixed(0)}`,
+    ]);
+    return;
+  }
+  if (SHAREDLOG) {
+    // Lo que decide no es cuántos resets hubo, sino si han PARADO: un marco que
+    // se resetea cada pocos segundos no se ha asentado, y la sala no puede estar
+    // quieta encima de él.
+    const since = _shared.lastResetAt
+      ? ((performance.now() - _shared.lastResetAt) / 1000).toFixed(0) + 's'
+      : '—';
+    // S es la transformada del origen común a MI local-floor. Si sale la
+    // identidad, el "espacio compartido" que nos han dado es nuestro propio
+    // marco —el provisional del que avisa el README— y no hay colocalización
+    // ninguna, por mucho que la feature esté concedida. Un S identidad en los dos
+    // cascos explica que la sala dependa del boundary: el local-floor del Quest
+    // nace del boundary, así que dos boundaries parecidos casi coinciden y uno
+    // distinto manda la sala a otro sitio.
+    const ident = Math.abs(_shared.x) < 0.02 && Math.abs(_shared.z) < 0.02
+               && Math.abs(_shared.yawDeg) < 1.0;
+    // El uuid es la identidad del espacio: seis caracteres bastan para que dos
+    // personas lo comparen de viva voz, y distintos = espacios distintos, que es
+    // la pregunta entera.
+    // Vacío no es "no hay": es "aún no se ha establecido". Son cosas distintas y
+    // la primera lectura siempre es esa.
+    const uu = _shared.uuid ? _shared.uuid.slice(-6) : 'pending';
+    arPerfPanelDraw(sharedActive
+      ? [`shared ${ident ? 'IDENTITY' : 'ON'} · ${uu}`,
+         `pose ${_shared.ok} · null ${_shared.nulls}`,
+         `resets ${_shared.resets} · last ${since}`,
+         `S ${_shared.x.toFixed(2)},${_shared.z.toFixed(2)} y${_shared.yawDeg.toFixed(0)}`]
+      : ['shared space: OFF', '', 'flag + Enhanced', 'Spatial Services']);
+    return;
+  }
+  const d = syncReading();
+  arPerfPanelDraw(d
+    ? [`sync ${d.state}${d.paused ? ' PAUSED' : ''}  v=${d.velocity}`,
+       `err  ${String(d.errMs).padStart(6)} ms`,
+       `rate ${d.rate.toFixed(4)}`,
+       `lead ${d.leadMs === null ? '—' : d.leadMs + ' ms'}`]
+    : ['[synclog] esperando', '', 'sin ?sync= en la URL', '']);
 }
 
 function arPerfPanelClear() {
@@ -691,6 +827,32 @@ async function loadDualShaka(src) {
     // ── Close-ups (Caso B): pistas de vídeo extra del mismo manifest ─────────
     await setupCloseups(src);
 
+    // ── Sincronía entre dispositivos (?sync=<sesión>) ────────────────────────
+    // Esclaviza este player a un timing object compartido: una página de control
+    // manda, y todos los que miren a la misma sesión reproducen el mismo instante
+    // —incluido el que llegue tarde—. Se engancha AQUÍ, después de cargar, porque
+    // el servicio quiere la duración y antes no la hay.
+    //
+    // import() dinámico a propósito: sin ?sync no se baja ni una línea de Motion,
+    // igual que una escena sin mallas no gasta una luz. Y el fallo que esperamos
+    // —que el socket no abra— no puede llevarse por delante la reproducción: el
+    // player tiene que seguir funcionando solo, que es como funciona hoy.
+    const _syncSession = new URLSearchParams(location.search).get('sync');
+    if (_syncSession) {
+      try {
+        const q = new URLSearchParams(location.search);
+        const { attachSync } = await import('./sync.js');
+        attachSync(videoEl, {
+          sessionId: _syncSession,
+          url: q.get('timing') || undefined,
+          offsetSec: parseFloat(q.get('syncoffset')) || 0,
+        });
+      } catch (e) {
+        console.warn('[sync] no se pudo enganchar:', e.message || e);
+        toast('Sincronía no disponible');
+      }
+    }
+
     // ── Watchdog live edge ──────────────────────────
     setInterval(() => {
       if (videoEl.paused || videoEl.seeking || videoEl.buffered.length === 0) return;
@@ -881,6 +1043,7 @@ async function setupFOA() {
         if (_sc.alignment) _align = _sc.alignment;
         if (_sc.ar) arCfg = _sc.ar;
         if (_sc.telemetry) telemetryCfg = _sc.telemetry;
+        if (_sc.voice) voiceCfg = _sc.voice;
       }
     } catch (_) { /* sin escena → DEFAULT_STEMS */ }
 
@@ -939,6 +1102,26 @@ async function setupFOA() {
         window.telemetry = telemetry;   // inspección desde consola
         toast('Telemetría lista → ' + _turl);
       }
+    }
+
+    // ── Grabación de voz del participante (opt-in) ────────────────────
+    // Lo que dice mientras está dentro —"no veo el saxo", "ahora lo tengo
+    // detrás"— es la observación que la pose no sabe hacer. Se guarda en el
+    // servidor troceada en Opus, y cada trozo lleva el tiempo de medio del
+    // player: la misma columna que escribe el recorder de poses (media_s), así
+    // que la frase y la cabeza que se estaba girando al decirla se cruzan por
+    // un join. Config en scene.json:
+    //   "voice": { "enabled": true }
+    // Overrides por URL:  ?voice=1   ?voice=0   ?voice=wss://otra/voice
+    // Ver docs/voice-recording.md — y ojo: esto graba a una persona, así que
+    // sale por defecto apagado y con un piloto que se ve desde fuera.
+    {
+      const _vp = new URLSearchParams(location.search).get('voice');
+      const _von = _vp !== null ? !/^(0|off|false)$/i.test(_vp) : !!(voiceCfg && voiceCfg.enabled);
+      // Sin await: si el permiso está concedido esto arranca el micro, y un
+      // getUserMedia que se quede pensando (dispositivo ocupado) no puede dejar
+      // a medias la carga del player. setupVoice() se traga sus propios errores.
+      if (_von) setupVoice(_vp);
     }
     if (_stems.length) {
       // zoomMin = vista actual (sin zoom) → en reposo los stems quedan en
@@ -1447,6 +1630,100 @@ function xrDebug(data) {
 }
 
 // ══════════════════════════════════════════════════════
+// GRABACIÓN DE VOZ DEL PARTICIPANTE
+// ══════════════════════════════════════════════════════
+// El micro se pide desde la página plana y nunca al entrar en XR: dentro de una
+// sesión inmersiva el diálogo de permiso no se puede pintar, y esperarlo antes
+// de requestSession() se gasta el gesto de usuario que ésta necesita —con lo que
+// falla el VR por algo que no tiene nada que ver con el VR—. La contrapartida es
+// un botón que hay que tocar una vez; a partir de la segunda sesión el permiso
+// ya está concedido para este origen y arranca solo.
+async function setupVoice(param) {
+  const q = new URLSearchParams(location.search);
+  const _same = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/voice`;
+  const url = (param && /^wss?:\/\//i.test(param) ? param : null) || (voiceCfg && voiceCfg.url) || _same;
+  try {
+    // import() dinámico, como Motion: sin ?voice no se baja ni una línea de esto.
+    const { VoiceRecorder } = await import('./voice.js');
+    voice = new VoiceRecorder({
+      url,
+      // El MISMO id que la telemetría, que es lo que permite cruzar la voz con
+      // las poses después. Sin telemetría no hay con qué cruzar, así que vale
+      // cualquiera —pero que sea el de ?player si lo han puesto.
+      playerId: telemetry ? telemetry.playerId : (q.get('player') || undefined),
+      timesliceMs:   (voiceCfg && voiceCfg.timesliceMs)   || 1000,
+      bitsPerSecond: (voiceCfg && voiceCfg.bitsPerSecond) || 32000,
+      constraints:   (voiceCfg && voiceCfg.constraints)   || undefined,
+      meta: { ua: navigator.userAgent, player: q.get('player') || null },
+      mediaTime: () => videoEl?.currentTime || 0,
+      onState: (state, info) => { voiceBadge(state); voiceRefToTelemetry(state, info); },
+    });
+    window.voice = voice;
+    const btn = document.getElementById('rec-btn');
+    if (btn) btn.style.display = '';
+
+    // Si ya nos dieron el micro en una sesión anterior, no hay nada que tocar.
+    // Un navegador sin Permissions API (o que no conoce 'microphone') deja esto
+    // en false y se queda el botón, que es el comportamiento seguro.
+    let granted = false;
+    try { granted = (await navigator.permissions.query({ name: 'microphone' })).state === 'granted'; }
+    catch (_) { /* sin Permissions API: que lo pulse */ }
+    if (granted) await toggleVoice();
+    else toast('Grabación de voz: pulsa REC');
+  } catch (e) {
+    console.warn('[voice] no se pudo preparar:', e.message || e);
+    toast('Grabación de voz no disponible');
+  }
+}
+
+async function toggleVoice() {
+  if (!voice) return toast('Grabación de voz desactivada (?voice=1)');
+  if (voice.recording) { voice.stop(); return toast('Grabación detenida'); }
+  try {
+    await voice.start();
+    toast('Grabando voz → ' + voice.url);
+  } catch (e) {
+    // NotAllowedError (lo han denegado) y NotFoundError (no hay micro) son las
+    // dos que se ven de verdad, y las dos se arreglan fuera de aquí. Un Error
+    // pelado no tiene nombre que decir, así que ahí vale más el mensaje.
+    console.warn('[voice] start:', e);
+    const _why = (e.name && e.name !== 'Error') ? e.name : (e.message || e);
+    toast('Micrófono no disponible: ' + _why);
+  }
+}
+
+// La referencia a la grabación viaja EN la telemetría de pose: el servicio de
+// voz contesta al hello con el nombre que le ha puesto a los ficheros, y ese
+// nombre se mete en el meta del hello de la telemetría. El relay lo promueve a
+// cada registro igual que hace con `frame`, así que sale por /consume y acaba en
+// la columna `rec` del CSV. Resultado: una fila de poses dice a qué audio
+// pertenece, sin manifiesto que mantener en pie ni nombres que cuadrar a mano.
+// Ver docs/telemetry.md y docs/voice-recording.md.
+function voiceRefToTelemetry(state, info) {
+  if (!telemetry) return;
+  // Al parar, recRef ya es null: las poses que vengan después no son de ninguna
+  // grabación, y decir lo contrario sería peor que no decir nada.
+  const ref = (state === 'idle') ? null : ((info && info.recRef) || (voice && voice.recRef) || null);
+  if ((telemetry.meta.rec || null) === ref) return;
+  telemetry.setMeta({ rec: ref });
+}
+
+// El piloto. Grabar la voz de alguien tiene que notarse desde fuera del casco
+// —dentro, el único aviso honesto es el indicador de micro del sistema, que se
+// apaga al soltar la pista en stop()—.
+function voiceBadge(state) {
+  const on = state === 'recording' || state === 'offline';
+  const b = document.getElementById('rec-badge');
+  if (b) {
+    b.style.display = on ? '' : 'none';
+    b.textContent = state === 'offline' ? '● rec · sin red' : '● rec';
+    b.classList.toggle('badge-rec-off', state === 'offline');
+  }
+  const btn = document.getElementById('rec-btn');
+  if (btn) { btn.classList.toggle('rec-on', on); btn.textContent = on ? '■ REC' : 'REC'; }
+}
+
+// ══════════════════════════════════════════════════════
 // WebXR — Oculus Quest 3
 // ══════════════════════════════════════════════════════
 async function checkWebXR() {
@@ -1477,14 +1754,21 @@ async function enterXR() {
     await renderer.xr.setSession(xrSession);
 
     // frame: en qué marco viajan p/q. En VR es el del propio casco (ver arTelemetryPose).
-    if (telemetry) { telemetry.meta.mode = 'vr'; telemetry.meta.frame = 'local-floor'; telemetry.start(); }
+    if (telemetry) {
+      telemetry.meta.mode = 'vr'; telemetry.meta.frame = 'local-floor';
+      telemetry.meta.rec = voice?.recRef || null;   // en el hello, que es donde el relay lee el meta
+      telemetry.start();
+    }
+    voice?.mark('enter-vr');
 
     document.getElementById('xr-btn').textContent = 'EXIT VR';
 
     xrSession.addEventListener('end', () => {
       xrSession = null;
       telemetry?.stop();
+      voice?.mark('exit-vr');   // la grabación sigue: lo que se dice al salir vale tanto como lo de dentro
       if (debugMesh) debugMesh.visible = false;
+      if (SYNCLOG || SHAREDLOG) arPerfPanelClear();
       document.getElementById('xr-btn').textContent = 'VR';
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
@@ -1580,6 +1864,14 @@ async function enterXR() {
               debugMesh.position.set(pos.x, pos.y + 0.1, pos.z - 2);
               debugMesh.visible = true;
             }
+
+            // ?synclog=1: el error de sincronía delante de la cara, el mismo
+            // sprite que en AR. Aquí no hay avisos del ancla con los que
+            // turnarse, así que va derecho.
+            if (SYNCLOG || SHAREDLOG) {
+              arPerfPanelPlace(pose);
+              syncPanelReport(performance.now());
+            }
           }
         }
       }
@@ -1658,8 +1950,13 @@ function arTelemetryPose(pose) {
   const p = pose.transform.position, q = pose.transform.orientation;
   _telP.set(p.x, p.y, p.z);
   roomGroup.worldToLocal(_telP);                 // usa matrixWorld: actualizarla antes
+  // La rotación, en MUNDO y no la local. `roomGroup.quaternion` es su giro
+  // respecto al padre, y mientras el padre fue la escena las dos eran la misma
+  // cosa; desde que cuelga de sharedGroup (el marco común entre cascos) ya no, y
+  // usar la local metía el giro del marco compartido en cada muestra — justo en
+  // las coordenadas que existen para poder comparar cascos entre sí.
   _telQ.set(q.x, q.y, q.z, q.w)
-       .premultiply(_telR.copy(roomGroup.quaternion).invert());
+       .premultiply(roomGroup.getWorldQuaternion(_telR).invert());
   return _telPair;
 }
 
@@ -1728,6 +2025,9 @@ function makeSourceMarker(name) {
 // DE PIE en el suelo. Por eso la malla no se coloca en ese punto sino colgando de
 // él hacia abajo: así el panner no se entera de que hemos puesto un muñeco, y el
 // audio de una escena con mallas es idéntico al de la misma escena sin ellas.
+// Un modelo que NO es una persona de pie —una trompeta suelta, un micro colgado—
+// se sube con `offsetYM`, que son metros sobre el suelo de la sala y tampoco toca
+// el audio: mover el muñeco y mover la fuente siguen siendo dos cosas distintas.
 // El cargador y el ajuste de escala viven en src/app/mesh-fit.js (window.MeshFit),
 // no aquí: el editor tiene que colocar el modelo EXACTAMENTE igual que las gafas
 // para que su vista previa sirva de algo, y dos copias de esta función son dos
@@ -1767,6 +2067,14 @@ function makeFocusRing() {
 // sin entorno sale negro igual. La hemisférica baja a la mitad al entrar el
 // entorno, que ya hace el ambiente; con las dos a tope la malla se lava.
 let arLights = null;
+// Un solo número para todas: el que marca el <video>, que es de donde cuelga
+// todo lo demás en este player. Barato aunque no haya ninguna (el caso normal).
+function updateMeshAnims() {
+  if (!arMeshAnims.length) return;
+  const t = videoEl?.currentTime || 0;
+  for (const a of arMeshAnims) a.setMediaTime(t);
+}
+
 function ensureARLights() {
   if (arLights) return arLights;
   arLights = new THREE.Group();
@@ -1793,11 +2101,28 @@ function attachMeshTo(marker, cfg, floorY) {
     // sala): si este marcador ya no está en la escena, el GLB no pinta nada aquí.
     if (!arSources.includes(marker)) return;
     const holder = new THREE.Group();
-    // clone(): varios músicos pueden compartir fichero (el `ar.mesh` común) y cada
-    // uno necesita su propio nodo. Ojo, un clon plano no arrastra el esqueleto de
-    // una malla animada — cuando toque animar habrá que ir a SkeletonUtils.clone.
-    holder.add(MeshFit.fit(src.clone(true), { ...spec, name: spec.url }));
+    // MeshFit.clone(): varios músicos pueden compartir fichero (el `ar.mesh`
+    // común) y cada uno necesita sus propios nodos para que su mixer los mueva.
+    // Y si la malla tiene esqueleto, un clon plano se queda atado al esqueleto
+    // del original y no se mueve — de eso se encarga ya MeshFit.clone().
+    const fitted = MeshFit.fit(MeshFit.clone(src), { ...spec, name: spec.url });
+    holder.add(fitted);
+    // La animación la mueve el tiempo de medio (ver MeshFit.animator), así que
+    // basta con registrarla: el bucle de AR le pasa el currentTime del <video>.
+    const anim = MeshFit.animator(fitted);
+    if (anim) {
+      arMeshAnims.push(anim);
+      // Colocada ya en su primer fotograma, no en reposo: la malla aparece a
+      // mitad de una sesión que lleva rato corriendo y tiene que entrar donde
+      // va, no dar un salto en el frame siguiente.
+      anim.setMediaTime(videoEl?.currentTime || 0);
+      console.log(`[mesh] "${spec.url}" animada · clip "${anim.name}" · ${anim.duration.toFixed(1)}s` +
+                  (anim.offset ? ` · desfase ${anim.offset}s` : ''));
+    }
     holder.position.y = floorY;               // del punto de audio al suelo
+    // El aro va en el holder, o sea SIEMPRE en el suelo, y no en la malla: con
+    // `offsetYM` la figura puede ir por el aire (una trompeta a la altura a la
+    // que se toca), y un aro flotando a media altura no marca ningún sitio.
     holder.add(makeFocusRing());
     marker.add(holder);
     // Al colgar la primera malla, y no antes: una escena sin mallas no gasta ni
@@ -2010,6 +2335,169 @@ function saveARCalib() {
   try { localStorage.setItem(arCalibKey(), JSON.stringify(c)); } catch (_) { /* modo privado */ }
 }
 
+// Dónde cae el origen compartido en MI local-floor, este frame. No forzamos el
+// updateMatrixWorld: el render ya recorre el árbol y marcar la rama sucia cuesta
+// lo mismo que hoy. Los panners van entonces un frame por detrás — 14 ms a 72 Hz,
+// que para colocar una fuente no es nada.
+// El ORIGEN del marco común, dibujado a pelo: un cubo y tres ejes de un metro
+// colgando de sharedGroup, o sea en 0,0,0 del espacio compartido.
+//
+// Con los músicos no se puede depurar esto: si dos cascos los ven en sitios
+// distintos, la culpa puede ser del navegador (que os colocalice mal — una L
+// tiene dos brazos parecidos y una relocalización puede encajar en el equivocado
+// y quedarse ahí, firme) o nuestra (que la S se aplique al revés). Los ejes lo
+// parten en dos: si los dos cascos ven el cubo en el MISMO punto físico y los
+// ejes apuntando igual, el marco es correcto y el fallo está río abajo. Si no,
+// el marco que os dan ya es distinto y no hay nada que arreglar en este código.
+// Todo lo que el espacio lleva encima, propiedades del prototipo incluidas. Los
+// atributos de WebIDL se definen ahí, no en la instancia, así que un `for...in`
+// —que es lo que se intentó primero— puede no verlos.
+function describeSpace(space) {
+  const out = [];
+  const seen = new Set();
+  for (let o = space; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    for (const k of Object.getOwnPropertyNames(o)) {
+      if (seen.has(k) || k === 'constructor') continue;
+      seen.add(k);
+      let v;
+      try { v = space[k]; } catch (_) { continue; }
+      if (typeof v === 'function') continue;
+      out.push(`${k}=${typeof v === 'object' ? (v && v.constructor ? v.constructor.name : v) : v}`);
+    }
+  }
+  return out.join(' · ') || '(nada legible)';
+}
+
+// El espacio compartido se pide DESDE EL BUCLE, con la sesión ya rodando, que es
+// lo que hace el ejemplo que funciona (`if (!spaceRequested)` dentro de su frame
+// loop). Pedirlo justo después de setSession —lo que se hizo primero— es antes
+// del primer frame, con la sesión aún sin rodar y el navegador todavía sin saber
+// en qué habitación está; y lo que devuelve entonces es un espacio propio que ya
+// no se junta con el de nadie.
+//
+// Y la otra mitad del mismo problema, que no está en el código: el espacio se
+// expone POR PÁGINA. Dos cascos con la misma página pero distinta query pueden
+// acabar con espacios distintos, así que la URL tiene que ser idéntica en los
+// dos, carácter por carácter.
+let sharedRequested = false;
+function requestSharedSpace(session) {
+  if (sharedRequested) return;
+  sharedRequested = true;
+  Promise.all([session.requestReferenceSpace('shared'),
+               session.requestReferenceSpace('viewer')])
+    .then(([shared, viewer]) => {
+      arSharedSpace = shared; arViewerSpace = viewer;
+      sharedActive = true;
+      attachSharedReset(shared);
+      if (SHAREDLOG) showSharedOrigin(true);
+      arLogAdd(`shared space: concedido (${shared.constructor && shared.constructor.name})`);
+      arLogAdd('shared space: ' + describeSpace(shared));
+    })
+    .catch((e) => {
+      arLogAdd('shared space: NO', e);
+      arLogAdd('→ flag "WebXR experiments" + Enhanced Spatial Services en cada casco');
+    });
+}
+
+let sharedOriginMarker = null;
+function showSharedOrigin(on) {
+  if (!on) {
+    if (sharedOriginMarker) { sharedGroup.remove(sharedOriginMarker); sharedOriginMarker = null; }
+    return;
+  }
+  if (sharedOriginMarker) return;
+  sharedOriginMarker = new THREE.Group();
+  const axes = new THREE.AxesHelper(1);          // X rojo, Y verde, Z azul
+  axes.material.depthTest = false;
+  sharedOriginMarker.add(axes);
+  const cube = new THREE.Mesh(
+    new THREE.BoxGeometry(0.12, 0.12, 0.12),
+    new THREE.MeshBasicMaterial({ color: MeshFit.colour(0xff00ff), depthTest: false }));
+  sharedOriginMarker.add(cube);
+  sharedOriginMarker.renderOrder = 998;
+  sharedGroup.add(sharedOriginMarker);           // en el origen del marco común
+}
+
+// S (origen compartido → mi local-floor), sacada por el visor.
+//
+// El primer intento fue `getPose(espacio compartido, local-floor)`, que devolvía
+// algo —no nulo, estable— pero colocaba la sala en cualquier parte. El ejemplo de
+// Cabanier, que funciona, nunca usa el espacio compartido como objetivo: lo usa
+// siempre como BASE, `getPose(viewer, shared)`. Y entrega ese espacio a three
+// como reference space (`renderer.xr.setReferenceSpace`), que la r128 no tiene.
+//
+// Se puede tener lo mismo sin tocar three ni cambiar de versión, componiendo las
+// dos poses del visor, que es un sitio que ambos marcos saben expresar:
+//
+//     visor → local-floor   A   (getViewerPose, la que ya tenemos)
+//     visor → compartido    B   (getPose(viewer, shared), la del ejemplo)
+//     compartido → local    S = A · B⁻¹
+//
+// Así la única llamada nueva es la que el ejemplo demuestra que el navegador
+// implementa de verdad.
+const _mA = new THREE.Matrix4();
+function updateSharedFrame(frame, refSpace, pose) {
+  if (!arViewerSpace) { _shared.nulls++; return; }
+  const b = frame.getPose(arViewerSpace, arSharedSpace);
+  if (!b) { _shared.nulls++; return; }   // sin pose: se queda la última buena
+  _shared.ok++; _shared.everOk = true;
+  _mA.fromArray(pose.transform.matrix);                  // A: visor → local-floor
+  sharedGroup.matrix.fromArray(b.transform.inverse.matrix)   // B⁻¹: compartido → visor
+             .premultiply(_mA);                          // S = A · B⁻¹
+  sharedGroup.matrixWorldNeedsUpdate = true;
+  const e = sharedGroup.matrix.elements;
+  _shared.x = e[12]; _shared.z = e[14];
+  _shared.yawDeg = Math.atan2(-e[8], e[0]) * 180 / Math.PI;
+  // `UUId`, con esa grafía, y se relee: nace VACÍO y se rellena cuando el espacio
+  // queda establecido de verdad. El ejemplo lo delata al comprobar `.length !== 0`
+  // en vez de la existencia. Leerlo una vez al arrancar la sesión —que es lo que
+  // se hizo primero— devuelve siempre la cadena vacía, y una cadena vacía se lee
+  // como "este espacio no trae uuid" cuando lo que dice es "todavía no".
+  _shared.uuid = arSharedSpace.UUId || '';
+}
+
+// El `reset` del espacio compartido: el navegador entra con un marco provisional
+// —el origen de este casco— y a los pocos segundos lo cambia por el de la sala de
+// verdad. Ahí está la diferencia entre los dos cascos: el primero en entrar funda
+// el espacio y no recibe reset nunca, y el segundo sí.
+//
+// No se vuelve a pedir el espacio: un `reset` dice que el origen de ESTE espacio
+// ha cambiado, y `getPose` sobre el mismo objeto ya devuelve la transformada
+// nueva. Pedirlo otra vez —que es lo que se intentó primero— crea un espacio que
+// vuelve a resolverse y a resetearse, y el remedio se convierte en el bucle.
+// Tampoco se avisa por pantalla: el aviso dura cuatro segundos y con resets
+// seguidos tapa para siempre el panel que hay que leer. Se cuentan y ya.
+function onSharedReset() {
+  _shared.resets++;
+  _shared.lastResetAt = performance.now();
+  arLogAdd(`shared space: reset #${_shared.resets}`);
+}
+
+function attachSharedReset(space) {
+  if (space && space.addEventListener) space.addEventListener('reset', onSharedReset);
+}
+
+// La cabeza, en el marco del PADRE de roomGroup, que es donde vive la
+// calibración. Sin espacio compartido eso es el local-floor y no cambia nada;
+// con él, mover y girar la sala se haría si no con una cabeza de otro marco, y
+// la sala se iría de lado al tocar el joystick.
+const _headLocal = new THREE.Vector3();
+const _headQ     = new THREE.Quaternion();
+const _sharedQ   = new THREE.Quaternion();
+function headInRoomFrame(pose) {
+  const p = pose.transform.position, q = pose.transform.orientation;
+  _headLocal.set(p.x, p.y, p.z);
+  _headQ.set(q.x, q.y, q.z, q.w);
+  if (sharedActive) {
+    sharedGroup.updateMatrixWorld(true);
+    sharedGroup.worldToLocal(_headLocal);
+    _headQ.premultiply(sharedGroup.getWorldQuaternion(_sharedQ).invert());
+  }
+  const hy = Math.atan2(2 * (_headQ.w * _headQ.y + _headQ.x * _headQ.z),
+                        1 - 2 * (_headQ.y * _headQ.y + _headQ.z * _headQ.z));
+  return { head: _headLocal, hy };
+}
+
 function applyARCalib({ x, z, yaw }) {
   roomGroup.position.set(x, 0, z);
   roomGroup.rotation.y = yaw;
@@ -2033,11 +2521,10 @@ function rotateRoomAroundUser(dYaw, head) {
 // joystick vuelve al punto de partida si uno se pierde.
 function updateARCalib(frame, refSpace, pose) {
   const session = frame.session;
-  const head = pose.transform.position;
-  const q = pose.transform.orientation;
-  // Yaw de la cabeza: el bucle de AR no mantiene la global `yaw` (esa es la del
-  // arrastre de escritorio), así que sale del cuaternión de la pose.
-  const hy = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
+  // Cabeza y yaw en el marco donde vive la calibración (ver headInRoomFrame).
+  // El yaw sale del cuaternión de la pose porque el bucle de AR no mantiene la
+  // global `yaw`: esa es la del arrastre de escritorio.
+  const { head, hy } = headInRoomFrame(pose);
   let active = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
@@ -2068,7 +2555,13 @@ function updateARCalib(frame, refSpace, pose) {
   // ancla, no el ancla, que es un punto físico de la sala y no se mueve.
   // Al soltar el grip se da por buena la posición: se guarda y se fija como
   // ancla, que es lo que hace que esto no haya que repetirlo nunca más.
-  if (arCalibrating && !active) { saveARCalib(); saveRoomAnchor(frame, refSpace); }
+  // Con marco común no se guarda NADA al soltar. Ni el ancla —el cupo es de 8
+  // por sitio y no hay forma de vaciarlo, así que gastarlas en un marco que ya
+  // sabe dónde está la sala es tirarlas— ni la calibración, que está medida
+  // contra el origen compartido y envenenaría la de siempre si se reusara la
+  // misma clave. La T de aquí viaja por el relay (Caso C), no por localStorage.
+  if (arCalibrating && !active && SHAREDSPACE) { /* la T se comparte, no se guarda */ }
+  else if (arCalibrating && !active) { saveARCalib(); saveRoomAnchor(frame, refSpace); }
   // Reintento tras barrer el cupo (ver saveRoomAnchor): necesita este `frame`,
   // vivo, y que no se esté moviendo la sala otra vez.
   else if (arAnchorRedo && !active) { arAnchorRedo = false; saveRoomAnchor(frame, refSpace); }
@@ -2459,7 +2952,10 @@ function buildARSources() {
   // La calibración va antes que los marcadores: bindStemToObject lee la
   // matrixWorld en el momento de vincular, y esa ya debe ser la de la sala
   // colocada (si no, el primer frame suena en el sitio equivocado).
-  applyARCalib(loadARCalib());
+  // Con marco común se empieza en la identidad: la calibración guardada se midió
+  // contra el local-floor de este casco, o sea contra un origen que ya no es el
+  // que manda, y aplicarla dejaría a cada casco con su propio error.
+  applyARCalib(SHAREDSPACE ? { x: 0, z: 0, yaw: 0 } : loadARCalib());
   roomGroup.updateMatrixWorld(true);
   stemDefs.forEach((s, i) => {
     const m = makeSourceMarker(s.name);
@@ -2478,6 +2974,10 @@ function buildARSources() {
 function clearARSources() {
   for (const m of arSources) roomGroup.remove(m);
   arSources = [];
+  // Los mixers apuntan a nodos que se van con los marcadores: sin soltarlos, la
+  // siguiente sesión de AR anima mallas que ya no están en la escena.
+  for (const a of arMeshAnims) a.dispose();
+  arMeshAnims = [];
   // Fuera las luces con las mallas: en el 360 no hay nada que iluminar y una luz
   // de más es trabajo del shader por cada fotograma que nadie ve. El entorno se
   // suelta igual (la textura sigue cacheada: volver a AR no la reconstruye).
@@ -2499,7 +2999,10 @@ async function enterAR() {
       // 'anchors': el ancla persistente de sala (ver restoreRoomAnchor). Va en
       // opcionales para no dejar sin AR a un runtime que no la traiga: sin ella
       // se cae a la calibración a mano, que sigue entera.
-      optionalFeatures: ['hand-tracking', 'anchors'],
+      optionalFeatures: SHAREDSPACE
+        // 'unbounded' porque el ejemplo que funciona lo pide junto a 'shared'.
+        ? ['hand-tracking', 'anchors', 'shared', 'unbounded']
+        : ['hand-tracking', 'anchors'],
     });
     // Lo primero a descartar cuando la sala no vuelve a su sitio: sin 'anchors'
     // concedida no hay nada que persistir, y como va en optionalFeatures la
@@ -2508,8 +3011,21 @@ async function enterAR() {
     console.log('[ar] features:', arFeats ? arFeats.join(' ') : 'no expuestas');
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(arSession);
+
+    // El marco común se pide en el primer frame, no aquí: ver requestSharedSpace.
+    sharedActive = false; arSharedSpace = null; arViewerSpace = null;
+    sharedRequested = false;
+    _shared.ok = _shared.nulls = _shared.resets = 0;
+    _shared.everOk = false; _shared.lastResetAt = 0; _shared.uuid = '';
+    sharedGroup.matrix.identity();
+    sharedGroup.matrixWorldNeedsUpdate = true;
     // 'room': mismo marco que stem.ar y que las posiciones que publicarán las cámaras.
-    if (telemetry) { telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room'; telemetry.start(); }
+    if (telemetry) {
+      telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room';
+      telemetry.meta.rec = voice?.recRef || null;
+      telemetry.start();
+    }
+    voice?.mark('enter-ar');
     renderer.setClearAlpha(0);                    // deja ver el passthrough
     document.getElementById('ar-btn').textContent = 'EXIT AR';
 
@@ -2540,7 +3056,9 @@ async function enterAR() {
     // Sin await: no hay pose de ancla que leer hasta que haya un XRFrame, así
     // que la sala arranca con el {x,z,yaw} guardado y el bucle la corrige en
     // cuanto el ancla esté. Un frame en el sitio viejo no lo ve nadie.
-    restoreRoomAnchor(arSession);
+    // El ancla es un punto de ESTE casco: dentro del marco común no decide nada,
+    // y restaurarla gasta tiempo y toca el cupo de 8 para nada.
+    if (!SHAREDSPACE) restoreRoomAnchor(arSession);
     buildARSources();
 
     arSession.addEventListener('end', () => {
@@ -2554,9 +3072,18 @@ async function enterAR() {
         console.log('[arperf] ventanas:', window.__arperf);
       }
       telemetry?.stop();
+      voice?.mark('exit-ar');
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
-      if (arCalibrating) { saveARCalib(); arCalibrating = false; }   // salir con el grip apretado
+      // salir con el grip apretado (en marco común no se persiste: ver updateARCalib)
+      if (arCalibrating) { if (!SHAREDSPACE) saveARCalib(); arCalibrating = false; }
+      // El espacio compartido muere con la sesión (y del todo cuando sale el
+      // último), así que no hay nada que conservar: la sala vuelve a la escena.
+      sharedActive = false; arSharedSpace = null; arViewerSpace = null;
+      sharedRequested = false;
+      showSharedOrigin(false);
+      sharedGroup.matrix.identity();
+      sharedGroup.matrixWorldNeedsUpdate = true;
       resetARFocus();          // suelta el realce: el músico enfocado no puede
       clearARSources();        // seguir 6 dB arriba en el 360 al que se vuelve
       renderer.setClearAlpha(1);
@@ -2578,15 +3105,23 @@ async function enterAR() {
       // (es el mismo elemento del que sale el audio).
       if (sphere && sphere.visible && videoEl && videoEl.readyState >= 2 && videoTexture)
         videoTexture.needsUpdate = true;
+      // Las mallas animadas, contra el reloj del medio. Va antes del render y
+      // fuera del `if (frame)`: es la escena la que tiene que estar al día,
+      // haya pose de visor o no.
+      updateMeshAnims();
       const _p0 = ARPERF ? performance.now() : 0;
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
+          if (SHAREDSPACE && !sharedRequested) requestSharedSpace(frame.session);
+          if (sharedActive) updateSharedFrame(frame, refSpace, pose);  // S: el marco común, este frame
           updateARCalib(frame, refSpace, pose);                   // recolocar la sala (grip + joysticks)
-          // El ancla manda salvo mientras la mano la está moviendo.
-          if (!arCalibrating) followRoomAnchor(frame, refSpace);
+          // El ancla manda salvo mientras la mano la está moviendo. Con espacio
+          // compartido NO: el ancla es un punto de ESTE casco y el marco común ya
+          // dice dónde está la sala; dos fuentes de verdad se pelean.
+          if (!arCalibrating && !SHAREDSPACE) followRoomAnchor(frame, refSpace);
           // La sala solo se mueve mientras se calibra, y es entonces cuando su
           // matriz tiene que estar al día en el propio frame: la leen worldToLocal
           // y los panners, que siguen la matrixWorld de los marcadores. El resto
@@ -2606,11 +3141,15 @@ async function enterAR() {
           }
           // El panel sigue a la cabeza mientras haya algo que enseñar: el
           // informe de ?arperf=1, o un aviso hasta que caduque.
-          if (ARPERF || arNoticeUntil) arPerfPanelPlace(pose);
+          if (ARPERF || SYNCLOG || SHAREDLOG || arNoticeUntil) arPerfPanelPlace(pose);
           if (arNoticeUntil && performance.now() > arNoticeUntil) {
             arNoticeUntil = 0;
-            if (!ARPERF) arPerfPanelClear();   // con ?arperf=1 el panel se queda
+            // Con ?arperf=1 o ?synclog=1 el panel se queda: tiene qué enseñar.
+            if (!ARPERF && !SYNCLOG && !SHAREDLOG) arPerfPanelClear();
           }
+          // Después del aviso, no encima: los carteles del ancla son de cuatro
+          // segundos y son los que se leen mientras se calibra.
+          if ((SYNCLOG || SHAREDLOG) && !ARPERF && !arNoticeUntil) syncPanelReport(performance.now());
         }
       }
       // Sin updateAmbiViz(): es un canvas 2D del HUD de la página, que en sesión
@@ -2711,7 +3250,7 @@ document.addEventListener('click', () => {
 // ══════════════════════════════════════════════════════
 Object.assign(window, {
   loadFromURL, loadFile, seekTo, togglePlay, skipBack, skipFwd,
-  toggleMute, setVolume, resetView, toggleFS, enterXR, enterAR,
+  toggleMute, setVolume, resetView, toggleFS, enterXR, enterAR, toggleVoice,
 });
 
 // ══════════════════════════════════════════════════════

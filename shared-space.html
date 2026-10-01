@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared space — does it work?</title>
+<!--
+  Does the Quest's experimental "shared spaces" feature actually group these two
+  headsets?
+
+  The answer is one string. Every headset in the same room is handed the SAME
+  uuid by the browser, worked out locally and without talking to anyone, so two
+  headsets showing the same uuid is proof on its own — no network, no server, no
+  peer connection. That is the whole point of this page: the sample game at
+  sharedshooter.arvr.social cannot answer the question, because what you see
+  there also depends on PeerJS and on someone else's server, and "I see nobody"
+  does not distinguish a feature that is off from a network that is down.
+
+  Three things the README warns about, each of which looks like the feature
+  failing:
+
+  - The uuid you get on entry is a placeholder. A second or two later the
+    browser works out the real room, fires `reset` on the space, and swaps in a
+    new coordinate system AND a new uuid. Read it once at the start and you have
+    read the wrong one. (The headset that got there first is never reset.)
+  - The scope is the page, not the origin: bar.com/a.html and bar.com/b.html get
+    different spaces. Both headsets must load this same URL.
+  - The space lives only as long as someone is in it. When the last participant
+    leaves it is gone, so BOTH headsets have to be in session at the same time —
+    enter one after the other and the second one simply founds a new space of
+    its own, with a different uuid, and nothing is wrong except the test.
+
+  It needs Quest browser v39+ with chrome://flags → "WebXR experiments" enabled,
+  and a restart.
+
+  The reading is shown twice on purpose: on the DOM overlay, so it can be read
+  with the headset on, and on the page, so it survives being read after exiting
+  in case the overlay is not granted.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 24px;
+    background: #0d1117; color: #e6edf3;
+    font: 16px/1.5 system-ui, sans-serif;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: #8b949e; margin: 0 0 24px; }
+  button {
+    font: 600 18px/1 system-ui, sans-serif;
+    padding: 16px 24px; margin: 0 8px 8px 0;
+    background: #1f6feb; color: #fff;
+    border: 0; border-radius: 8px; cursor: pointer;
+  }
+  button:disabled { background: #30363d; color: #8b949e; cursor: default; }
+  #uuid {
+    font: 700 clamp(18px, 5vw, 34px)/1.3 ui-monospace, monospace;
+    word-break: break-all;
+    background: #161b22; border: 2px solid #30363d; border-radius: 10px;
+    padding: 18px; margin: 16px 0;
+  }
+  #uuid.real   { border-color: #3fb950; color: #7ee787; }
+  #uuid.stale  { border-color: #d29922; color: #e3b341; }
+  #uuid.failed { border-color: #f85149; color: #ff7b72; }
+  #state { font-size: 18px; margin-bottom: 8px; }
+  #log {
+    font: 13px/1.6 ui-monospace, monospace; color: #8b949e;
+    white-space: pre-wrap; background: #161b22;
+    border-radius: 8px; padding: 12px; max-height: 40vh; overflow: auto;
+  }
+  /* The overlay shown inside the headset. Hidden until a session grants it. */
+  #hud { display: none; }
+  #hud.on {
+    display: block;
+    position: fixed; inset: auto 0 0 0;
+    padding: 20px 24px;
+    background: rgba(0,0,0,0.78);
+    font: 700 22px/1.4 ui-monospace, monospace;
+  }
+  #hud .k { color: #00d4ff; font-size: 16px; font-weight: 400; }
+  #hud .v { color: #7ee787; word-break: break-all; }
+  #hud .w { color: #e3b341; }
+</style>
+</head>
+<body>
+
+<h1>Shared space — does it work?</h1>
+<p class="sub">
+  Two headsets, one room, this same URL, <b>both in session at once</b>.
+  Same uuid = the feature works. Nothing is sent anywhere.
+</p>
+
+<button id="ar">Enter AR</button>
+<button id="vr">Enter VR</button>
+<button id="exit" disabled>Exit</button>
+
+<div id="state">Not started.</div>
+<div id="uuid">—</div>
+<div id="log"></div>
+
+<div id="hud">
+  <div class="k">shared space uuid</div>
+  <div class="v" id="hud-uuid">—</div>
+  <div class="k" id="hud-state">starting…</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const t0 = performance.now();
+
+function log(msg) {
+  const t = ((performance.now() - t0) / 1000).toFixed(1).padStart(6) + 's  ';
+  $('log').textContent += t + msg + '\n';
+  $('log').scrollTop = $('log').scrollHeight;
+  console.log('[shared]', msg);
+}
+
+function show(uuid, cls, state) {
+  $('uuid').textContent = uuid;
+  $('uuid').className = cls;
+  $('state').textContent = state;
+  $('hud-uuid').textContent = uuid;
+  $('hud-state').textContent = state;
+  $('hud-state').className = cls === 'real' ? 'k' : 'w';
+}
+
+// The uuid is not a documented property name anywhere we can check, so read it
+// the way that survives being wrong: try the likely spellings, and if none of
+// them hold a string, dump what the object does carry so the next person knows.
+function readUuid(space) {
+  // An EMPTY string is not "no uuid": it is "not established yet". The sample
+  // gives this away by testing `.length !== 0` rather than existence, and the
+  // first read after a session starts is always the empty one.
+  for (const k of ['UUId', 'uuid', 'UUID', 'id', 'sharedSpaceId']) {
+    if (typeof space[k] === 'string') return space[k] || null;
+  }
+  // A `for...in` was the first thing tried here and it found nothing, which was
+  // the wrong conclusion drawn from the wrong place: WebIDL attributes live on
+  // the PROTOTYPE, so walk that instead of guessing names.
+  const out = [];
+  const seen = new Set();
+  for (let o = space; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    for (const k of Object.getOwnPropertyNames(o)) {
+      if (seen.has(k) || k === 'constructor') continue;
+      seen.add(k);
+      let v;
+      try { v = space[k]; } catch (_) { continue; }
+      if (typeof v === 'function') continue;
+      out.push(k + '=' + (typeof v === 'object' ? (v && v.constructor ? v.constructor.name : v) : v));
+    }
+  }
+  log(`${space.constructor && space.constructor.name} carries: ` + (out.join(' · ') || '(nothing readable)'));
+  return null;
+}
+
+let session = null;
+
+async function enter(mode) {
+  if (!navigator.xr) { log('no navigator.xr — is this the Quest browser over https?'); return; }
+
+  // 'shared' as a REQUIRED feature first: if the flag is off, this rejects, and
+  // that rejection is the diagnosis. Falling back without it proves the headset
+  // and the page are fine and the feature is what is missing — a distinction
+  // worth one extra call.
+  let shared = true;
+  try {
+    session = await navigator.xr.requestSession(mode, {
+      requiredFeatures: ['local-floor', 'shared'],
+      optionalFeatures: ['dom-overlay'],
+      domOverlay: { root: $('hud') },
+    });
+    log(`session started (${mode}) with 'shared' required`);
+  } catch (e) {
+    log(`'shared' was refused: ${e.name}: ${e.message}`);
+    log("→ Quest browser v39+, chrome://flags → 'WebXR experiments', then restart.");
+    shared = false;
+    try {
+      session = await navigator.xr.requestSession(mode, {
+        requiredFeatures: ['local-floor'],
+        optionalFeatures: ['dom-overlay'],
+        domOverlay: { root: $('hud') },
+      });
+      log('session started WITHOUT the feature — so the headset is fine, the feature is not on');
+    } catch (e2) {
+      log(`could not start a session at all: ${e2.name}: ${e2.message}`);
+      return;
+    }
+  }
+
+  // "I could not see anything in there" has two quite different causes, and the
+  // overlay being refused is one of them. Say which before anything else.
+  const ov = session.domOverlayState;
+  if (ov && ov.type) log(`dom-overlay granted (${ov.type}) — the reading is visible in the headset`);
+  else log('dom-overlay NOT granted — nothing will be visible in session; read the page after exiting');
+
+  $('ar').disabled = $('vr').disabled = true;
+  $('exit').disabled = false;
+  $('hud').classList.add('on');
+  show('—', 'stale', shared ? 'waiting for the real space…' : "'shared' not granted");
+
+  session.addEventListener('end', () => {
+    log('session ended — the shared space is gone with it');
+    $('hud').classList.remove('on');
+    $('ar').disabled = $('vr').disabled = false;
+    $('exit').disabled = true;
+    session = null;
+  });
+
+  // A session needs a layer to run frames at all, even one that draws nothing.
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl', { xrCompatible: true, alpha: true });
+  await gl.makeXRCompatible();
+  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+  const tick = () => { if (session) session.requestAnimationFrame(tick); };
+  session.requestAnimationFrame(tick);
+
+  if (!shared) return;
+
+  let space;
+  try {
+    space = await session.requestReferenceSpace('shared');
+  } catch (e) {
+    log(`requestReferenceSpace('shared') failed: ${e.name}: ${e.message}`);
+    // The reason belongs in the box. A red box that says only "failed" sends
+    // you looking in the browser for something that is switched off in the OS.
+    show(`${e.name}: ${e.message}`, 'failed', "the session granted 'shared' but the space was refused");
+    log('→ Settings → Privacy → Device Permissions → Enhanced Spatial Services (and');
+    log('  Share point cloud data) must be ON in EACH headset: the shared space is');
+    log('  built on Shared Spatial Anchors, and those are what that permission covers.');
+    return;
+  }
+  log(`got a reference space: ${space.constructor && space.constructor.name}`);
+
+  let resets = 0;
+  const report = () => {
+    const u = readUuid(space);
+    if (!u) { show('(no uuid on the space object — see the log)', 'failed',
+                   'a space, but not a shared one'); return; }
+    // Before the first reset this is the placeholder, not the room. Saying so
+    // matters: two headsets comparing placeholders would both be wrong and
+    // would look right.
+    const settled = resets > 0;
+    show(u, settled ? 'real' : 'stale',
+         settled ? `settled after ${resets} reset${resets > 1 ? 's' : ''}`
+                 : 'provisional — waiting for reset (or we were first in)');
+    log(`uuid ${settled ? '(settled)' : '(provisional)'}: ${u}`);
+  };
+
+  space.addEventListener('reset', () => {
+    resets++;
+    log(`reset #${resets} — new coordinate system and new uuid`);
+    report();
+  });
+  report();
+
+  // No reset after a few seconds means one of two things, and they are not the
+  // same: this headset founded the space (it is never reset), or nothing is
+  // happening. Only the other headset's uuid tells them apart.
+  setTimeout(() => {
+    if (resets === 0) {
+      log('no reset yet. Either we were first into this space — which is normal, and');
+      log('the uuid above is then the real one — or the space is not being established.');
+      log('The other headset settles it: same uuid = it works.');
+    }
+  }, 8000);
+}
+
+$('ar').onclick = () => enter('immersive-ar');
+$('vr').onclick = () => enter('immersive-vr');
+$('exit').onclick = () => session && session.end();
+
+(async () => {
+  if (!navigator.xr) { log('no navigator.xr on this browser'); $('ar').disabled = $('vr').disabled = true; return; }
+  for (const m of ['immersive-ar', 'immersive-vr']) {
+    const ok = await navigator.xr.isSessionSupported(m).catch(() => false);
+    log(`${m}: ${ok ? 'supported' : 'not supported'}`);
+    if (!ok) $(m === 'immersive-ar' ? 'ar' : 'vr').disabled = true;
+  }
+})();
+</script>
+</body>
+</html>

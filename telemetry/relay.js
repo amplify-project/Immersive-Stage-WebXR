@@ -71,13 +71,19 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
   const scheme = secure ? 'wss' : 'ws';
 
   // noServer + our own upgrade listener, so that on a shared server we claim
-  // only these two paths rather than letting ws hijack every upgrade. Node only
-  // auto-destroys upgrades when nobody listens, and we are listening, so an
-  // unknown path has to be closed here or it would hang open.
+  // only these two paths rather than letting ws hijack every upgrade.
+  //
+  // What we do with a path that is not ours depends on whether we are alone.
+  // Standalone, nobody else is listening and Node only auto-destroys an upgrade
+  // when there is no listener at all — so an unknown path would hang open and we
+  // close it. Attached to the player's server we must NOT: another service is
+  // mounted there too (the timing one), its upgrade listener runs after ours,
+  // and destroying the socket first would kill every connection to it. Whoever
+  // attached us closes what nobody claimed.
   const wss = new WebSocketServer({ noServer: true });
   const onUpgrade = (req, socket, head) => {
     const pathname = (req.url || '').split('?')[0];
-    if (!PATHS.includes(pathname)) return socket.destroy();
+    if (!PATHS.includes(pathname)) { if (!attached) socket.destroy(); return; }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   };
   server.on('upgrade', onUpgrade);
@@ -111,8 +117,12 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
         // hello: meta stays server-side, and a consumer that reads `p` without
         // knowing whether it is this headset's local-floor or the shared room
         // will silently mix the two the day one spectator is in AR.
+        // `rec` rides along for the same reason as `frame`: it names the voice
+        // recording these poses belong to (docs/voice-recording.md), and a
+        // consumer or a CSV that has the poses without it cannot tell which
+        // audio file goes with them. Null when nobody is recording.
         players.set(id, { ...prev, id, meta, frame: meta.frame || 'local-floor',
-                          lastSeen: Date.now() });
+                          rec: meta.rec || null, lastSeen: Date.now() });
         // Probe at once and keep probing: the first exchange puts `srv` on the
         // very first batch, and the rest both refine it (a quieter exchange
         // measures a tighter round trip) and follow the headset's oscillator
@@ -127,6 +137,7 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
         const prev = players.get(id) || { meta: {} };
         const rec = {
           id, frame: prev.frame || 'local-floor',
+          rec: prev.rec || null,        // the voice recording, from the hello's meta
           // Three clocks, because no single one does the job. `t` and `w` are the
           // player's own, monotonic and wall, and travel untouched. `srv` is that
           // sample on OUR clock, which is the only one every player shares:

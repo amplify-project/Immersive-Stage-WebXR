@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session manager · shared playback</title>
+<style>
+  :root{--bg:#0a0e14;--surface:#111722;--surface2:#0d131c;--text:#dbe4f0;--dim:#8fa6b8;
+        --accent:#00d4ff;--warn:#ffd24a;--ok:#5fe0a0;--bad:#ff6b6b}
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;line-height:1.5;
+       margin:0;padding:24px;max-width:860px;margin-inline:auto}
+  h1{font-size:19px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);margin:0 0 4px}
+  p.sub{color:var(--dim);margin:0 0 20px;font-size:14px}
+  .card{background:var(--surface);border:1px solid #ffffff12;border-radius:10px;padding:16px;margin-bottom:16px}
+  h2{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin:0 0 12px}
+  label{display:block;font-size:12px;color:var(--dim);margin-bottom:4px}
+  input{width:100%;background:var(--surface2);border:1px solid #ffffff1a;border-radius:6px;
+        color:var(--text);padding:8px 10px;font-family:ui-monospace,monospace;font-size:13px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .row>div{flex:1 1 180px}
+  button{background:var(--accent);color:#000;border:none;border-radius:6px;padding:10px 16px;
+         font-weight:700;font-size:14px;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid #ffffff22;color:var(--text)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}
+  .state{font-family:ui-monospace,monospace;font-size:13px;color:var(--dim)}
+  .state b{color:var(--text);font-weight:600}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--bad);margin-right:7px}
+  .dot.open{background:var(--ok)}
+  .pos{font-family:ui-monospace,monospace;font-size:34px;color:var(--text);margin:10px 0 2px}
+  .hint{color:var(--dim);font-size:13px}
+  code{background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+
+<h1>Session manager</h1>
+<p class="sub">One shared clock. Every player pointed at the same session follows it —
+including whoever joins late.</p>
+
+<div class="card">
+  <h2>Session</h2>
+  <div class="row">
+    <div>
+      <label for="svc">Timing service</label>
+      <input id="svc" spellcheck="false">
+    </div>
+    <div>
+      <label for="sid">Session id</label>
+      <input id="sid" value="1" spellcheck="false">
+    </div>
+    <div>
+      <label for="dur">Duration (s)</label>
+      <input id="dur" value="0" spellcheck="false">
+    </div>
+  </div>
+  <div class="controls">
+    <button id="connect">Connect</button>
+    <button id="disconnect" class="ghost" disabled>Disconnect</button>
+  </div>
+  <p class="hint" id="join" style="margin-top:14px"></p>
+</div>
+
+<div class="card">
+  <h2>Playback</h2>
+  <div class="pos" id="pos">—</div>
+  <div class="state"><span class="dot" id="dot"></span><span id="state">not connected</span></div>
+  <div class="controls" style="margin-top:14px">
+    <button id="play" disabled>Play</button>
+    <button id="pause" class="ghost" disabled>Pause</button>
+    <button id="restart" class="ghost" disabled>Play from start</button>
+    <button id="stop" class="ghost" disabled>Stop</button>
+  </div>
+  <p class="hint" style="margin-top:14px">
+    <b>Stop</b> is pause plus rewind — the difference matters to a player that joins
+    afterwards: it lands where the session is, and after a stop the session is at zero.
+  </p>
+</div>
+
+<script type="module">
+import { TimingObject } from './src/vendor/motion/TimingObject.js';
+import { SocketTimingProvider } from './src/vendor/motion/SocketTimingProvider.js';
+
+const $ = id => document.getElementById(id);
+// Mismo origen y mismo certificado que esta página: el servicio va montado en
+// el servidor del player (telemetry/timing.js), no en un proceso aparte.
+$('svc').value = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/timing`;
+
+let timing = null, provider = null, tick = null;
+
+const fmt = (s) => {
+  if (!Number.isFinite(s)) return '—';
+  const sign = s < 0 ? '-' : ''; s = Math.abs(s);
+  const m = Math.floor(s / 60), r = (s % 60).toFixed(1).padStart(4, '0');
+  return `${sign}${m}:${r}`;
+};
+
+const setLive = (on) => {
+  for (const id of ['play', 'pause', 'restart', 'stop']) $(id).disabled = !on;
+  $('connect').disabled = on; $('disconnect').disabled = !on;
+};
+
+function refresh() {
+  if (!timing) return;
+  const v = timing.query();
+  $('pos').textContent = fmt(v.position);
+  const running = v.velocity !== 0;
+  $('state').textContent = `${timing.readyState} · ${running ? 'playing' : 'paused'} · rate ${v.velocity}`;
+  $('dot').className = 'dot' + (timing.readyState === 'open' ? ' open' : '');
+}
+
+$('connect').onclick = () => {
+  const svc = $('svc').value.trim(), sid = $('sid').value.trim();
+  const dur = parseFloat($('dur').value) || 0;
+  // The control page is an ordinary client of the same timing object: it just
+  // happens to be the one that writes. Nothing here is privileged, which is why
+  // a second control page — or a player — can take over without a handover.
+  provider = new SocketTimingProvider(svc, sid, dur, 'manager-' + Math.random().toString(36).slice(2, 8));
+  timing = new TimingObject();
+  timing.srcObject = provider;
+  timing.addEventListener('readystatechange', refresh);
+  timing.addEventListener('change', refresh);
+  setLive(true);
+  tick = setInterval(refresh, 100);
+  $('join').innerHTML = `Players join with <code>?sync=${sid}</code> on the player URL ` +
+                        `(add <code>&timing=${svc}</code> if the service is elsewhere).`;
+};
+
+$('disconnect').onclick = () => {
+  clearInterval(tick); tick = null;
+  try { provider.close(); } catch (_) { /* already gone */ }
+  timing = provider = null;
+  setLive(false);
+  $('pos').textContent = '—'; $('state').textContent = 'not connected';
+  $('dot').className = 'dot';
+};
+
+// Play, pause and stop are all one operation: write a vector. Velocity 1 means
+// "running from here", 0 means "sitting at here". There is no separate command
+// channel, and nothing to replay for a client that was not listening — whoever
+// asks later reads the same vector and works out where that puts them now.
+$('play').onclick    = () => timing.update(timing.query().position, 1);
+$('pause').onclick   = () => timing.update(timing.query().position, 0);
+$('restart').onclick = () => timing.update(0, 1);
+$('stop').onclick    = () => timing.update(0, 0);
+</script>
+</body>
+</html>
