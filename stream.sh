@@ -59,8 +59,10 @@ CODEC="${CODEC:-vp9}"
 #      VIDEO_SIZE=3840x1920  VIDEO_FR=30  VIDEO_URL=udp://0.0.0.0:5001
 #      AUDIO_SRC=usb|udp   AUDIO_DEVICE=hw:X32  AUDIO_CHANNELS=32
 #      AUDIO_URL=udp://0.0.0.0:5002
-#      AUDIO_CODEC=pcm_s32le  formato de muestra al abrir ALSA (por defecto; las
-#                          interfaces UAC2 suelen NO aceptar el s16le de ffmpeg)
+#      AUDIO_CODEC=pcm_s32le  sample format to open ALSA with. Empty (default) =
+#                          ask the device with arecord: S32_LE for the X32/UAC2
+#                          desks, S16_LE for a USB headset or webcam mic.
+#                          AUDIO_CHANNELS is clamped to what the device opens with.
 #      FOA_CH="0,1,2,3"    canales del FOA dentro del device/stream (orden W,X,Y,Z)
 #      FOA_AFORMAT=0|1     1 → matriz A→B del Rode NT-SF1 antes de FORMAT
 #      STEM_CH="4,5,6,7"   canal de cada stem (mismo orden que la escena)
@@ -110,7 +112,37 @@ if [[ "$CAPTURE" == "1" ]]; then
   IFS=',' read -r -a FOA_CH_ARR <<< "$FOA_CH"
   [[ -n "$STEM_CH" ]] && IFS=',' read -r -a STEM_CH_ARR <<< "$STEM_CH"
   NSTEMS=${#STEM_CH_ARR[@]}
-  (( ${#FOA_CH_ARR[@]} == 4 )) || { echo "FOA_CH debe tener 4 canales (tiene ${#FOA_CH_ARR[@]}): '$FOA_CH'"; exit 1; }
+  (( ${#FOA_CH_ARR[@]} == 4 )) || { echo "FOA_CH debe tener 4 canales (tiene ${#FOA_CH_ARR[@]}): '$FOA_CH'"; exit 1; }  # Ask the ALSA device what it really takes, instead of guessing. The X32 and
+  # other UAC2 desks only open as S32_LE with all their channels; a USB headset
+  # or webcam mic only as S16_LE mono. Forcing either one breaks the other
+  # ("cannot set sample format ... Invalid argument"). AUDIO_CODEC still wins.
+  if [[ "$AUDIO_SRC" == "usb" && -n "$AUDIO_DEVICE" ]] && command -v arecord >/dev/null; then
+    hwp=$(timeout 3 arecord -D "$AUDIO_DEVICE" --dump-hw-params -d 1 /dev/null 2>&1 || true)
+    fmts=$(sed -n 's/^FORMAT: *//p' <<< "$hwp")
+    chs=$(sed -n 's/^CHANNELS: *//p' <<< "$hwp" | tr -d '[]')
+    if [[ -z "${AUDIO_CODEC:-}" && -n "$fmts" ]]; then
+      for f in S32_LE S16_LE S24_LE; do
+        [[ " $fmts " == *" $f "* ]] && { AUDIO_CODEC="pcm_$(tr 'A-Z' 'a-z' <<< "${f/_/}")"; break; }
+      done
+      echo "  ALSA device : $AUDIO_DEVICE takes [$fmts] → $AUDIO_CODEC"
+    fi
+    if [[ -n "$chs" ]]; then
+      read -r chmin chmax <<< "$chs"; chmax="${chmax:-$chmin}"
+      if (( AUDIO_CHANNELS < chmin || AUDIO_CHANNELS > chmax )); then
+        want=$AUDIO_CHANNELS
+        (( AUDIO_CHANNELS > chmax )) && AUDIO_CHANNELS=$chmax || AUDIO_CHANNELS=$chmin
+        echo "  ALSA device : asked for $want channel(s), the device opens with $( [[ $chmin == "$chmax" ]] && echo "$chmin" || echo "$chmin..$chmax") → using $AUDIO_CHANNELS"
+      fi
+    fi
+    [[ -z "$fmts" ]] && echo "  ALSA device : could not query $AUDIO_DEVICE (busy?); opening as ${AUDIO_CODEC:-pcm_s32le}, ${AUDIO_CHANNELS} ch"
+  fi
+  # A mono/stereo device has no B-format: ffmpeg's pan feeds the channels it lacks
+  # with silence, so channel 0 lands on W (omni, no direction). Say it, so a flat
+  # sound field reads as expected and not as a bug.
+  if [[ "$AUDIO_SRC" == "usb" && "$AUDIO_CHANNELS" =~ ^[0-9]+$ ]] && (( AUDIO_CHANNELS < 4 )); then
+    echo "  NOTE: the audio device has $AUDIO_CHANNELS channel(s), not an ambisonic mic:"
+    echo "        FOA channels beyond $((AUDIO_CHANNELS-1)) are silent → heard as omni, no direction."
+  fi
 fi
 
 # ── Close-ups (Caso B): vídeos "de cerca" por músico, empaquetados como pistas
@@ -388,8 +420,16 @@ build_inputs_capture() {
 
   # — Cada stem = 1 canal del input 1, por índice —
   local merge_in="[foa]"
+  # A stem with no channel ('-' or empty: a file stem with no live patch) stays in
+  # the output as silence, so channel 4+i still belongs to scene.stems[i] in the
+  # player. Dropping it would shift every later stem onto the wrong musician.
   for ((i=0; i<NSTEMS; i++)); do
-    fc+="[1:a]pan=mono|c0=c${STEM_CH_ARR[i]}[s${i}];"
+    local sc="${STEM_CH_ARR[i]}"
+    if [[ "$sc" =~ ^[0-9]+$ ]]; then
+      fc+="[1:a]pan=mono|c0=c${sc}[s${i}];"
+    else
+      fc+="[1:a]pan=mono|c0=0*c0[s${i}];"
+    fi
     merge_in+="[s${i}]"
   done
 
@@ -420,7 +460,7 @@ if [[ "$CAPTURE" == "1" ]]; then
   echo "  captura     : vídeo[$VIDEO_SRC]=${VIDEO_SRC/usb/$VIDEO_DEVICE}${VIDEO_URL:+ $VIDEO_URL}   audio[$AUDIO_SRC]=${AUDIO_SRC/usb/$AUDIO_DEVICE}${AUDIO_URL:+ $AUDIO_URL}"
   echo "  FOA canales : ${FOA_CH}${FOA_AFORMAT:+  (A-format NT-SF1→B: ${FOA_AFORMAT})}"
   [[ "$AUDIO_DELAY" != "0" && -n "$AUDIO_DELAY" ]] && echo "  delay audio : ${AUDIO_DELAY} ms (adelay, +=audio más tarde)"
-  (( NSTEMS > 0 )) && { echo "  patch stems (canal del device → orden de salida 4..$((3+NSTEMS))):"; for ((i=0;i<NSTEMS;i++)); do echo "    · ch ${STEM_CH_ARR[i]} → stem $i"; done; }
+  (( NSTEMS > 0 )) && { echo "  patch stems (canal del device → orden de salida 4..$((3+NSTEMS))):"; for ((i=0;i<NSTEMS;i++)); do sc="${STEM_CH_ARR[i]}"; [[ "$sc" =~ ^[0-9]+$ ]] && echo "    · ch $sc → stem $i" || echo "    · (no channel) → stem $i: silence"; done; }
 elif (( NSTEMS > 0 )); then
   echo "  orden stems (canales 4..$((3+NSTEMS))):"; for s in "${STEM_ARR[@]}"; do echo "    · $s"; done
 fi

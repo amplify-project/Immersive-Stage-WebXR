@@ -386,6 +386,10 @@
       <div><label>Publish to S3 (empty = local)</label><input type="text" id="s3Bucket" placeholder="s3://my-bucket/live"></div>
       <div style="flex:0 0 140px"><label>AWS region</label><input type="text" id="s3Region" placeholder="eu-west-1"></div>
     </div>
+    <div class="row">
+      <div><label>Player URL (CloudFront manifest) — what "Open player" plays when publishing to S3</label>
+        <input type="text" id="publicUrl" placeholder="https://dxxxxxxxxxxxx.cloudfront.net/manifest.mpd"></div>
+    </div>
     <p class="hint" id="codecWarn"></p>
     <div class="row" style="margin-top:12px">
       <button class="go" id="btnVod"  onclick="encode('vod')">Generate VOD</button>
@@ -413,6 +417,8 @@
     <h2>Status · <span id="statusBadge" class="badge b-idle">idle</span></h2>
     <div class="small" id="statusLine" style="margin-bottom:8px"></div>
     <div id="log"></div>
+    <div class="small" style="margin-top:6px">Last 40 lines ·
+      <a href="/api/encode/log" target="_blank" rel="noopener">full log ↗</a> (command, env and every line; reload the tab to refresh)</div>
     <div class="row" style="margin-top:12px">
       <button onclick="saveScene(true)">Save scene</button>
       <button class="ghost" onclick="openPlayer()">Open player</button>
@@ -464,7 +470,7 @@ let scene = {
   alignment: { yawOffsetDeg: 0, mirror: false },
   ar: {},                       // bedGain, venue (player) + roomExtent (this view)
   spotlight: { maxBoost: 1.5, focusExp: 4, restGain: 0, zoomMax: 2.5 },
-  encode: { codec: 'h264_nvenc', scale: '1920:960', vbitrate: '6000k', seg: 2, s3Bucket: '', s3Region: '' },
+  encode: { codec: 'h264_nvenc', scale: '1920:960', vbitrate: '6000k', seg: 2, s3Bucket: '', s3Region: '', publicUrl: '' },
   live: {
     video: { src: 'usb', device: '', url: '', size: '', fr: 30, informat: '' },
     audio: { src: 'usb', device: '', url: '', channels: 32, delay: 0,
@@ -736,6 +742,7 @@ function bindControls() {
   $('codec').value = scene.encode.codec; $('seg').value = scene.encode.seg;
   $('scale').value = scene.encode.scale||''; $('vbitrate').value = scene.encode.vbitrate||'';
   $('s3Bucket').value = scene.encode.s3Bucket||''; $('s3Region').value = scene.encode.s3Region||'';
+  $('publicUrl').value = scene.encode.publicUrl||'';
   // Video and audio go in separate adaptation sets with mixed containers
   // (H.264→mp4 + Opus→webm), so H.264 is compatible with the Quest. Multichannel
   // audio always comes out in WebM. We only warn about the cost of software VP9.
@@ -750,6 +757,7 @@ function bindControls() {
   $('vbitrate').oninput = e => scene.encode.vbitrate = e.target.value.trim();
   $('s3Bucket').oninput = e => scene.encode.s3Bucket = e.target.value.trim();
   $('s3Region').oninput = e => scene.encode.s3Region = e.target.value.trim();
+  $('publicUrl').oninput = e => scene.encode.publicUrl = e.target.value.trim();
   codecWarn();
   // selected panel
   $('selName').oninput = e => { if(selected>=0){ scene.stems[selected].name=e.target.value;
@@ -1157,7 +1165,7 @@ function renderStems() {
              oninput="scene.stems[${i}].name=this.value;drawViews()">
       ${live ? `<span class="small" style="flex:none">ch</span>
       <input type="number" class="az" style="width:54px" min="0" value="${s.channel!=null?s.channel:''}"
-             onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=+this.value">` : ''}
+             onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=this.value===''?null:+this.value" placeholder="—" title="Device channel for this musician. Empty = silent in live">` : ''}
       ${!live ? `<select title="Close-up video (Case B)" style="flex:0 0 130px"
              onclick="event.stopPropagation()"
              onchange="scene.stems[${i}].closeup=this.value||undefined">${videoOptionsHTML(s.closeup)}</select>
@@ -1752,7 +1760,23 @@ async function makeProxy(){
   const j=await r.json();
   if(r.ok){ toast('Proxy running → '+j.out); } else { toast('Error: '+(j.error||r.status)); }
 }
-function openPlayer(){ window.open(location.origin+'/index.html','_blank'); }
+// Publishing to S3 → play what the audience gets, through CloudFront. The page
+// itself still comes from this server; only the manifest (?src=) is remote.
+// Without a bucket, or without its public URL, play the local encoded/ output.
+// The CloudFront domain cannot be derived from the bucket name, hence the field.
+function playerManifestUrl(){
+  const e = scene.encode || {};
+  let u = (e.publicUrl || '').trim();
+  if (!e.s3Bucket || !u) return '';
+  if (!/\.mpd(\?|$)/.test(u)) u = u.replace(/\/+$/, '') + '/manifest.mpd';
+  return u;
+}
+function openPlayer(){
+  const src = playerManifestUrl();
+  if (scene.encode && scene.encode.s3Bucket && !src)
+    toast('Publishing to S3 but no Player URL: opening the local stream');
+  window.open(location.origin + '/index.html' + (src ? '?src=' + encodeURIComponent(src) : ''), '_blank');
+}
 
 async function pollStatus() {
   let s; try { s = await fetch('/api/encode/status').then(r=>r.json()); } catch(_){ return; }
