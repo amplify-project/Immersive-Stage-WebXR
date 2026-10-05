@@ -111,9 +111,20 @@ the camera. What it does have is mileage — every session with real musicians l
 something in `docs/`, from the A/V offset a USB camera introduces to the frame
 budget of passthrough on a Quest 3.
 
-### Funding
+## Funding
 
-Funded by the European Union under grant agreement.
+<!-- Add the EU emblem here before publication: the official file is at
+     https://commission.europa.eu/about/visual-identity_en -->
+
+Co-funded by the European Union under Grant Agreement No **101177413**
+(**AMPLIFY** — *Phygital Solutions for the Cultural and Creative Industries*),
+Horizon Europe call `HORIZON-CL2-2024-HERITAGE-01-03`, November 2024 – October
+2027, coordinated by [Vicomtech](https://www.vicomtech.org).
+
+> Views and opinions expressed are however those of the author(s) only and do
+> not necessarily reflect those of the European Union or the European Research
+> Executive Agency (REA). Neither the European Union nor the granting authority
+> can be held responsible for them.
 
 ---
 
