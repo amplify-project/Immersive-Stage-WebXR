@@ -166,12 +166,60 @@ function initThree() {
 }
 
 // ══════════════════════════════════════════════════════
+// TELEMETRY MODES — screen (desktop/tablet), vr, ar
+// ══════════════════════════════════════════════════════
+// Every mode puts p/q in a different frame, and the relay reads the frame from
+// the hello. So a switch is stop() + start(), not a meta patch: stop() flushes
+// the samples taken under the old mode and drops what could not be sent, and the
+// new connection's hello carries the new frame before any sample in it.
+const TELEMETRY_MODES = {
+  screen: { frame: 'screen' },        // the 360 view on a screen: q only, p = 0
+  vr:     { frame: 'local-floor' },   // the headset's own floor (see arTelemetryPose)
+  ar:     { frame: 'room' },          // same frame as stem.ar
+};
+let telemetryScreen = false;          // screen mode enabled for this page
+
+function screenInput() {
+  if (useGyro) return 'gyro';
+  return matchMedia('(pointer: coarse)').matches ? 'touch' : 'mouse';
+}
+
+function telemetrySetMode(mode) {
+  if (!telemetry) return;
+  if (mode === 'screen') telemetryScreen = true;
+  telemetry.stop();
+  Object.assign(telemetry.meta, {
+    mode, frame: TELEMETRY_MODES[mode].frame,
+    input: mode === 'screen' ? screenInput() : 'xr',
+    rec: voice?.recRef || null,   // en el hello, que es donde el relay lee el meta
+  });
+  telemetry.start();
+}
+
+// Leaving VR/AR: back to the screen view if this page reports it, else silence.
+function telemetryLeaveXR() {
+  if (telemetryScreen) telemetrySetMode('screen');
+  else telemetry?.stop();
+}
+
+// The view on a screen has no head position: p is the centre of the sphere,
+// where the camera sits. q is the camera's orientation (mouse/touch drag or the
+// gyroscope), z the FOV zoom on the same 0..1 scale VR reports.
+const _telScreenP = { x: 0, y: 0, z: 0 };
+function sampleScreenTelemetry() {
+  if (!telemetry || telemetry.meta.mode !== 'screen') return;
+  telemetry.sample(_telScreenP, camera.quaternion, engine?.getZoomNormalized() ?? 0,
+                   engine?.getFocusedStem(0.3) ?? -1, videoEl?.currentTime || 0);
+}
+
+// ══════════════════════════════════════════════════════
 // RENDER LOOP
 // ══════════════════════════════════════════════════════
 function renderLoop() {
   if (!renderer.xr.isPresenting) {
     requestAnimationFrame(renderLoop);
     applyRotation();
+    sampleScreenTelemetry();
   }
   if (videoEl && videoEl.readyState >= 2) {
     if (videoTexture && !HAS_RVFC) videoTexture.needsUpdate = true;
@@ -1101,6 +1149,9 @@ async function setupFOA() {
         });
         window.telemetry = telemetry;   // inspección desde consola
         toast('Telemetría lista → ' + _turl);
+        // Desktop / tablet: report the view too, unless the scene opts out with
+        // "screen": false. VR/AR switch the mode on session enter and back here on exit.
+        if (telemetryCfg?.screen !== false || _tq.get('telemetry')) telemetrySetMode('screen');
       }
     }
 
@@ -1549,6 +1600,7 @@ function enableGyro() {
     deviceOrientation = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
     if (!useGyro) {
       useGyro = true;
+      if (telemetry?.meta.mode === 'screen') telemetry.setMeta({ input: 'gyro' });
       document.getElementById('gyro-badge').style.display = 'block';
       toast('Giroscopio activado');
     }
@@ -1754,18 +1806,14 @@ async function enterXR() {
     await renderer.xr.setSession(xrSession);
 
     // frame: en qué marco viajan p/q. En VR es el del propio casco (ver arTelemetryPose).
-    if (telemetry) {
-      telemetry.meta.mode = 'vr'; telemetry.meta.frame = 'local-floor';
-      telemetry.meta.rec = voice?.recRef || null;   // en el hello, que es donde el relay lee el meta
-      telemetry.start();
-    }
+    telemetrySetMode('vr');
     voice?.mark('enter-vr');
 
     document.getElementById('xr-btn').textContent = 'EXIT VR';
 
     xrSession.addEventListener('end', () => {
       xrSession = null;
-      telemetry?.stop();
+      telemetryLeaveXR();
       voice?.mark('exit-vr');   // la grabación sigue: lo que se dice al salir vale tanto como lo de dentro
       if (debugMesh) debugMesh.visible = false;
       if (SYNCLOG || SHAREDLOG) arPerfPanelClear();
@@ -3020,11 +3068,7 @@ async function enterAR() {
     sharedGroup.matrix.identity();
     sharedGroup.matrixWorldNeedsUpdate = true;
     // 'room': mismo marco que stem.ar y que las posiciones que publicarán las cámaras.
-    if (telemetry) {
-      telemetry.meta.mode = 'ar'; telemetry.meta.frame = 'room';
-      telemetry.meta.rec = voice?.recRef || null;
-      telemetry.start();
-    }
+    telemetrySetMode('ar');
     voice?.mark('enter-ar');
     renderer.setClearAlpha(0);                    // deja ver el passthrough
     document.getElementById('ar-btn').textContent = 'EXIT AR';
@@ -3071,7 +3115,7 @@ async function enterAR() {
         arPerfDump();
         console.log('[arperf] ventanas:', window.__arperf);
       }
-      telemetry?.stop();
+      telemetryLeaveXR();
       voice?.mark('exit-ar');
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));

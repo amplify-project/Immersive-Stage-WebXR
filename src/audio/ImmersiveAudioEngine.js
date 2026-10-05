@@ -417,6 +417,17 @@ export class ImmersiveAudioEngine {
     this._updateSpotlight();
   }
 
+  /**
+   * The current zoom on the same 0..1 scale as setZoomNormalized(), whichever
+   * way it was set. Lets the desktop player (FOV → setZoomByFactor) report the
+   * same range as VR (joystick → setZoomNormalized).
+   */
+  getZoomNormalized() {
+    const span = this._zoomMax - this._zoomMin;
+    if (!(span > 0)) return 0;
+    return Math.min(1, Math.max(0, ((this._zoomFactor ?? this._zoomMin) - this._zoomMin) / span));
+  }
+
   // ── Stems por músico (spotlight posicional) ───────────────────────────────
 
   /**

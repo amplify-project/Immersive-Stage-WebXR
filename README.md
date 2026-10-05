@@ -149,8 +149,9 @@ records **what they said**. For anyone wearing the headset, both are personal da
 
 - Both are **off by default** (`"telemetry": { "enabled": false }` in
   `scene.json`; voice only with `?voice=1`).
-- The player only samples pose **inside a VR or AR session**; a desktop browser
-  sends nothing, whatever the flag says.
+- With the flag on, a desktop or tablet also reports where the view points
+  (mouse, touch or gyroscope), tagged `frame: "screen"` so it is never mistaken for
+  a head. `"screen": false` in the `telemetry` block limits it to VR/AR sessions.
 - Data goes to the same server that served the player, and nowhere else.
 - Recordings are git-ignored, never served over HTTP, and **no recorded session
   is in this repository**.
