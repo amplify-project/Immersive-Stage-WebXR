@@ -52,8 +52,14 @@ function pushLog(line) {
   if (!job) return;
   line = line.replace(/\s+$/, '');
   if (!line) return;
-  job.log.push(line);
-  if (job.log.length > 300) job.log.shift();
+  // ffmpeg rewrites its progress line ("frame= … speed=") with \r several times a
+  // second. Keep only the latest one in a row, so a long live run does not push
+  // the start-up output (the command, the errors) out of the buffer.
+  const progress = /^\s*(frame|size)=/.test(line);
+  if (progress && job.lastWasProgress) job.log[job.log.length - 1] = line;
+  else job.log.push(line);
+  job.lastWasProgress = progress;
+  if (job.log.length > 5000) job.log.shift();
   const m = /speed=\s*([0-9.]+x)/.exec(line);
   if (m) job.speed = m[1];
   const f = /frame=\s*(\d+)/.exec(line);
@@ -67,7 +73,8 @@ function startJob(mode, cmd, args, env) {
   // el device, stream.sh lo ve "ocupado". Los paramos antes de arrancar.
   stopMeasure(); stopSnapshot();
   const proc = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env }, detached: true });
-  job = { proc, mode, log: [], speed: '', frame: 0, startedAt: Date.now(), exit: null, cmd: [cmd, ...args].join(' ') };
+  job = { proc, mode, log: [], speed: '', frame: 0, startedAt: Date.now(), exit: null, cmd: [cmd, ...args].join(' '),
+          env: Object.entries(env || {}).map(([k, v]) => `${k}=${JSON.stringify(String(v))}`).join(' ') };
   const onData = b => b.toString().split(/\r|\n/).forEach(pushLog);
   proc.stdout.on('data', onData);
   proc.stderr.on('data', onData);
@@ -545,7 +552,9 @@ async function handleAPI(req, res, pathname) {
           AUDIO_DELAY: String(A.delay || 0),
           FOA_CH: (foa.ch && foa.ch.length === 4 ? foa.ch : [0, 1, 2, 3]).join(','),
           FOA_AFORMAT: foa.aformat ? '1' : '0',
-          STEM_CH: (scene.stems || []).map(s => (s.channel != null ? s.channel : '')).join(','),
+          // '-' = no live channel: stream.sh outputs silence there. Never '', or bash drops
+          // the trailing empties and the stem count no longer matches scene.stems.
+          STEM_CH: (scene.stems || []).map(s => (Number.isInteger(s.channel) ? s.channel : '-')).join(','),
         };
       } else {
         // ── VOD (o live de bucle de archivos) desde archivos ────────────────
@@ -669,6 +678,17 @@ async function handleAPI(req, res, pathname) {
         running: !!job.proc, mode: job.mode, speed: job.speed, frame: job.frame,
         exit: job.exit, startedAt: job.startedAt, log: job.log.slice(-40),
       } : { running: false, log: [] });
+    }
+    // Whole log of the last job as plain text, for the editor's "Full log" tab:
+    // the exact command and its env first, so it can be rerun by hand.
+    if (pathname === '/api/encode/log' && req.method === 'GET') {
+      const head = job ? [
+        `# ${job.mode} · started ${new Date(job.startedAt).toISOString()} · ` +
+          (job.proc ? 'running' : `exit ${job.exit}`),
+        `# ${job.env ? job.env + ' ' : ''}${job.cmd}`, '',
+      ] : ['# no encode has run since the server started'];
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(head.concat(job ? job.log : []).join('\n') + '\n');
     }
     if (pathname === '/api/encode/stop' && req.method === 'POST') {
       return sendJSON(res, 200, { ok: stopJob() });

@@ -86,7 +86,9 @@ Keys are **not** in this repo — they are shared out of band and installed on t
 production machine (see *Credentials* below). Wiring:
 
 - **Editor** (`editor.html` → `scene.json`): `Publish to S3` = `s3://mi-360-streaming`,
-  `AWS region` = `eu-west-2`.
+  `AWS region` = `eu-west-2`, `Player URL` = `https://d2niecnaz2acxt.cloudfront.net/manifest.mpd`.
+  With a bucket and a Player URL, **Open player** plays the CloudFront stream (what the
+  audience gets); without either, it plays the local `encoded/` output.
 - **Player**: open with
   `index.html?src=https://d2niecnaz2acxt.cloudfront.net/manifest.mpd`.
 
