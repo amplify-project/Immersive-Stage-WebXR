@@ -43,13 +43,28 @@ a stem's gain as a function of **where you look × how much you zoom**.
 
 ## Requirements
 
-- **Node.js**. The player and editor use only built-in modules; the optional
-  pose telemetry needs `ws` (`cd telemetry && npm install`). Without it the
-  server warns once and runs with telemetry disabled.
-- **ffmpeg** and **ffprobe** on `PATH` (with `libvpx-vp9`, `libopus`, `libx264`).
-- **git-lfs** (media files `*.mp4 / *.wav / *.mp3` are stored via LFS).
-- WebXR/VR over IP needs **HTTPS** → generate a self-signed certificate with
-  `./gen-cert.sh`.
+What each piece of the project calls, and what it is for:
+
+| Dependency | Needed for | Package (Ubuntu) |
+| --- | --- | --- |
+| **Node.js** (developed on v22) | `server.js` — player, editor, API. Built-in modules only. | `nodejs` (or nvm) |
+| `ws` (npm) | Pose telemetry and voice recording only. Without it the server warns once and runs with them disabled. | `cd telemetry && npm install` |
+| **ffmpeg** + **ffprobe** on `PATH`, with `libvpx-vp9`, `libopus`, `libx264` | Every encode (`stream.sh`, VOD and live) and media probing in the editor. | `ffmpeg` |
+| ffmpeg built with **NVENC** + NVIDIA driver ≥ 550 | Live 4K (`CODEC=h264_nvenc`). Software encoders cannot keep up at 4K. | see [`docs/installation.md`](docs/installation.md) |
+| **git-lfs** | Media files (`*.mp4 / *.wav / *.mp3`) and the Insta360 SDK in `x4_bridge/libs/`. | `git-lfs` |
+| **openssl** | `./gen-cert.sh` — WebXR over a LAN IP needs HTTPS. | `openssl` |
+| **v4l2-ctl** | Live: listing USB video devices in the editor. | `v4l-utils` |
+| **arecord** | Live: listing USB audio devices in the editor. | `alsa-utils` |
+| **AWS CLI** + credentials | Live: publishing to S3 (`upload-s3.sh`). Not needed for local output. | see [`docs/installation.md`](docs/installation.md) |
+| `v4l2loopback` + Insta360 SDK | Only for an Insta360 X4 through the USB bridge. A camera that shows up as a plain UVC webcam does not need it. | see [`x4_bridge/README.md`](x4_bridge/README.md) |
+
+---
+
+## Installation
+
+For a development checkout, the *Quick start* below is enough. To set up the
+production machine from scratch (system packages, NVENC, AWS CLI and credentials,
+Insta360 bridge), follow [`docs/installation.md`](docs/installation.md).
 
 ---
 
@@ -327,6 +342,7 @@ src/audio/              Reusable immersive-audio engine (ESM)
   HOAST*.js / *.js          Cardioid fallback, matrices, axes
 media/                  360 video, FOA bed and stems (Git LFS)
 meshes/                 Musician .glb models for AR (git-ignored but test-figure.glb)
+docs/installation.md    Production machine setup: packages, NVENC, AWS CLI, X4 bridge
 docs/architecture.md    Dev guide: how the pieces fit + how to extend
 docs/core-api.md        Engine API + AR mode + close-up multi-track reference
 docs/musician-meshes.md 3D models per musician in AR: sizing, editor, upload
