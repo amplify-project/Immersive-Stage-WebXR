@@ -1,4 +1,4 @@
-# Livestreamed Immersive Player
+# AMPLIFY Immersive-Stage-WebXR
 
 Web player for **360° video + Ambisonics (FOA) audio**, binaurally decoded, that
 runs in a desktop browser and in **WebXR on a Meta Quest**. Each musician also has
