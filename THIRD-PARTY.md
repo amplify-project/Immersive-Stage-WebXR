@@ -1,6 +1,6 @@
 # Third-party components
 
-This repository's own code is BSD 2-Clause (see [`LICENSE`](LICENSE)). The
+This repository's own code is GPLv3 (see [`LICENSE`](LICENSE)). The
 components below are not ours and keep their own terms. Nothing is bundled by a
 package manager: browser libraries are loaded from a CDN by `index.html`, and
 the two files under `src/vendor/` travel with the repository so the player still
@@ -38,7 +38,7 @@ web player. They were adapted to be framework-independent and to accept a WebXR
 pose directly; the zoom matrices are taken as they are.
 
 > **«CONFIRM before publishing»** — the licence of hoast360 and whether this
-> repository's BSD 2-Clause release is compatible with it. If it is a copyleft
+> repository's GPLv3 release is compatible with it. If it is a copyleft
 > licence, these files must either keep that licence (and say so in their
 > headers) or be replaced. Everything else in `src/audio/`
 > (`ImmersiveAudioEngine.js`, `OmnitoneFOADecoder.js`, `ambisonicAxes.js`,

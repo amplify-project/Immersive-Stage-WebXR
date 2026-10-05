@@ -72,7 +72,7 @@ media/                  360 video, FOA bed and stems (Git LFS — not free to re
 meshes/                 Musician .glb models for AR (git-ignored but test-figure.glb)
 tools/                  Node tests, bed analysis, docs-bundle.sh (all docs in one file)
 docs/                   Guides — indexed in the README
-LICENSE                 BSD 2-Clause — the code only
+LICENSE                 GPLv3 — the code only
 THIRD-PARTY.md          Libraries, vendored files and derived code, with licences
 ```
 

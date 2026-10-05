@@ -16,7 +16,7 @@ their position in space.
 > **Research prototype from the AMPLIFY project**, built at
 > [Vicomtech](https://www.vicomtech.org) and tested on real hardware: a Meta
 > Quest 3, a 360° camera and a 32-channel desk in a room with musicians. The code
-> is BSD 2-Clause; the sample recording in `media/` is **not** free to reuse —
+> is GPLv3; the sample recording in `media/` is **not** free to reuse —
 > see [Licence](#licence).
 
 ---
@@ -41,7 +41,8 @@ path, mic to ears, is in [`docs/audio-pipeline.md`](docs/audio-pipeline.md).
 ## Quick start
 
 Requirements: **Node.js**, **ffmpeg/ffprobe** on `PATH` (with `libvpx-vp9`,
-`libopus`, `libx264`) and **git-lfs**.
+`libopus`, `libx264`) and **git-lfs**. Live capture and S3 publishing need more
+(NVENC, capture tools, AWS CLI): see [Installation](docs/installation.md).
 
 ```bash
 git lfs install && git lfs pull       # fetch the sample media
@@ -66,6 +67,7 @@ certificate. Desktop controls: drag to look, mouse wheel to zoom, space to play.
 |-------|----------------|
 | [Preparing and encoding a scene](docs/encoding.md) | Editor workflow, the ambisonic bed, `stream.sh`, and the three Quest pitfalls |
 | [Live scene setup](docs/live-editor-tutorial.md) | From cold hardware to a live stream: the editor's LIVE panel, A/V delay, publishing |
+| [Installation](docs/installation.md) | Production machine from scratch: every dependency, NVENC, AWS CLI and credentials |
 | [Production hardware](docs/produccion-hardware.md) | The capture/encode PC, NVENC, S3/CloudFront publishing |
 | [`x4_bridge/`](x4_bridge/README.md) | Insta360 X4 → virtual camera bridge |
 | [Reference](docs/reference.md) | Player controls, debug flags, test tools, file map, `/api/*`, `scene.json` schema |
