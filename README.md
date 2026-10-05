@@ -113,11 +113,7 @@ budget of passthrough on a Quest 3.
 
 ### Funding
 
-Funded by the European Union under grant agreement No «NNNNNN» («AMPLIFY —
-full project title», «call / programme»). Views and opinions expressed are
-however those of the author(s) only and do not necessarily reflect those of the
-European Union or «the granting authority». Neither the European Union nor the
-granting authority can be held responsible for them.
+Funded by the European Union under grant agreement.
 
 ---
 
