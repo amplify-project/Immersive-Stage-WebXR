@@ -30,7 +30,7 @@ Unity are touched** — you swap the relay's internals for a Redis-backed one.
 ## Coordinate frame (read this)
 
 Which frame `p`/`q` are in **depends on the mode**: `"local-floor"` in VR,
-`"room"` in AR. The player declares it in the `hello` (`meta.frame`) and the relay
+`"room"` in AR, `"screen"` on a desktop or tablet. The player declares it in the `hello` (`meta.frame`) and the relay
 puts it on **every** player record it emits, snapshot and update alike, as
 `frame`. Read it rather than assuming — the day one spectator joins in AR, a
 consumer that assumes will mix two frames with no error anywhere.
@@ -51,6 +51,24 @@ someone standing in the same spot, and distance from a listener to a musician is
 a subtraction. A session that never calibrated has an identity transform, so its
 poses are unchanged — `room` is then just its own `local-floor`, and the pose is
 only comparable across headsets once each has been aligned.
+
+**Desktop / tablet — `screen`.** The 360 view on a flat screen, outside any
+WebXR session. There is no head: `p` is always `[0,0,0]`, the centre of the sphere
+where the camera sits, and `q` is the **camera** orientation, driven by a mouse
+drag, a touch drag or the device's gyroscope. Its axes are the scene's (Y up, −Z
+the video's front), and so are VR's — but a VR `q` comes from a real head, so a
+screen `q` measures where the view was *pointed*, not where a person looked. `z`
+is the FOV zoom (mouse wheel) on the same `0..1` scale as VR, and `f` comes from
+the spotlight as in VR. How the view is driven travels in the `hello`'s
+`meta.input`: `"mouse"`, `"touch"` or `"gyro"` (it switches to `"gyro"` the moment
+the gyroscope takes over), and `"xr"` in VR/AR. Mixing screen and headset data in
+one analysis is a choice to make on purpose: filter on `frame`.
+
+A page reports the screen view from the moment a stream loads. Entering VR or AR
+closes that connection and opens a new one in the new frame — so no sample ever
+travels under the wrong `frame` — and leaving goes back to `screen`. Set
+`"screen": false` in the scene's `telemetry` block to report only from headsets,
+as before.
 
 Consumers that place players per seat keep working unchanged in VR; in AR they
 now receive co-located poses, which is what makes several spectators renderable
@@ -116,8 +134,9 @@ URL overrides (handy for testing without editing the scene):
 - `?telemetry=wss://host/ingest` — enable + point at a relay
 - `?player=NAME` — set a stable, human-readable player id
 
-The client (`src/telemetry/Telemetry.js`) is fully decoupled: it starts on VR/AR
-session enter, samples the head pose already read each frame (decimated to
+The client (`src/telemetry/Telemetry.js`) is fully decoupled: it starts when a
+stream loads (screen mode) and on VR/AR session enter, samples the pose already
+read each frame (decimated to
 `rateHz`, allocation-free until a sample is taken), batches every `flushMs`,
 auto-reconnects with backoff, and drops the oldest samples while offline.
 
@@ -128,7 +147,7 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 ```jsonc
 // once, on connect — and again whenever `meta` changes mid-session (the relay
 // keys on the id and merges, so a second hello is an update, not a new player)
-{ "hello": "player-42", "meta": { "ua": "...", "mode": "vr", "frame": "local-floor", "rec": "2026-09-21T07-40-29-861Z_player-42" } }
+{ "hello": "player-42", "meta": { "ua": "...", "mode": "vr", "frame": "local-floor", "input": "xr", "rec": "2026-09-21T07-40-29-861Z_player-42" } }
 
 // data frames (batched)
 { "b": [
@@ -319,7 +338,7 @@ using System.Collections.Generic;
 
 [System.Serializable] public class Pose {
     public string type, id;
-    public string frame;         // "local-floor" (VR) or "room" (AR) — see above
+    public string frame;         // "local-floor" (VR), "room" (AR) or "screen" (desktop/tablet) — see above
     public float[] p, q, gaze;   // JsonUtility handles float[]
     public float z, mt; public int f;
 }
