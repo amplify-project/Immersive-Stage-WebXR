@@ -766,7 +766,7 @@ async function handleAPI(req, res, pathname) {
       console.log('[measure] CH=' + fCh + ' WCH=' + fWch + ' DUR=' + dur + (roiRel ? ' ROI_REL=' + roiRel : '') + ' bash measure_sync.sh ' + mArgs.join(' '));
       stopSnapshot();   // libera vídeo+audio (compartidos)
       const proc = spawn('bash', [path.join(ROOT, 'measure_sync.sh'), ...mArgs],
-        { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur), ...(roiRel ? { ROI_REL: roiRel } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+        { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur), ...(Number(V.fr) > 0 ? { FPS: String(V.fr) } : {}), ...(roiRel ? { ROI_REL: roiRel } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
       measureProc = proc;
       let out = '', err = '', sent = false;
       const reply = (code, obj) => { if (sent) return; sent = true; sendJSON(res, code, obj); };

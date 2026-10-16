@@ -36,6 +36,14 @@ DUR="${DUR:-8}"         # segundos a capturar
 THRESH="${THRESH:--30}" # umbral de silencio en dB (sube a -25/-20 si hay ruido)
 WIN="${WIN:-1.2}"       # ventana (s) alrededor del audio donde buscar el vídeo
 VMIN="${VMIN:-0.008}"   # movimiento mínimo aceptable del pico (rechaza el ruido)
+FPS="${FPS:-24}"        # fps a pedir a la cámara (la X5 por UVC solo da 30)
+
+# Formato y nº de canales que el device acepta de verdad (S32_LE en la X32 y en
+# el mixer de 18 ch del cliente; sin -acodec ffmpeg abre S16_LE y falla).
+# Los avisos van a stderr: el server parsea el stdout.
+source "$(dirname "${BASH_SOURCE[0]}")/alsa_probe.sh"
+alsa_probe "$AUDIO"
+(( WCH < CH )) || WCH=0
 
 TMP="$(mktemp -d)"; CLIP="$TMP/sync.mkv"
 trap 'rm -rf "$TMP"' EXIT
@@ -43,8 +51,8 @@ trap 'rm -rf "$TMP"' EXIT
 echo "▶ Capturando ${DUR}s desde video=$VIDEO audio=$AUDIO (${CH}ch, canal $WCH)"
 echo "  → quédate 1s en SILENCIO y luego una PALMADA seca delante de la cámara…"
 ffmpeg -hide_banner -loglevel error \
-  -f v4l2 -framerate 24 -use_wallclock_as_timestamps 1 -i "$VIDEO" \
-  -f alsa -channels "$CH" -use_wallclock_as_timestamps 1 -i "$AUDIO" \
+  -f v4l2 -framerate "$FPS" -use_wallclock_as_timestamps 1 -i "$VIDEO" \
+  -f alsa "${ALSA_FMT[@]}" -channels "$CH" -use_wallclock_as_timestamps 1 -i "$AUDIO" \
   -map 0:v -map 1:a -af "pan=mono|c0=c${WCH}" -t "$DUR" "$CLIP"
 
 # ── Audio: primer instante en que el sonido rompe el silencio (la palmada) ──
