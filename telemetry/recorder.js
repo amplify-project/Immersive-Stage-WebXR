@@ -19,7 +19,7 @@ const { WebSocket } = require('ws');
 const args = Object.fromEntries(process.argv.slice(2).flatMap((a, i, arr) =>
   a.startsWith('--') ? [[a.slice(2), arr[i + 1] ?? true]] : []));
 
-const URL     = args.url || 'ws://localhost:8090/consume';
+const URL     = args.url || 'wss://localhost:60000/consume';
 const OUT     = args.out || `session-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
 const SECONDS = args.seconds ? +args.seconds : 0;
 
