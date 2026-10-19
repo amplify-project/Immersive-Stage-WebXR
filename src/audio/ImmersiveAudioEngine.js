@@ -146,11 +146,23 @@ export class ImmersiveAudioEngine {
 
   /**
    * Conecta un <audio>/<video> y construye el grafo completo.
-   * @param {HTMLMediaElement} mediaElement
+   *
+   * También acepta un AudioNode ya construido que entregue los 4 (+N) canales:
+   * el monitor en vivo del editor le pasa un AudioWorkletNode alimentado con
+   * PCM de la mesa, sin <video> de por medio. El nodo trae su propio contexto,
+   * que el motor usa y no cierra en dispose(). El resto del grafo es idéntico.
+   * @param {HTMLMediaElement|AudioNode} mediaElement
    * @returns {Promise<void>}
    */
   async attach(mediaElement) {
     if (this._attached) throw new Error('ImmersiveAudioEngine: ya está adjunto');
+
+    const isNode = typeof AudioNode !== 'undefined' && mediaElement instanceof AudioNode;
+    if (isNode) {
+      if (this.ctx && this.ctx !== mediaElement.context)
+        throw new Error('ImmersiveAudioEngine: el nodo es de otro AudioContext');
+      if (!this.ctx) { this.ctx = mediaElement.context; this.ownsContext = false; }
+    }
 
     if (!this.ctx) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -158,8 +170,8 @@ export class ImmersiveAudioEngine {
     }
     if (this.ctx.state === 'suspended') await this.ctx.resume();
 
-    this._mediaEl = mediaElement;
-    this.source = this.ctx.createMediaElementSource(mediaElement);
+    this._mediaEl = isNode ? null : mediaElement;
+    this.source = isNode ? mediaElement : this.ctx.createMediaElementSource(mediaElement);
 
     this.gain = this.ctx.createGain();
     this.gain.gain.value = this._lastVolume;

@@ -70,6 +70,14 @@
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   a{color:var(--accent)}
   .small{font-size:11px;color:var(--muted)}
+  .mrow{display:flex;align-items:center;gap:8px;padding:3px 0}
+  .mrow .mname{flex:0 0 150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mbar{position:relative;flex:1 1 120px;height:10px;background:var(--surface2);border-radius:3px;overflow:hidden}
+  .mbar i{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--ok);transition:width .05s linear}
+  .mbar b{position:absolute;top:0;bottom:0;width:2px;left:0;background:var(--text);opacity:.8}
+  .mval{flex:0 0 52px;font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right}
+  .mbtn{flex:0 0 auto;padding:3px 8px;font-size:11px}
+  .mgain{flex:0 0 64px!important;width:64px}
   /* Explorador de ficheros del servidor */
   .backdrop{position:fixed;inset:0;background:#000000cc;z-index:60;display:flex;align-items:center;justify-content:center;padding:20px}
   .browser{background:var(--surface);border:1px solid #ffffff22;border-radius:10px;width:min(680px,100%);
@@ -238,6 +246,30 @@
     <button class="ghost" id="addMusicianBtn" style="display:none;width:100%" onclick="addLiveStem()">+ add musician (next channel)</button>
     <div id="stems" style="margin-top:10px"></div>
     <p class="hint" id="stemsHint">Drag the dots on the radar to place each musician. The order here = channel order in the stream.</p>
+  </div>
+
+  <div class="card" id="monCard" style="display:none">
+    <h2>🎧 Soundcheck monitor</h2>
+    <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
+      <button class="go" id="btnMonStart" style="flex:0 0 auto" onclick="monStart()">▶ Listen live</button>
+      <button class="danger" id="btnMonStop" style="flex:0 0 auto" onclick="monStop()" disabled>■ Stop</button>
+      <div class="slider" style="flex:1 1 160px;display:flex;align-items:center;gap:8px">
+        <span class="small">Volume</span><input type="range" id="monVol" min="0" max="2" step="0.01" value="1"><span class="v" id="monVolV">100%</span>
+      </div>
+    </div>
+    <div class="row" style="align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+      <button class="ghost" id="btnMonVideo" style="flex:0 0 auto" onclick="monVideoToggle()">📷 Show video</button>
+      <label style="display:flex;align-items:center;gap:6px;margin:0;flex:0 0 auto" title="Holds the sound back to meet the picture. Only while the video is shown.">
+        Audio delay <input type="number" id="monDelay" value="0" min="0" max="2000" step="10" style="width:80px"> ms</label>
+      <span class="small" id="monVideoLine"></span>
+    </div>
+    <div id="monVideoWrap" style="display:none;position:relative;width:100%;margin-top:8px;line-height:0">
+      <img id="monVideo" alt="" style="display:block;width:100%;border-radius:8px;background:#000">
+      <canvas id="monVideoOv" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+    </div>
+    <div class="small" id="monLine" style="margin-top:8px">stopped</div>
+    <div id="monTable" style="margin-top:10px"></div>
+    <p class="hint">Hears the mixer <b>directly</b>, with the channel patch above — no encode, no publishing, a fraction of a second behind the room. <b>Audience</b> is what a viewer hears looking ahead without zoom; <b>🎯</b> is what they hear zooming in on that musician; <b>PFL</b> plays one raw channel alone. Gain dB applies as you type; <b>Save scene</b> keeps it for the player. Channel or device changes need a restart of the monitor. <b>📷 Show video</b> previews the camera (a frame or two behind it) with each musician marked at their azimuth; <b>Audio delay</b> holds the sound back to meet the picture — start from the scene's A/V delay and adjust by eye. Both use their device exclusively: <b>Start LIVE</b> stops them.</p>
   </div>
 
   <div class="card">
@@ -529,6 +561,9 @@ function setMode(m) {
   mode = m; scene.mode = m;
   $('vodSources').style.display  = m==='vod'  ? '' : 'none';
   $('liveSources').style.display = m==='live' ? '' : 'none';
+  $('monCard').style.display     = m==='live' ? '' : 'none';
+  if (m!=='live' && mon) monStop();
+  if (m!=='live' && monVideoOn) monVideoStop();
   $('addStemRow').style.display     = m==='vod'  ? 'flex' : 'none';
   $('addMusicianBtn').style.display = m==='live' ? 'block' : 'none';
   $('tabVod').className  = m==='vod'  ? 'go' : 'ghost';
@@ -770,7 +805,8 @@ function bindControls() {
   $('selH').oninput    = e => { if(selected>=0){ const el=Math.round(elOfH(clampH(+e.target.value)));
                                                 scene.stems[selected].elevationDeg=el;
                                                 renderStems(); drawViews(); $('selEl').value=el; } };
-  $('selGain').oninput = e => { if(selected>=0){ scene.stems[selected].gainDb=+e.target.value; } };
+  $('selGain').oninput = e => { if(selected>=0){ scene.stems[selected].gainDb=+e.target.value;
+    if (mon) { mon.setStemGainDb(selected, +e.target.value); const g=$('mg'+selected); if (g) g.value=e.target.value; } } };
 
   // ── Malla del músico ───────────────────────────────────────────────────────
   $('selMesh').onchange    = e => { if(selected>=0){ setStemMesh(selected, { url: e.target.value }); renderStems(); updateMeshPreview(); } };
@@ -1174,6 +1210,8 @@ function renderStems() {
       <span class="az">${Math.round(s.azimuthDeg)}°/${Math.round(s.elevationDeg||0)}°</span>
       <span class="x" onclick="event.stopPropagation();removeStem(${i})">✕</span>
     </div>`).join('') || '<p class="small">No stems. Add musicians above.</p>';
+  if (mon) renderMonTable();
+  if (monVideoOn) monDrawOverlay();
 }
 function syncSelPanel() {
   const p = $('selPanel');
@@ -1500,7 +1538,7 @@ function arUnplace(){
 }
 
 // All four views draw the same stems, so they are never redrawn apart.
-function drawViews(){ drawRadar(); drawHeight(); drawARPlan(); drawARFront(); }
+function drawViews(){ drawRadar(); drawHeight(); drawARPlan(); drawARFront(); if (monVideoOn) monDrawOverlay(); }
 
 // ── Bed construction ─────────────────────────────────────────────────────────
 // Four mono components in, one 4-channel bed out. The server hands it to
@@ -1792,6 +1830,215 @@ async function pollStatus() {
   }
   if (s.log && s.log.length){ const l=$('log'); l.textContent=s.log.join('\n'); l.scrollTop=l.scrollHeight; }
 }
+
+// ── Soundcheck monitor (LIVE) ────────────────────────────────────────────────
+//
+// Hears the mixer straight from the server's capture (/monitor), through the
+// player's own audio engine: no encode, no segments, no publishing. The DASH
+// path takes ~20 s to bring a fader move back; this takes a fraction of a
+// second. See src/app/live-monitor.js (browser) and live-monitor.js (server).
+let mon = null, monSession = 0, monMeters = null, monRaf = 0, monInfo = '';
+const monDb = v => (v > 0 ? 20 * Math.log10(v) : -120);
+
+async function monStart() {
+  if (mon) return;
+  const A = scene.live && scene.live.audio;
+  if (!A || (A.src || 'usb') !== 'usb') { toast('The monitor captures an ALSA (USB) device only'); return; }
+  if (!A.device) { toast('Pick the audio device first'); return; }
+  const session = ++monSession;
+  $('btnMonStart').disabled = true;
+  $('monLine').style.color = ''; $('monLine').textContent = 'connecting…';
+  monInfo = '';
+  let m;
+  try {
+    const { startLiveMonitor } = await import('./src/app/live-monitor.js');
+    m = await startLiveMonitor({
+      scene,
+      onMeters: d => { if (session !== monSession) return; monMeters = d; if (!monRaf) monRaf = requestAnimationFrame(monDraw); },
+      onStatus: s => { if (session === monSession) monOnStatus(s); },
+    });
+  } catch (e) {
+    if (session === monSession) monFail('could not start: ' + e.message);
+    return;
+  }
+  if (session !== monSession) { m.stop(); return; }   // failed or stopped while starting
+  mon = m;
+  mon.setVolume(+$('monVol').value);
+  monApplyDelay();
+  $('btnMonStop').disabled = false;
+  renderMonTable();
+}
+
+function monOnStatus(s) {
+  if (s.type === 'start') {
+    const clamp = s.opened !== s.asked ? ` · the device opens ${s.opened} ch (asked ${s.asked})` : '';
+    monInfo = `${s.device} · ${String(s.codec).replace('pcm_', '')} · ${s.channels} ch${clamp}`;
+  } else if (s.type === 'error' || s.type === 'closed') {
+    monFail(s.message || 'connection closed');
+  }
+}
+
+function monStop() {
+  monSession++;
+  if (mon) { mon.stop(); mon = null; }
+  if (monRaf) { cancelAnimationFrame(monRaf); monRaf = 0; }
+  monMeters = null;
+  $('btnMonStart').disabled = false; $('btnMonStop').disabled = true;
+  $('monTable').innerHTML = '';
+  $('monLine').style.color = ''; $('monLine').textContent = 'stopped';
+}
+
+function monFail(msg) {
+  monStop();
+  $('monLine').textContent = '✕ ' + msg; $('monLine').style.color = 'var(--bad)';
+}
+
+// One row per channel the monitor carries: the 4 FOA, then each musician.
+function renderMonTable() {
+  if (!mon) return;
+  const meter = k => `<div class="mbar"><i id="mb${k}"></i><b id="mp${k}"></b></div><span class="mval" id="mv${k}">—</span>`;
+  const pfl = k => `<button class="ghost mbtn" id="mpfl${k}" title="Listen to this raw channel alone" onclick="monListen('pfl',${k})">PFL</button>`;
+  const foa = (scene.live.audio.foa && scene.live.audio.foa.ch) || [0, 1, 2, 3];
+  let h = `<div class="mrow"><span class="mname"></span>
+    <button class="ghost mbtn" id="mAud" onclick="monListen('audience')" title="What a viewer hears looking ahead, without zoom">Audience</button></div>`;
+  ['W', 'X', 'Y', 'Z'].forEach((n, k) => {
+    h += `<div class="mrow"><span class="mname">FOA ${n} <span class="small">ch ${foa[k]}</span></span>${meter(k)}${pfl(k)}</div>`;
+  });
+  scene.stems.forEach((s, i) => {
+    const k = 4 + i;
+    if (k >= mon.channels) return;
+    h += `<div class="mrow"><span class="mname">${(s.name || 'stem ' + i).replace(/</g, '&lt;')}
+        <span class="small">ch ${s.channel != null ? s.channel : '—'}</span></span>${meter(k)}${pfl(k)}
+      <button class="ghost mbtn" id="mspot${i}" title="What a viewer hears zooming in on this musician" onclick="monListen('spot',${i})">🎯</button>
+      <input type="number" class="mgain" id="mg${i}" step="0.5" value="${s.gainDb || 0}" title="Gain dB (trim of this musician)" oninput="monGain(${i},this.value)"><span class="small">dB</span></div>`;
+  });
+  if (scene.stems.length + 4 !== mon.channels)
+    h += `<p class="small" style="color:var(--warn)">The musicians changed since the monitor started: restart it.</p>`;
+  $('monTable').innerHTML = h;
+  monMarkMode();
+}
+
+function monListen(kind, i) {
+  if (!mon) return;
+  if (kind === 'audience') mon.audience();
+  else if (kind === 'spot') mon.mode === 'spotlight:' + i ? mon.audience() : mon.spotlight(i);
+  else if (kind === 'pfl') mon.pflChannel === i ? mon.audience() : mon.pfl(i);
+  monMarkMode();
+}
+
+function monMarkMode() {
+  if (!mon) return;
+  const m = mon.mode;
+  const set = (id, on) => { const b = $(id); if (b) b.className = 'mbtn ' + (on ? 'go' : 'ghost'); };
+  set('mAud', m === 'audience');
+  for (let k = 0; k < mon.channels; k++) set('mpfl' + k, m === 'pfl:' + k);
+  scene.stems.forEach((_, i) => set('mspot' + i, m === 'spotlight:' + i));
+  monDrawOverlay();
+}
+
+// — Camera preview (multipart MJPEG from /api/monitor/video into an <img>) —
+let monVideoOn = false;
+function monVideoToggle() { monVideoOn ? monVideoStop() : monVideoStart(); }
+
+function monVideoStart() {
+  const V = (scene.live && scene.live.video) || {};
+  if ((V.src || 'usb') !== 'usb') { toast('The preview reads a USB (v4l2) camera only'); return; }
+  const q = new URLSearchParams({ device: V.device || '/dev/video0', fr: V.fr || 30, t: Date.now() });
+  if (V.size) q.set('size', V.size);
+  if (V.informat) q.set('informat', V.informat);
+  const img = $('monVideo');
+  img.onload = () => { $('monVideoLine').textContent = `${V.device || '/dev/video0'} · live`; monDrawOverlay(); };
+  img.onerror = async () => {
+    if (!monVideoOn) return;
+    let msg = '';
+    try { msg = (await fetch('/api/monitor/video/error').then(r => r.json())).error; } catch (_) {}
+    monVideoStop();
+    $('monVideoLine').textContent = '✕ ' + (msg || 'could not open the camera');
+  };
+  monVideoOn = true;
+  img.src = '/api/monitor/video?' + q;
+  $('monVideoWrap').style.display = '';
+  $('btnMonVideo').textContent = '📷 Hide video';
+  $('monVideoLine').textContent = 'opening the camera…';
+  // A starting point for the sync: the encode's own A/V delay.
+  if (!+$('monDelay').value && scene.live.audio && scene.live.audio.delay > 0) $('monDelay').value = scene.live.audio.delay;
+  monApplyDelay();
+}
+
+function monVideoStop() {
+  monVideoOn = false;
+  const img = $('monVideo');
+  img.onerror = null; img.onload = null;
+  img.removeAttribute('src');          // closes the stream → the server stops ffmpeg
+  $('monVideoWrap').style.display = 'none';
+  $('btnMonVideo').textContent = '📷 Show video';
+  $('monVideoLine').textContent = '';
+  monApplyDelay();
+}
+
+// The delay only makes sense against the picture: without it, no delay at all.
+function monApplyDelay() {
+  if (mon) mon.setAvDelay(monVideoOn ? Math.max(0, +$('monDelay').value || 0) : 0);
+}
+
+// Each musician on the equirect, where its azimuth says it is
+// (azimuthDeg = (0.5 − u)·360, docs/encoding.md). A dot that misses the
+// player is the azimuth to fix on the radar.
+function monDrawOverlay() {
+  const cv = $('monVideoOv'), img = $('monVideo');
+  if (!cv || !monVideoOn) return;
+  const w = img.clientWidth, h = img.clientHeight;
+  if (!w || !h) return;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  g.font = '600 12px system-ui, sans-serif';
+  g.textAlign = 'center';
+  const spot = mon && mon.mode.startsWith('spotlight:') ? +mon.mode.split(':')[1] : -1;
+  scene.stems.forEach((s, i) => {
+    let u = 0.5 - (+s.azimuthDeg || 0) / 360; u -= Math.floor(u);
+    const v = 0.5 - (+s.elevationDeg || 0) / 180;
+    const x = u * w, y = v * h, c = PALETTE[i % PALETTE.length];
+    g.beginPath(); g.arc(x, y, i === spot ? 9 : 6, 0, Math.PI * 2);
+    g.fillStyle = c; g.globalAlpha = 0.9; g.fill();
+    g.lineWidth = 2; g.strokeStyle = '#000'; g.globalAlpha = 1; g.stroke();
+    const label = s.name || 'stem ' + i;
+    g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,.75)'; g.strokeText(label, x, y - 13);
+    g.fillStyle = '#fff'; g.fillText(label, x, y - 13);
+  });
+}
+window.addEventListener('resize', monDrawOverlay);
+$('monDelay').oninput = monApplyDelay;
+
+function monGain(i, v) {
+  const s = scene.stems[i]; if (!s) return;
+  s.gainDb = +v || 0;
+  if (mon) mon.setStemGainDb(i, s.gainDb);
+  if (i === selected) $('selGain').value = s.gainDb;
+}
+
+function monDraw() {
+  monRaf = 0;
+  const d = monMeters; if (!d || !mon) return;
+  for (let k = 0; k < d.peak.length; k++) {
+    const bar = $('mb' + k); if (!bar) continue;
+    const p = monDb(d.peak[k]), r = monDb(d.rms[k]);
+    const pct = db => Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+    bar.style.width = pct(r) + '%';
+    bar.style.background = p > -1 ? 'var(--bad)' : p > -9 ? 'var(--warn)' : 'var(--ok)';
+    $('mp' + k).style.left = pct(p) + '%';
+    $('mv' + k).textContent = p < -90 ? 'silent' : p.toFixed(0) + ' dB';
+  }
+  const lat = Math.round(d.fillMs + mon.latencyMs());
+  $('monLine').style.color = '';
+  $('monLine').textContent = `${monInfo || 'live'} · ~${lat} ms behind (buffer ${Math.round(d.fillMs)} + output ${Math.round(mon.latencyMs())})` +
+    (d.priming ? ' · waiting for audio…' : '') +
+    (d.underruns ? ` · underruns ${d.underruns}` : '') + (d.skips ? ` · resyncs ${d.skips}` : '');
+}
+
+$('monVol').oninput = e => { const v = +e.target.value; $('monVolV').textContent = Math.round(v * 100) + '%'; if (mon) mon.setVolume(v); };
 
 init();
 window.scene = scene; // debug

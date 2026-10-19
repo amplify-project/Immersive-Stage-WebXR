@@ -112,13 +112,14 @@ can point at.
 ## 5. Give every musician a channel
 
 In LIVE mode each musician row grows a small **`ch`** box: the device channel that
-musician arrives on. It is the one field in the panel with **no usable default**, and
-the encode will not start without it.
+musician arrives on. It is the one field in the panel with **no usable default**.
 
-> **`[Parsed_pan] Syntax error near "c"`**, with a filter string containing
-> `pan=mono|c0=c` — a channel index with nothing after the `c`. One or more musicians
-> have an empty `ch`. Scenes carried over from a VOD take are the usual source: the
-> musicians already exist, with names and positions, and no channels.
+An empty `ch` does not stop the encode: that musician goes out as **silence**, so
+every later musician keeps its own slot in the stream. That is also the trap — a
+scene carried over from a VOD take already has the musicians, with names and
+positions, and no channels, so it launches fine and the stems are simply mute. The
+launch log lists the patch (`ch N → stem i`, or `(no channel) → stem i: silence`);
+read it.
 
 **Verify the mapping instead of assuming it.** Channels 4, 5, 6… is a reasonable
 guess, not the truth: on a digital desk the USB sends are routed in the desk's own
@@ -274,6 +275,68 @@ certificate warning once before an audience is waiting.
 
 ---
 
+## Hear the desk before going on air
+
+The stream is the wrong place to set levels: a change on the desk takes around
+20 seconds to come back through the encode, the DASH segments and the player's
+buffer. The **🎧 Soundcheck monitor** card (LIVE mode, under the musicians) listens
+to the desk directly instead. It uses the patch set above (device, FOA channels,
+each musician's `ch`) and runs the audio through the player's own engine, with no
+encode and nothing published. The status line shows how far behind the room it
+is, usually 100–200 ms.
+
+- **Audience**: what a viewer hears looking straight ahead with no zoom. That is
+  the bed, plus each musician at the spotlight's rest level.
+- **🎯** on a musician: what a viewer hears when they zoom in on that musician.
+  The listener turns to the musician's azimuth, the stem comes up and the bed
+  ducks, all as in the player.
+- **PFL** on any channel: that raw input alone, mono, in both ears. Use it to
+  check one microphone before anything is mixed on top.
+- **Gain dB** on each row applies as you type. **Save scene** keeps the value for
+  the player, which reads it on load, so nothing needs re-encoding.
+
+**📷 Show video** adds the camera underneath, a frame or two behind it. It is sent
+as MJPEG at 1280 px wide: enough to see the stage, not to judge the picture. Each
+musician is drawn at their azimuth and elevation. On a 360 camera a dot that misses
+its player is an azimuth to fix on the radar. The sound is then a little ahead of
+the picture, by the camera's own latency, which includes stitching on a 360.
+**Audio delay** holds the sound back to meet it. It starts at the scene's A/V delay;
+adjust it by eye on a clap. It only applies while the video is shown, so the plain
+soundcheck stays as immediate as possible.
+
+The meters show the raw inputs: RMS as the bar, the peak as the tick. The bar
+turns yellow above −9 dBFS and red above −1 dBFS. Restart the monitor after
+changing the device, the channels or the list of musicians; azimuths are also
+read only at start. The monitor holds the audio device and the preview holds the
+camera (the X4 bridge's `/dev/video10` takes a single reader), so **Start LIVE** and
+**Auto-measure delay** stop both, and **📷 ROI** stops the preview.
+
+## Rehearse without the desk
+
+The whole live path can run on a laptop, from the scene's own files.
+`fake-mixer.sh` mixes the bed and the stems into one multichannel signal —
+channels 0–3 the FOA, then one mono channel per musician, in the scene's order —
+and plays it in a loop into an ALSA loopback card. To `stream.sh` that card looks
+like the desk.
+
+```bash
+sudo modprobe snd-aloop      # once per boot
+./fake-mixer.sh              # leave it running
+```
+
+It prints what to set in the editor. In Live mode:
+- **Audio:** USB (ALSA), the *Loopback* device ending in `,1` (the capture side).
+- **Total ch.:** 4 + the number of musicians.
+- **FOA ch:** 0, 1, 2, 3.
+- **Musicians:** `ch` 4, 5, 6… in the order of the list.
+
+The video stays on whatever camera is selected, so the picture will not match the
+music. Everything else is the real path: the patch, the encode, the manifest, and
+the player with its stems and spotlight. Moving to the venue then means changing
+only the device and the channel numbers.
+
+---
+
 ## Failures worth recognizing on sight
 
 All of these have been hit in the field. They share a shape: the error names the
@@ -283,8 +346,9 @@ symptom, never the cause.
 |---|---|---|
 | ALSA dropdown empty, cameras fine | Device list parsed from localized `arecord` output | Start the server with `LC_ALL=C` |
 | Device list stale after replugging | Devices are fetched once, on page load | `Ctrl+Shift+R` |
+| Monitor or encode: `busy`, `Input/output error` | PulseAudio opened the USB card because an app listens to it (Sound settings meter, a call, a browser tab). The monitor names the app and the card | Close the app; for the mixer, `pactl set-card-profile <card> off` (the monitor prints the name) |
 | `cannot set sample format` | Interface does not accept the 16-bit default | Check `--dump-hw-params`; capture as `S32_LE` |
-| `Syntax error near "c"` | A musician has no channel number | Fill every `ch` box, save, relaunch |
+| Stems silent, bed fine | A musician has no channel number | Fill every `ch` box, save, relaunch |
 | Video is 1920×1080, not 360 | Camera defaulted to webcam mode | Set the equirectangular resolution explicitly |
 | Picture plays, audio silent | Missing CORS headers taint the media element | Set CORS on the bucket or CDN |
 | Nothing uploads, no error | `sudo` stripped the environment and moved `$HOME` | Run as your normal user |
