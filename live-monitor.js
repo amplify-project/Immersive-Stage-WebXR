@@ -72,6 +72,48 @@ function probeDevice(device) {
   });
 }
 
+// "Device or resource busy" names nobody. On a desktop it is nearly always
+// PulseAudio/PipeWire: they open every USB card that appears, and keep its
+// input open while any app listens to it (a Sound settings level meter, a call,
+// a browser tab). Name the holder and the card, so the fix is one command
+// instead of a hunt. Never changes anything itself.
+const run = (cmd, args) => new Promise(res =>
+  execFile(cmd, args, { timeout: 3000, env: { ...process.env, LC_ALL: 'C' } },
+    (_e, out, err) => res(String(out) + String(err))));
+
+async function whoHolds(device) {
+  const m = /^(?:plug)?hw:([^,]+)(?:,(\d+))?/.exec(device);
+  if (!m) return '';
+  let card = m[1];
+  const dev = m[2] || '0';
+  if (!/^\d+$/.test(card)) {                    // hw:Loopback,1 → card number
+    const cards = await run('cat', ['/proc/asound/cards']);
+    const hit = new RegExp(`^\\s*(\\d+)\\s+\\[${card}\\s*\\]`, 'm').exec(cards);
+    if (!hit) return '';
+    card = hit[1];
+  }
+  // fuser prints the PIDs on stdout (and the rest on stderr): ask ps for names.
+  const pids = await new Promise(res => execFile('fuser', [`/dev/snd/pcmC${card}D${dev}c`],
+    { timeout: 3000 }, (_e, out) => res(String(out).trim().split(/\s+/).filter(x => /^\d+$/.test(x)))));
+  if (!pids.length) return '';
+  const procs = [...new Set((await run('ps', ['-o', 'comm=', '-p', pids.join(',')])).split('\n').map(s => s.trim()).filter(Boolean))];
+  if (!procs.length) return '';
+  if (!procs.some(p => /pulseaudio|pipewire|wireplumber/.test(p)))
+    return ` — held by: ${procs.join(', ')}`;
+  // Which PulseAudio card that is, and who is recording from it.
+  const cards = await run('pactl', ['list', 'cards']);
+  let pcard = '';
+  for (const block of cards.split(/^Card #/m)) {
+    if (new RegExp(`alsa\\.card = "${card}"`).test(block)) { pcard = (/Name:\s*(\S+)/.exec(block) || [])[1] || ''; break; }
+  }
+  const outs = await run('pactl', ['list', 'source-outputs']);
+  const apps = [...new Set((outs.match(/application\.name = "([^"]+)"/g) || []).map(s => s.slice(20, -1)))];
+  return ` — PulseAudio holds it` + (apps.length ? ` (recording through it: ${apps.join(', ')})` : '') +
+    `. Close that app, or, if the desktop does not need this card (a mixer, not your headset: ` +
+    `this also mutes its output), take it away from PulseAudio` +
+    (pcard ? `: pactl set-card-profile ${pcard} off` : '');
+}
+
 function buildFilter(p) {
   const [f0, f1, f2, f3] = p.foaCh;
   let fc = `[0:a]pan=4.0|c0=c${f0}|c1=c${f1}|c2=c${f2}|c3=c${f3}[foasel];`;
@@ -155,10 +197,15 @@ function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
       });
       proc.stderr.on('data', d => { err = (err + d).slice(-600); });
       proc.on('error', e => { if (cur === me) stop('ffmpeg: ' + e.message); });
-      proc.on('exit', code => {
+      proc.on('exit', async code => {
         if (cur !== me) return;
-        const why = (err.trim().split('\n').pop() || '') + (dev.busy ? ' (device busy?)' : '');
-        stop(code ? `Capture stopped (ffmpeg exit ${code}): ${why}` : 'Capture ended.');
+        if (!code) return stop('Capture ended.');
+        let why = err.trim().split('\n').pop() || '';
+        if (dev.busy || /busy|Input\/output error/i.test(err)) {
+          const holder = await whoHolds(p.device);
+          why = `${p.device} is busy` + (holder || ' (another program has it open)');
+        }
+        if (cur === me) stop(`Capture stopped (ffmpeg exit ${code}): ${why}`);
       });
     });
     ws.on('close', () => { if (cur && cur.ws === ws) stop(); });
@@ -167,4 +214,4 @@ function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
   return { path: PATH, stop, running: () => !!cur };
 }
 
-module.exports = { createLiveMonitor, buildFilter, parsePatch };
+module.exports = { createLiveMonitor, buildFilter, parsePatch, whoHolds };

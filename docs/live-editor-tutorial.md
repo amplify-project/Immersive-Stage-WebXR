@@ -336,6 +336,7 @@ symptom, never the cause.
 |---|---|---|
 | ALSA dropdown empty, cameras fine | Device list parsed from localized `arecord` output | Start the server with `LC_ALL=C` |
 | Device list stale after replugging | Devices are fetched once, on page load | `Ctrl+Shift+R` |
+| Monitor or encode: `busy`, `Input/output error` | PulseAudio opened the USB card because an app listens to it (Sound settings meter, a call, a browser tab). The monitor names the app and the card | Close the app; for the mixer, `pactl set-card-profile <card> off` (the monitor prints the name) |
 | `cannot set sample format` | Interface does not accept the 16-bit default | Check `--dump-hw-params`; capture as `S32_LE` |
 | Stems silent, bed fine | A musician has no channel number | Fill every `ch` box, save, relaunch |
 | Video is 1920×1080, not 360 | Camera defaulted to webcam mode | Set the equirectangular resolution explicitly |
