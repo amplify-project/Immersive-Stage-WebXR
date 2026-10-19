@@ -85,6 +85,16 @@ function startJob(mode, cmd, args, env) {
   return job;
 }
 
+// The monitor and the camera preview hold the desk and the camera. Stop them
+// AND wait until their ffmpeg has exited: a killed process keeps the device for
+// a moment, and an encode that opens it in that moment fails with "busy".
+async function releaseCaptures(reason) {
+  await Promise.all([
+    liveMonitor ? liveMonitor.release(reason) : null,
+    videoPreview ? videoPreview.release() : null,
+  ]);
+}
+
 function stopJob() {
   if (!job || !job.proc) return false;
   try { process.kill(-job.proc.pid, 'SIGINT'); } catch (_) {}
@@ -584,6 +594,7 @@ async function handleAPI(req, res, pathname) {
         if (enc.closeupVbitrate) env.CLOSEUP_VBITRATE = enc.closeupVbitrate;
       }
 
+      if (mode === 'live') await releaseCaptures('An encode started: it needs the audio device and the camera.');
       try {
         startJob(mode, 'bash', ['stream.sh', mode], env);
         return sendJSON(res, 200, { ok: true, mode, cmd: job.cmd });
@@ -728,7 +739,7 @@ async function handleAPI(req, res, pathname) {
       const V = (scene.live && scene.live.video) || {};
       const dev = V.device || '/dev/video10';
       stopMeasure(); stopSnapshot();   // libera el device
-      if (videoPreview) videoPreview.stop();   // v4l2: one reader
+      if (videoPreview) await videoPreview.release();   // v4l2: one reader
       // Descarta los primeros frames (auto-exposición) y quédate con uno.
       // detached → grupo propio para poder matarlo; timeout de seguridad para que
       // no se quede colgado con la cámara abierta si el device no entrega frames.
@@ -777,8 +788,7 @@ async function handleAPI(req, res, pathname) {
       const mArgs = [A.device || 'hw:1,0', V.device || '/dev/video10'];
       console.log('[measure] CH=' + fCh + ' WCH=' + fWch + ' DUR=' + dur + (roiRel ? ' ROI_REL=' + roiRel : '') + ' bash measure_sync.sh ' + mArgs.join(' '));
       stopSnapshot();   // libera vídeo+audio (compartidos)
-      if (liveMonitor) liveMonitor.stop('Measuring the A/V delay: it needs the audio device.');
-      if (videoPreview) videoPreview.stop();
+      await releaseCaptures('Measuring the A/V delay: it needs the audio device.');
       const proc = spawn('bash', [path.join(ROOT, 'measure_sync.sh'), ...mArgs],
         { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur), ...(roiRel ? { ROI_REL: roiRel } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
       measureProc = proc;

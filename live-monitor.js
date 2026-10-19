@@ -164,7 +164,21 @@ function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
     return true;
   }
 
+  // A browser that vanishes without closing (laptop asleep, Wi-Fi gone) leaves
+  // the socket open until TCP gives up, minutes later, and the desk held all
+  // that time. Ping every 5 s; a client that misses two is dropped.
+  const beat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (ws._missed >= 2) { ws.terminate(); continue; }
+      ws._missed = (ws._missed || 0) + 1;
+      try { ws.ping(); } catch (_) {}
+    }
+  }, 5000);
+  beat.unref();
+
   wss.on('connection', ws => {
+    ws._missed = 0;
+    ws.on('pong', () => { ws._missed = 0; });
     const send = obj => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
     ws.once('message', async raw => {
       const busy = isBusy();
@@ -224,7 +238,16 @@ function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
     ws.on('close', () => { if (cur && cur.ws === ws) stop(); });
   });
 
-  return { path: PATH, stop, running: () => !!cur };
+  // stop() and wait until ffmpeg has really let go of the device. What the
+  // encode and the delay measurement call before opening it themselves.
+  async function release(reason) {
+    const p = lastProc;
+    stop(reason);
+    await exitOf(p);
+    if (p && log) console.log(`[monitor] audio device released (ffmpeg ${p.pid} exited)`);
+  }
+
+  return { path: PATH, stop, release, running: () => !!cur };
 }
 
 // ── Camera preview for the monitor ──────────────────────────────────────────
@@ -301,7 +324,14 @@ function createVideoPreview({ isBusy = () => null, log = true } = {}) {
     res.on('close', () => { if (cur === me) stop(); });
   }
 
-  return { handle, stop, running: () => !!cur, lastError: () => lastError };
+  async function release() {
+    const p = lastProc;
+    stop();
+    await exitOf(p);
+    if (p && log && p.exitCode === null && p.signalCode === null) console.log('[monitor] camera still held after 2 s');
+  }
+
+  return { handle, stop, release, running: () => !!cur, lastError: () => lastError };
 }
 
 module.exports = { createLiveMonitor, createVideoPreview, buildFilter, parsePatch, whoHolds };
