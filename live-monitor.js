@@ -114,6 +114,16 @@ async function whoHolds(device) {
     (pcard ? `: pactl set-card-profile ${pcard} off` : '');
 }
 
+// A killed ffmpeg holds the device until it has really exited, and opening it
+// again before that says "busy". Every new capture waits for the previous one.
+function exitOf(proc) {
+  return new Promise(r => {
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return r();
+    proc.once('exit', () => r());
+    setTimeout(r, 2000);
+  });
+}
+
 function buildFilter(p) {
   const [f0, f1, f2, f3] = p.foaCh;
   let fc = `[0:a]pan=4.0|c0=c${f0}|c1=c${f1}|c2=c${f2}|c3=c${f3}[foasel];`;
@@ -134,6 +144,7 @@ function buildFilter(p) {
 function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
   const wss = new WebSocketServer({ noServer: true });
   let cur = null;   // { ws, proc }
+  let lastProc = null;
 
   const onUpgrade = (req, socket, head) => {
     if ((req.url || '').split('?')[0] !== PATH) return;   // not ours: leave it to the others
@@ -165,6 +176,8 @@ function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
       const me = { ws, proc: null };
       cur = me;
 
+      await exitOf(lastProc);
+      if (cur !== me) return;
       const dev = await probeDevice(p.device);
       if (cur !== me) return;   // closed or taken over while probing
       let channels = p.channels;
@@ -180,7 +193,7 @@ function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
       if (log) console.log('[monitor] ffmpeg ' + args.map(a => (/[\s|;[\]]/.test(a) ? JSON.stringify(a) : a)).join(' '));
 
       const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-      me.proc = proc;
+      me.proc = proc; lastProc = proc;
       send({ type: 'start', channels: nch, rate: RATE, device: p.device, codec,
              opened: channels, asked: p.channels,
              stems: p.stemCh.map(c => (c == null ? null : c)) });
@@ -214,4 +227,81 @@ function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
   return { path: PATH, stop, running: () => !!cur };
 }
 
-module.exports = { createLiveMonitor, buildFilter, parsePatch, whoHolds };
+// ── Camera preview for the monitor ──────────────────────────────────────────
+// GET /api/monitor/video?device=/dev/video0&size=2880x1440&fr=24&informat=mjpeg
+// answers with multipart MJPEG, which an <img> plays natively: no H.264, no
+// segments, so the picture is a frame or two behind the camera. Downscaled to
+// 1280 wide: it is for seeing the stage, not for judging the image.
+//
+// v4l2 devices — and the X4 bridge's /dev/video10 in particular — take ONE
+// reader, so this obeys the same rules as the audio: refused during an encode,
+// stopped by Start LIVE, the delay measurement and the ROI snapshot, and a new
+// preview replaces the previous one.
+function createVideoPreview({ isBusy = () => null, log = true } = {}) {
+  let cur = null;   // { proc, res }
+  let lastProc = null, seq = 0;
+  let lastError = '';   // an <img> cannot read an error body: the editor asks here
+
+  function stop() {
+    if (!cur) return false;
+    const { proc, res } = cur;
+    cur = null;
+    try { proc.kill('SIGKILL'); } catch (_) {}
+    try { res.end(); } catch (_) {}
+    return true;
+  }
+
+  async function handle(req, res) {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const device = q.get('device') || '/dev/video0';
+    const size = q.get('size') || '';
+    const fr = Math.min(60, Math.max(1, parseInt(q.get('fr'), 10) || 30));
+    const informat = q.get('informat') || '';
+    const fail = (code, msg) => { lastError = msg; res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end(msg); };
+    if (!/^\/dev\/video\d{1,3}$/.test(device)) return fail(400, 'bad video device');
+    if (size && !/^\d{2,5}x\d{2,5}$/.test(size)) return fail(400, 'bad size');
+    if (informat && !/^[a-z0-9_]{1,16}$/.test(informat)) return fail(400, 'bad input format');
+    const busy = isBusy();
+    if (busy) return fail(409, busy);
+
+    stop();   // one reader per device
+    const mine = ++seq;
+    await exitOf(lastProc);
+    if (mine !== seq || res.destroyed) return;   // replaced or abandoned meanwhile
+    lastError = '';
+    const args = ['-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-fflags', 'nobuffer', '-flags', 'low_delay',
+      '-f', 'v4l2', '-framerate', String(fr),
+      ...(informat ? ['-input_format', informat] : []),
+      ...(size ? ['-video_size', size] : []),
+      '-i', device,
+      '-vf', 'scale=1280:-2', '-c:v', 'mjpeg', '-q:v', '6',
+      '-f', 'mpjpeg', '-boundary_tag', 'frame', '-flush_packets', '1', 'pipe:1'];
+    if (log) console.log('[monitor] video: ffmpeg ' + args.join(' '));
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    lastProc = proc;
+    const me = { proc, res };
+    cur = me;
+    let started = false, err = '';
+    proc.stdout.on('data', d => {
+      if (!started) {
+        started = true;
+        res.writeHead(200, { 'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+                             'Cache-Control': 'no-store', 'Connection': 'close' });
+      }
+      res.write(d);
+    });
+    proc.stderr.on('data', d => { err = (err + d).slice(-400); });
+    proc.on('exit', code => {
+      if (cur === me) cur = null;
+      if (!started) fail(502, `Could not open ${device}` + (err.trim() ? ': ' + err.trim().split('\n').pop() : ` (ffmpeg exit ${code})`));
+      else try { res.end(); } catch (_) {}
+    });
+    proc.on('error', e => { if (cur === me) cur = null; if (!started) fail(500, 'ffmpeg: ' + e.message); });
+    res.on('close', () => { if (cur === me) stop(); });
+  }
+
+  return { handle, stop, running: () => !!cur, lastError: () => lastError };
+}
+
+module.exports = { createLiveMonitor, createVideoPreview, buildFilter, parsePatch, whoHolds };

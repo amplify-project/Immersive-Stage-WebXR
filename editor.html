@@ -257,9 +257,19 @@
         <span class="small">Volume</span><input type="range" id="monVol" min="0" max="2" step="0.01" value="1"><span class="v" id="monVolV">100%</span>
       </div>
     </div>
+    <div class="row" style="align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+      <button class="ghost" id="btnMonVideo" style="flex:0 0 auto" onclick="monVideoToggle()">📷 Show video</button>
+      <label style="display:flex;align-items:center;gap:6px;margin:0;flex:0 0 auto" title="Holds the sound back to meet the picture. Only while the video is shown.">
+        Audio delay <input type="number" id="monDelay" value="0" min="0" max="2000" step="10" style="width:80px"> ms</label>
+      <span class="small" id="monVideoLine"></span>
+    </div>
+    <div id="monVideoWrap" style="display:none;position:relative;width:100%;margin-top:8px;line-height:0">
+      <img id="monVideo" alt="" style="display:block;width:100%;border-radius:8px;background:#000">
+      <canvas id="monVideoOv" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+    </div>
     <div class="small" id="monLine" style="margin-top:8px">stopped</div>
     <div id="monTable" style="margin-top:10px"></div>
-    <p class="hint">Hears the mixer <b>directly</b>, with the channel patch above — no encode, no publishing, a fraction of a second behind the room. <b>Audience</b> is what a viewer hears looking ahead without zoom; <b>🎯</b> is what they hear zooming in on that musician; <b>PFL</b> plays one raw channel alone. Gain dB applies as you type; <b>Save scene</b> keeps it for the player. Channel or device changes need a restart of the monitor. Uses the audio device exclusively: <b>Start LIVE</b> stops it.</p>
+    <p class="hint">Hears the mixer <b>directly</b>, with the channel patch above — no encode, no publishing, a fraction of a second behind the room. <b>Audience</b> is what a viewer hears looking ahead without zoom; <b>🎯</b> is what they hear zooming in on that musician; <b>PFL</b> plays one raw channel alone. Gain dB applies as you type; <b>Save scene</b> keeps it for the player. Channel or device changes need a restart of the monitor. <b>📷 Show video</b> previews the camera (a frame or two behind it) with each musician marked at their azimuth; <b>Audio delay</b> holds the sound back to meet the picture — start from the scene's A/V delay and adjust by eye. Both use their device exclusively: <b>Start LIVE</b> stops them.</p>
   </div>
 
   <div class="card">
@@ -553,6 +563,7 @@ function setMode(m) {
   $('liveSources').style.display = m==='live' ? '' : 'none';
   $('monCard').style.display     = m==='live' ? '' : 'none';
   if (m!=='live' && mon) monStop();
+  if (m!=='live' && monVideoOn) monVideoStop();
   $('addStemRow').style.display     = m==='vod'  ? 'flex' : 'none';
   $('addMusicianBtn').style.display = m==='live' ? 'block' : 'none';
   $('tabVod').className  = m==='vod'  ? 'go' : 'ghost';
@@ -1200,6 +1211,7 @@ function renderStems() {
       <span class="x" onclick="event.stopPropagation();removeStem(${i})">✕</span>
     </div>`).join('') || '<p class="small">No stems. Add musicians above.</p>';
   if (mon) renderMonTable();
+  if (monVideoOn) monDrawOverlay();
 }
 function syncSelPanel() {
   const p = $('selPanel');
@@ -1526,7 +1538,7 @@ function arUnplace(){
 }
 
 // All four views draw the same stems, so they are never redrawn apart.
-function drawViews(){ drawRadar(); drawHeight(); drawARPlan(); drawARFront(); }
+function drawViews(){ drawRadar(); drawHeight(); drawARPlan(); drawARFront(); if (monVideoOn) monDrawOverlay(); }
 
 // ── Bed construction ─────────────────────────────────────────────────────────
 // Four mono components in, one 4-channel bed out. The server hands it to
@@ -1852,6 +1864,7 @@ async function monStart() {
   if (session !== monSession) { m.stop(); return; }   // failed or stopped while starting
   mon = m;
   mon.setVolume(+$('monVol').value);
+  monApplyDelay();
   $('btnMonStop').disabled = false;
   renderMonTable();
 }
@@ -1920,7 +1933,84 @@ function monMarkMode() {
   set('mAud', m === 'audience');
   for (let k = 0; k < mon.channels; k++) set('mpfl' + k, m === 'pfl:' + k);
   scene.stems.forEach((_, i) => set('mspot' + i, m === 'spotlight:' + i));
+  monDrawOverlay();
 }
+
+// — Camera preview (multipart MJPEG from /api/monitor/video into an <img>) —
+let monVideoOn = false;
+function monVideoToggle() { monVideoOn ? monVideoStop() : monVideoStart(); }
+
+function monVideoStart() {
+  const V = (scene.live && scene.live.video) || {};
+  if ((V.src || 'usb') !== 'usb') { toast('The preview reads a USB (v4l2) camera only'); return; }
+  const q = new URLSearchParams({ device: V.device || '/dev/video0', fr: V.fr || 30, t: Date.now() });
+  if (V.size) q.set('size', V.size);
+  if (V.informat) q.set('informat', V.informat);
+  const img = $('monVideo');
+  img.onload = () => { $('monVideoLine').textContent = `${V.device || '/dev/video0'} · live`; monDrawOverlay(); };
+  img.onerror = async () => {
+    if (!monVideoOn) return;
+    let msg = '';
+    try { msg = (await fetch('/api/monitor/video/error').then(r => r.json())).error; } catch (_) {}
+    monVideoStop();
+    $('monVideoLine').textContent = '✕ ' + (msg || 'could not open the camera');
+  };
+  monVideoOn = true;
+  img.src = '/api/monitor/video?' + q;
+  $('monVideoWrap').style.display = '';
+  $('btnMonVideo').textContent = '📷 Hide video';
+  $('monVideoLine').textContent = 'opening the camera…';
+  // A starting point for the sync: the encode's own A/V delay.
+  if (!+$('monDelay').value && scene.live.audio && scene.live.audio.delay > 0) $('monDelay').value = scene.live.audio.delay;
+  monApplyDelay();
+}
+
+function monVideoStop() {
+  monVideoOn = false;
+  const img = $('monVideo');
+  img.onerror = null; img.onload = null;
+  img.removeAttribute('src');          // closes the stream → the server stops ffmpeg
+  $('monVideoWrap').style.display = 'none';
+  $('btnMonVideo').textContent = '📷 Show video';
+  $('monVideoLine').textContent = '';
+  monApplyDelay();
+}
+
+// The delay only makes sense against the picture: without it, no delay at all.
+function monApplyDelay() {
+  if (mon) mon.setAvDelay(monVideoOn ? Math.max(0, +$('monDelay').value || 0) : 0);
+}
+
+// Each musician on the equirect, where its azimuth says it is
+// (azimuthDeg = (0.5 − u)·360, docs/encoding.md). A dot that misses the
+// player is the azimuth to fix on the radar.
+function monDrawOverlay() {
+  const cv = $('monVideoOv'), img = $('monVideo');
+  if (!cv || !monVideoOn) return;
+  const w = img.clientWidth, h = img.clientHeight;
+  if (!w || !h) return;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  g.font = '600 12px system-ui, sans-serif';
+  g.textAlign = 'center';
+  const spot = mon && mon.mode.startsWith('spotlight:') ? +mon.mode.split(':')[1] : -1;
+  scene.stems.forEach((s, i) => {
+    let u = 0.5 - (+s.azimuthDeg || 0) / 360; u -= Math.floor(u);
+    const v = 0.5 - (+s.elevationDeg || 0) / 180;
+    const x = u * w, y = v * h, c = PALETTE[i % PALETTE.length];
+    g.beginPath(); g.arc(x, y, i === spot ? 9 : 6, 0, Math.PI * 2);
+    g.fillStyle = c; g.globalAlpha = 0.9; g.fill();
+    g.lineWidth = 2; g.strokeStyle = '#000'; g.globalAlpha = 1; g.stroke();
+    const label = s.name || 'stem ' + i;
+    g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,.75)'; g.strokeText(label, x, y - 13);
+    g.fillStyle = '#fff'; g.fillText(label, x, y - 13);
+  });
+}
+window.addEventListener('resize', monDrawOverlay);
+$('monDelay').oninput = monApplyDelay;
 
 function monGain(i, v) {
   const s = scene.stems[i]; if (!s) return;

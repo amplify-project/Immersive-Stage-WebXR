@@ -73,6 +73,7 @@ function startJob(mode, cmd, args, env) {
   // el device, stream.sh lo ve "ocupado". Los paramos antes de arrancar.
   stopMeasure(); stopSnapshot();
   if (liveMonitor) liveMonitor.stop('An encode started: it needs the audio device.');
+  if (videoPreview) videoPreview.stop();
   const proc = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env }, detached: true });
   job = { proc, mode, log: [], speed: '', frame: 0, startedAt: Date.now(), exit: null, cmd: [cmd, ...args].join(' '),
           env: Object.entries(env || {}).map(([k, v]) => `${k}=${JSON.stringify(String(v))}`).join(' ') };
@@ -712,12 +713,22 @@ async function handleAPI(req, res, pathname) {
     // ── Snapshot de la cámara (un frame JPEG) para elegir el ROI ────────────
     //  Solo vídeo (no toca ALSA). v4l2loopback no admite dos lectores, así que
     //  liberamos monitores antes; si hay un encode, el device está ocupado.
+    // ── Camera preview for the soundcheck monitor (multipart MJPEG) ─────────
+    if (pathname === '/api/monitor/video' && req.method === 'GET') {
+      if (!videoPreview) return sendJSON(res, 503, { error: 'Live monitor disabled' });
+      return videoPreview.handle(req, res);
+    }
+    if (pathname === '/api/monitor/video/error' && req.method === 'GET') {
+      return sendJSON(res, 200, { error: videoPreview ? videoPreview.lastError() : 'Live monitor disabled' });
+    }
+
     if (pathname === '/api/snapshot' && req.method === 'GET') {
       if (job && job.proc) return sendJSON(res, 409, { error: 'Hay un encode en marcha (' + job.mode + '). Párelo antes (la cámara está en uso).' });
       let scene = {}; try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); } catch (_) {}
       const V = (scene.live && scene.live.video) || {};
       const dev = V.device || '/dev/video10';
       stopMeasure(); stopSnapshot();   // libera el device
+      if (videoPreview) videoPreview.stop();   // v4l2: one reader
       // Descarta los primeros frames (auto-exposición) y quédate con uno.
       // detached → grupo propio para poder matarlo; timeout de seguridad para que
       // no se quede colgado con la cámara abierta si el device no entrega frames.
@@ -767,6 +778,7 @@ async function handleAPI(req, res, pathname) {
       console.log('[measure] CH=' + fCh + ' WCH=' + fWch + ' DUR=' + dur + (roiRel ? ' ROI_REL=' + roiRel : '') + ' bash measure_sync.sh ' + mArgs.join(' '));
       stopSnapshot();   // libera vídeo+audio (compartidos)
       if (liveMonitor) liveMonitor.stop('Measuring the A/V delay: it needs the audio device.');
+      if (videoPreview) videoPreview.stop();
       const proc = spawn('bash', [path.join(ROOT, 'measure_sync.sh'), ...mArgs],
         { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur), ...(roiRel ? { ROI_REL: roiRel } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
       measureProc = proc;
@@ -956,9 +968,13 @@ if (!/^(0|off|false)$/i.test(process.env.VOICE || '')) {
 // ── Live monitor: hear the desk during the soundcheck, without encoding ──
 // Raw PCM over /monitor into the editor (live-monitor.js). Same `ws` dependency
 // as the services above, so same guard.
-let liveMonitor = null;
+let liveMonitor = null, videoPreview = null;
 try {
-  const { createLiveMonitor } = require('./live-monitor');
+  const { createLiveMonitor, createVideoPreview } = require('./live-monitor');
+  videoPreview = createVideoPreview({
+    isBusy: () => (job && job.proc ? `An encode is running (${job.mode}): stop it first, it holds the camera.`
+                 : measureProc ? 'Measuring the A/V delay: try again in a few seconds.' : null),
+  });
   liveMonitor = createLiveMonitor({
     server,
     isBusy: () => (job && job.proc ? `An encode is running (${job.mode}): stop it first, it holds the audio device.`

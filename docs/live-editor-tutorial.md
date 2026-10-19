@@ -295,11 +295,21 @@ is, usually 100–200 ms.
 - **Gain dB** on each row applies as you type. **Save scene** keeps the value for
   the player, which reads it on load, so nothing needs re-encoding.
 
+**📷 Show video** adds the camera underneath, a frame or two behind it. It is sent
+as MJPEG at 1280 px wide: enough to see the stage, not to judge the picture. Each
+musician is drawn at their azimuth and elevation. On a 360 camera a dot that misses
+its player is an azimuth to fix on the radar. The sound is then a little ahead of
+the picture, by the camera's own latency, which includes stitching on a 360.
+**Audio delay** holds the sound back to meet it. It starts at the scene's A/V delay;
+adjust it by eye on a clap. It only applies while the video is shown, so the plain
+soundcheck stays as immediate as possible.
+
 The meters show the raw inputs: RMS as the bar, the peak as the tick. The bar
 turns yellow above −9 dBFS and red above −1 dBFS. Restart the monitor after
 changing the device, the channels or the list of musicians; azimuths are also
-read only at start. The monitor holds the audio device, so **Start LIVE** and
-**Auto-measure delay** stop it.
+read only at start. The monitor holds the audio device and the preview holds the
+camera (the X4 bridge's `/dev/video10` takes a single reader), so **Start LIVE** and
+**Auto-measure delay** stop both, and **📷 ROI** stops the preview.
 
 ## Rehearse without the desk
 

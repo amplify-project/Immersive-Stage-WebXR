@@ -16,6 +16,7 @@
 //
 //   const mon = await startLiveMonitor({ scene, onMeters, onStatus });
 //   mon.spotlight(2); mon.setStemGainDb(2, 3.5); mon.pfl(4); mon.audience(); mon.stop();
+//   mon.setAvDelay(400)   // only with the camera preview on: line the sound up with it
 
 const RATE = 48000;
 const D2R = Math.PI / 180;
@@ -80,7 +81,9 @@ export async function startLiveMonitor({ scene, onMeters = () => {}, onStatus = 
   node.connect(split);
   const pflGain = ctx.createGain();
   pflGain.gain.value = 0;
-  pflGain.connect(ctx.destination);
+  const pflDelay = ctx.createDelay(2.0);
+  pflGain.connect(pflDelay);
+  pflDelay.connect(ctx.destination);
   let pflCh = -1;
 
   let volume = 1;
@@ -120,6 +123,13 @@ export async function startLiveMonitor({ scene, onMeters = () => {}, onStatus = 
     setVolume(v) {
       volume = Math.max(0, +v || 0);
       if (pflCh >= 0) pflGain.gain.value = volume; else engine.setVolume(volume);
+    },
+    // Holds the audio back to meet the camera preview, which arrives later (the
+    // camera's own latency, stitching on a 360). 0 = straight soundcheck.
+    setAvDelay(ms) {
+      const v = engine.setOutputDelay(ms);
+      pflDelay.delayTime.value = v / 1000;
+      return v;
     },
     latencyMs() { return ((ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000; },
     stop() {
