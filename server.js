@@ -72,6 +72,7 @@ function startJob(mode, cmd, args, env) {
   // la medición: v4l2loopback es de un solo lector, así que si algo sigue leyendo
   // el device, stream.sh lo ve "ocupado". Los paramos antes de arrancar.
   stopMeasure(); stopSnapshot();
+  if (liveMonitor) liveMonitor.stop('An encode started: it needs the audio device.');
   const proc = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env }, detached: true });
   job = { proc, mode, log: [], speed: '', frame: 0, startedAt: Date.now(), exit: null, cmd: [cmd, ...args].join(' '),
           env: Object.entries(env || {}).map(([k, v]) => `${k}=${JSON.stringify(String(v))}`).join(' ') };
@@ -765,6 +766,7 @@ async function handleAPI(req, res, pathname) {
       const mArgs = [A.device || 'hw:1,0', V.device || '/dev/video10'];
       console.log('[measure] CH=' + fCh + ' WCH=' + fWch + ' DUR=' + dur + (roiRel ? ' ROI_REL=' + roiRel : '') + ' bash measure_sync.sh ' + mArgs.join(' '));
       stopSnapshot();   // libera vídeo+audio (compartidos)
+      if (liveMonitor) liveMonitor.stop('Measuring the A/V delay: it needs the audio device.');
       const proc = spawn('bash', [path.join(ROOT, 'measure_sync.sh'), ...mArgs],
         { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur), ...(roiRel ? { ROI_REL: roiRel } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
       measureProc = proc;
@@ -951,11 +953,27 @@ if (!/^(0|off|false)$/i.test(process.env.VOICE || '')) {
   }
 }
 
+// ── Live monitor: hear the desk during the soundcheck, without encoding ──
+// Raw PCM over /monitor into the editor (live-monitor.js). Same `ws` dependency
+// as the services above, so same guard.
+let liveMonitor = null;
+try {
+  const { createLiveMonitor } = require('./live-monitor');
+  liveMonitor = createLiveMonitor({
+    server,
+    isBusy: () => (job && job.proc ? `An encode is running (${job.mode}): stop it first, it holds the audio device.`
+                 : measureProc ? 'Measuring the A/V delay: try again in a few seconds.' : null),
+  });
+} catch (e) {
+  const why = e.code === 'MODULE_NOT_FOUND' ? 'falta `cd telemetry && npm install`' : e.message;
+  console.warn(`⚠  Live monitor disabled (${why}).`);
+}
+
 // Ni el relay ni el timing cierran un upgrade que no sea suyo: cada uno se
 // desentiende y el siguiente oyente lo mira. Aquí se acaban los oyentes, así que
 // lo que no haya reclamado nadie se cierra ahora — sin esto el socket se queda
 // abierto para siempre.
-const WS_PATHS = ['/ingest', '/consume', ...(timing ? [timing.path] : []), ...(voice ? [voice.path] : [])];
+const WS_PATHS = ['/ingest', '/consume', ...(timing ? [timing.path] : []), ...(voice ? [voice.path] : []), ...(liveMonitor ? [liveMonitor.path] : [])];
 server.on('upgrade', (req, socket) => {
   if (!WS_PATHS.includes((req.url || '').split('?')[0])) socket.destroy();
 });
