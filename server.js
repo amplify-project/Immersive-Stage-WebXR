@@ -1003,23 +1003,38 @@ function sceneTelemetryEnabled() {
   catch (_) { return false; }
 }
 
+// This machine's LAN addresses, for the startup banner: the headset and the
+// other PCs need the IP, and "<host>" made everyone go and look it up. Virtual
+// bridges (Docker, libvirt) are left out: nobody reaches the server through them.
+function lanAddresses() {
+  const out = [];
+  for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
+    if (/^(docker|br-|virbr|veth|lo)/.test(name)) continue;
+    for (const a of addrs || []) if (a.family === 'IPv4' && !a.internal) out.push(a.address);
+  }
+  return out;
+}
+
 server.listen(PORT, '0.0.0.0', () => {
+  const ips = lanAddresses();
+  const host = ips[0] || 'localhost';
   console.log(`Server running on ${scheme}://0.0.0.0:${PORT}  (root: ${ROOT})`);
-  console.log(`  player → ${scheme}://<host>:${PORT}/index.html`);
-  console.log(`  editor → ${scheme}://<host>:${PORT}/editor.html`);
+  console.log(`  player → ${scheme}://${host}:${PORT}/index.html`);
+  console.log(`  editor → ${scheme}://${host}:${PORT}/editor.html`);
+  if (ips.length > 1) console.log(`           also on: ${ips.slice(1).join(', ')}`);
   if (relay) {
     const note = sceneTelemetryEnabled()
       ? 'scene.json: enabled'
       : 'scene.json: enabled=false → ningún player enviará (usa ?telemetry=… para probar)';
-    console.log(`  telemetry → ${relay.scheme}://<host>:${PORT}/ingest · consume=/consume · health=/telemetry/health`);
+    console.log(`  telemetry → ${relay.scheme}://${host}:${PORT}/ingest · consume=/consume · health=/telemetry/health`);
     console.log(`              ${note}`);
   }
   if (timing) {
-    console.log(`  sync      → ${scheme === 'https' ? 'wss' : 'ws'}://<host>:${PORT}${timing.path}`);
-    console.log(`              manager=${scheme}://<host>:${PORT}/timing.html · player=?sync=<sesión>`);
+    console.log(`  sync      → ${scheme === 'https' ? 'wss' : 'ws'}://${host}:${PORT}${timing.path}`);
+    console.log(`              manager=${scheme}://${host}:${PORT}/timing.html · player=?sync=<sesión>`);
   }
   if (voice) {
-    console.log(`  voz       → ${scheme === 'https' ? 'wss' : 'ws'}://<host>:${PORT}${voice.path} · health=/voice/health`);
+    console.log(`  voz       → ${scheme === 'https' ? 'wss' : 'ws'}://${host}:${PORT}${voice.path} · health=/voice/health`);
     console.log(`              player=?voice=1 · graba en ${path.relative(ROOT, voice.dir)}/`);
   }
   if (scheme === 'http') {
