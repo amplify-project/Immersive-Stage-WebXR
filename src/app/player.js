@@ -1,5 +1,6 @@
 import { ImmersiveAudioEngine } from '../audio/ImmersiveAudioEngine.js';
 import { Telemetry } from '../telemetry/Telemetry.js';
+import { RayPointer, XRMenu } from './xr-input.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 //  El motor de audio inmersivo (clases HOAST*, matriz de zoom) vive ahora en
@@ -83,6 +84,64 @@ let deviceOrientation = {alpha:0, beta:90, gamma:0};
 let ambiAnalyser = null, ambiTimeDomain = null;
 let syncInterval = null;
 let xrZoomDist = 0;   // acercamiento en VR (joystick derecho), 0 = sin zoom
+// Ray and pinch (src/app/xr-input.js). In VR, a pinch on a musician zooms in
+// to THEM: the sphere moves along that musician's direction, not along the
+// head's, so the zoom stays on them while you look around, and their close-up
+// shows. A pinch on nothing zooms back out. The joystick still works and
+// cancels the goal.
+let xrZoomGoal = null;               // target xrZoomDist set by a pinch, or null
+let xrZoomStem = -1;                 // musician zoomed in by a pinch, or -1
+let xrZoomDir  = null;               // THREE.Vector3 the sphere moves along; null = the head's forward
+const xrZoomDirGoal = [0, 0, -1];    // where xrZoomDir is easing to
+let xrLastT    = 0;                  // XR frame clock for the zoom easing (ms)
+let pointer = null, xrMenu = null;
+let xrLastPose = null;               // viewer pose of the last XR frame (to place the menu)
+let xrPending  = null;               // 'vr' | 'ar': mode to enter once the current session has ended
+let vrOk = false, arOk = false;      // what this browser/headset supports (checkWebXR)
+const _zoomFwd = new THREE.Vector3(), _zoomQ = new THREE.Quaternion();   // per-frame temps
+// Perf experiments (the ray costs frames on the Quest; these isolate why):
+//   ?nojoints=1  do not request 'hand-tracking'. Hands should still give a ray
+//                and pinch, just without the 25 joint poses per hand per frame,
+//                which we no longer read.
+//   ?noray=1     keep the ray logic (pick, pinch, menu) but draw nothing.
+const XR_NO_JOINTS = new URLSearchParams(location.search).get('nojoints') === '1';
+const XR_NO_RAY    = new URLSearchParams(location.search).get('noray') === '1';
+const HAND_FEATS   = XR_NO_JOINTS ? [] : ['hand-tracking'];
+
+// Headroom experiments. With hands in view and the head turning fast, the
+// Quest's own hand tracking competes with us for the same CPU/GPU, and the
+// 4K decode already takes most of it. We cannot make the tracking cheaper, only
+// leave it room:
+//   ?xrfps=72    ask for 72 Hz instead of 90: 13.9 ms per frame instead of
+//                11.1, and a steady 72 looks better than 90 dropping to 50.
+//   ?fovea=1     fixed foveated rendering, 0..1: fewer pixels shaded at the
+//                edges of the lenses, where they are blurred anyway.
+//   ?xrscale=0.8 render the eye buffers at 80% resolution.
+const _xrq = new URLSearchParams(location.search);
+const XR_FPS   = Number(_xrq.get('xrfps')) || 0;
+const XR_FOVEA = _xrq.has('fovea') ? Math.min(1, Math.max(0, Number(_xrq.get('fovea')) || 0)) : null;
+const XR_SCALE = Number(_xrq.get('xrscale')) || 0;
+
+// Before setSession: the framebuffer scale is read when the layer is made.
+function xrHeadroomBefore() {
+  if (XR_SCALE > 0) renderer.xr.setFramebufferScaleFactor(XR_SCALE);
+}
+
+// After setSession: the layer exists, and so does the session's frame rate.
+function xrHeadroomAfter(session) {
+  const layer = session.renderState && session.renderState.baseLayer;
+  if (XR_FOVEA != null && layer && 'fixedFoveation' in layer) layer.fixedFoveation = XR_FOVEA;
+  if (XR_FPS && session.updateTargetFrameRate) {
+    const rates = session.supportedFrameRates ? Array.from(session.supportedFrameRates) : [];
+    // The nearest rate the headset offers: asking for one it lacks rejects.
+    const want = rates.length ? rates.reduce((a, b) => Math.abs(b - XR_FPS) < Math.abs(a - XR_FPS) ? b : a) : XR_FPS;
+    session.updateTargetFrameRate(want).catch(e => console.warn('[xr] frame rate:', e.message));
+  }
+  console.log('[xr] headroom: fps', XR_FPS || 'default', '· fovea', XR_FOVEA ?? 'default',
+              '· scale', XR_SCALE || 1, '· rates', session.supportedFrameRates ? Array.from(session.supportedFrameRates).join('/') : '?');
+}
+const VR_PINCH_ZOOM = 40;            // where a pinch zooms to: full spotlight boost (see zoomN)
+const VR_ZOOM_EASE  = 6;             // 1/s: ~0.5 s to get most of the way there
 let telemetry    = null;             // Telemetry: pose de cabeza → relay externo (opt-in)
 let telemetryCfg = null;             // bloque telemetry de scene.json
 let voice        = null;             // VoiceRecorder: micro del participante → /voice (opt-in)
@@ -151,6 +210,17 @@ function initThree() {
   closeupMesh.visible = false;
   camera.add(closeupMesh);
   scene.add(camera);                   // necesario para que los hijos se rendericen
+
+  // Hands-free input for both XR modes; nothing of it shows on desktop.
+  xrMenu = new XRMenu(scene, xrMenuChoose);
+  pointer = new RayPointer(scene, {
+    pick: (o, d, cone) => engine ? engine.getStemAlong(o, d, cone) : -1,
+    targetPos: xrStemWorldPos,
+    onTap: xrSelect,
+    onHold: xrOpenMenu,
+    menu: xrMenu,
+    hidden: XR_NO_RAY,
+  });
 
   window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -309,7 +379,41 @@ const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0, lastRese
 function syncReading() {
   return (window.syncDiag && window.syncDiag()) || null;
 }
-const _perf = { n: 0, t0: 0, worst: 0, sum: 0, audio: 0, focus: 0, render: 0, worstAt: '', vf0: -1 };
+const _perf = { n: 0, t0: 0, worst: 0, sum: 0, audio: 0, focus: 0, render: 0, worstAt: '', vf0: -1,
+                lastT: 0, slow: 0, cf0: -1 };
+
+// ?arperf=1 works in VR too. Two loops share these two helpers, so the numbers
+// mean the same in both.
+//
+// `slow` counts frames that arrived more than 1.5 frame periods after the
+// previous one, i.e. frames the headset had to drop or reproject. That is the
+// number that matches "it stutters when I turn": our JavaScript can be cheap
+// while the GPU or the video decoders miss the frame anyway, and then only the
+// interval between frames shows it.
+function perfFrameStart(time) {
+  if (_perf.lastT) {
+    const rate = renderer.xr.getSession()?.frameRate || 72;
+    if (time - _perf.lastT > 1.5 * 1000 / rate) _perf.slow++;
+  }
+  _perf.lastT = time;
+  return performance.now();
+}
+
+function perfFrameEnd(p0, p2) {
+  const end = performance.now(), total = end - p0;
+  _perf.render += end - p2; _perf.sum += total; _perf.n++;
+  if (total > _perf.worst) {
+    _perf.worst = total;
+    // El reparto del PEOR frame es lo que dice dónde se fue el tiempo.
+    _perf.worstAt = `js ${(p2 - p0).toFixed(1)} / render ${(end - p2).toFixed(1)}`;
+  }
+  arPerfReport(end);
+}
+
+function closeupDecodedFrames() {
+  const q = closeupEl && closeupEl.getVideoPlaybackQuality && closeupEl.getVideoPlaybackQuality();
+  return q ? q.totalVideoFrames : -1;
+}
 
 // Fotogramas de vídeo que el navegador lleva DECODIFICADOS. En AR la esfera está
 // oculta y nadie dibuja esa textura, pero el <video> sigue reproduciendo porque
@@ -478,30 +582,36 @@ function arNotice(msg) {
 function arPerfReport(now) {
   // La ventana arranca en el primer frame; sin esto, t0=0 contra un
   // performance.now() de varios segundos suelta un informe de 1 frame al entrar.
-  if (!_perf.t0) { _perf.t0 = now; _perf.vf0 = decodedFrames(); return; }
+  if (!_perf.t0) { _perf.t0 = now; _perf.vf0 = decodedFrames(); _perf.cf0 = closeupDecodedFrames(); _perf.slow = 0; return; }
   if (_perf.n && now - _perf.t0 >= 2000) {
     const avg = (_perf.sum / _perf.n).toFixed(2);
     // Fotogramas decodificados por segundo en esta ventana. ~24-30 = el vídeo se
     // está decodificando entero; 0 = el navegador ya no lo decodifica.
     const vf = decodedFrames();
-    const vfps = (vf >= 0 && _perf.vf0 >= 0) ? ((vf - _perf.vf0) / ((now - _perf.t0) / 1000)).toFixed(1) : '?';
+    const secs = (now - _perf.t0) / 1000;
+    const vfps = (vf >= 0 && _perf.vf0 >= 0) ? ((vf - _perf.vf0) / secs).toFixed(1) : '?';
+    const cf = closeupDecodedFrames();
+    const cfps = (cf >= 0 && _perf.cf0 >= 0) ? ((cf - _perf.cf0) / secs).toFixed(1) : '?';
+    const fps = (_perf.n / secs).toFixed(0);
     console.log(`[arperf] ${_perf.n} frames · medio ${avg} ms · peor ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})` +
       ` · audio ${(_perf.audio / _perf.n).toFixed(2)} · foco ${(_perf.focus / _perf.n).toFixed(2)}` +
-      ` · render ${(_perf.render / _perf.n).toFixed(2)} · vídeo decodificado ${vfps} fps`);
+      ` · render ${(_perf.render / _perf.n).toFixed(2)} · vídeo decodificado ${vfps} fps` +
+      ` · close-up ${cfps} fps · ${fps} fps reales · ${_perf.slow} frames lentos`);
     // Un aviso vivo manda sobre el informe: el informe vuelve en 2 s, el aviso no.
     if (!arNoticeUntil) arPerfPanelDraw([
-      `${_perf.n} frames · avg ${avg} ms`,
+      `${fps} fps · ${_perf.slow} slow · js+render ${avg} ms`,
       `worst ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})`,
-      `audio ${(_perf.audio / _perf.n).toFixed(2)} · render ${(_perf.render / _perf.n).toFixed(2)}`,
-      `video decoded ${vfps} fps`,
+      `render ${(_perf.render / _perf.n).toFixed(2)} ms`,
+      `decoded: 360 ${vfps} · close-up ${cfps} fps`,
     ]);
     // Cada ventana se guarda además para el volcado de la página al salir, que
     // sobrevive a quitarse las gafas.
     window.__arperf = window.__arperf || [];
     window.__arperf.push({ frames: _perf.n, avgMs: +avg, worstMs: +_perf.worst.toFixed(1),
-                           worstAt: _perf.worstAt, videoFps: +vfps });
-    _perf.n = _perf.sum = _perf.worst = _perf.audio = _perf.focus = _perf.render = 0;
-    _perf.t0 = now; _perf.vf0 = vf;
+                           worstAt: _perf.worstAt, videoFps: +vfps, closeupFps: +cfps,
+                           fps: +fps, slow: _perf.slow });
+    _perf.n = _perf.sum = _perf.worst = _perf.audio = _perf.focus = _perf.render = _perf.slow = 0;
+    _perf.t0 = now; _perf.vf0 = vf; _perf.cf0 = cf;
   }
 }
 
@@ -1407,6 +1517,8 @@ function resetCloseup() {
 // los stems y una asignación; el trabajo de verdad lo hace la transición.
 function updateCloseupFocus() {
   if (!closeupReady || arSession || !engine) { closeupArmed = -1; return showCloseup(-1); }
+  // Pinched: that musician's close-up, whatever the head is looking at.
+  if (xrZoomStem >= 0) { closeupArmed = -1; return showCloseup(xrZoomStem); }
   const enter = engine.getFocusedStem(CLOSEUP_ENTER);   // quién se lo gana de sobra
   const stay  = engine.getFocusedStem(CLOSEUP_EXIT);    // quién manda con el listón bajo
   // Cruzar EXIT no saca el panel, pero sí manda ir cargando esa pista... si el
@@ -1780,12 +1892,12 @@ function voiceBadge(state) {
 // ══════════════════════════════════════════════════════
 async function checkWebXR() {
   if (!navigator.xr) return;
-  const ok = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
+  const ok = vrOk = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
   if (ok) {
     document.getElementById('xr-btn').disabled = false;
     document.getElementById('xr-badge').style.display = 'inline';
   }
-  const arOk = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+  arOk = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
   if (arOk) document.getElementById('ar-btn').disabled = false;
 }
 
@@ -1799,27 +1911,35 @@ async function enterXR() {
 
     xrSession = await navigator.xr.requestSession('immersive-vr', {
       requiredFeatures: ['local-floor'],
-      optionalFeatures: ['bounded-floor', 'hand-tracking'],
+      optionalFeatures: ['bounded-floor', ...HAND_FEATS],
     });
 
     renderer.xr.setReferenceSpaceType('local-floor');
+    xrHeadroomBefore();
     await renderer.xr.setSession(xrSession);
+    xrHeadroomAfter(xrSession);
 
     // frame: en qué marco viajan p/q. En VR es el del propio casco (ver arTelemetryPose).
     telemetrySetMode('vr');
     voice?.mark('enter-vr');
 
     document.getElementById('xr-btn').textContent = 'EXIT VR';
+    pointer.attach(xrSession);
+    xrZoomGoal = null; xrZoomStem = -1; xrZoomDir = null; xrLastT = 0;
 
     xrSession.addEventListener('end', () => {
       xrSession = null;
+      pointer.detach();
+      xrMenu.close();
+      xrZoomGoal = null; xrZoomStem = -1; xrZoomDir = null;
       telemetryLeaveXR();
       voice?.mark('exit-vr');   // la grabación sigue: lo que se dice al salir vale tanto como lo de dentro
       if (debugMesh) debugMesh.visible = false;
-      if (SYNCLOG || SHAREDLOG) arPerfPanelClear();
+      if (SYNCLOG || SHAREDLOG || ARPERF) arPerfPanelClear();
       document.getElementById('xr-btn').textContent = 'VR';
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
+      xrResumePending();
     });
 
     let frameCount = 0;
@@ -1827,6 +1947,7 @@ async function enterXR() {
     renderer.setAnimationLoop((time, frame) => {
 
       frameCount++;
+      const _p0 = ARPERF ? perfFrameStart(time) : 0;
 
       // ── Actualizar textura vídeo ──────────────────
       if (videoEl && videoEl.readyState >= 2) {
@@ -1844,6 +1965,7 @@ async function enterXR() {
           const pose = frame.getViewerPose(refSpace);
           if (pose) {
             hasPose = true;
+            xrLastPose = pose;
             const q = pose.transform.orientation;
             const pos = pose.transform.position;
 
@@ -1870,9 +1992,29 @@ async function enterXR() {
             for (const isrc of xrSession.inputSources) {
               if (isrc.handedness === 'right' && isrc.gamepad && isrc.gamepad.axes.length >= 4) {
                 const jy = isrc.gamepad.axes[3];   // adelante = negativo
-                if (Math.abs(jy) > 0.15)
+                if (Math.abs(jy) > 0.15) {
+                  xrZoomGoal = null; xrZoomStem = -1;   // the stick takes over from a point
                   xrZoomDist = Math.max(0, Math.min(80, xrZoomDist - jy * 1.2));
+                }
               }
+            }
+            // ...or towards where a pinch asked for (see xrSelect).
+            const dt = xrLastT ? Math.min((time - xrLastT) / 1000, 0.1) : 0;
+            xrLastT = time;
+            const ease = Math.min(1, dt * VR_ZOOM_EASE);
+            if (xrZoomGoal != null) {
+              xrZoomDist += (xrZoomGoal - xrZoomDist) * ease;
+              if (Math.abs(xrZoomGoal - xrZoomDist) < 0.05) { xrZoomDist = xrZoomGoal; xrZoomGoal = null; }
+            }
+            // Pinching one musician after another swings the zoom across
+            // instead of cutting to them. Back at zero zoom the direction no
+            // longer matters and the head's forward takes over again.
+            if (xrZoomDir) {
+              xrZoomDir.x += (xrZoomDirGoal[0] - xrZoomDir.x) * ease;
+              xrZoomDir.y += (xrZoomDirGoal[1] - xrZoomDir.y) * ease;
+              xrZoomDir.z += (xrZoomDirGoal[2] - xrZoomDir.z) * ease;
+              xrZoomDir.normalize();
+              if (xrZoomDist <= 0 && xrZoomGoal == null) xrZoomDir = null;
             }
 
             // El zoom de VR (joystick) alimenta el spotlight de stems: en
@@ -1882,6 +2024,7 @@ async function enterXR() {
             const zoomN = xrZoomDist / 40;
             engine?.setZoomNormalized(zoomN);
             updateCloseupFocus();   // close-up del músico enfocado (joystick zoom)
+            pointer.update(frame, refSpace);
 
             // Telemetría: pose de cabeza + zoom/foco (decimado a rateHz en la clase).
             // pos/q son referencias de la pose ya leída → sin coste por frame.
@@ -1893,14 +2036,16 @@ async function enterXR() {
             // el mismo rango venga de VR, de escritorio o del simulador.
             // setZoomNormalized() acaba de recalcular los pesos, así que el foco es
             // el de este frame.
-            telemetry?.sample(pos, q, zoomN, engine?.getFocusedStem(0.3) ?? -1,
+            // A musician zoomed in by a pinch is the focus wherever the head is.
+            telemetry?.sample(pos, q, zoomN,
+                              xrZoomStem >= 0 ? xrZoomStem : (engine?.getFocusedStem(0.3) ?? -1),
                               videoEl?.currentTime || 0);
 
             // Centrar la esfera en la cabeza y desplazarla EN CONTRA de la vista
             // para "acercar" lo que miras (xrZoomDist = 0 → solo centrada).
             if (sphere) {
-              const fwd = new THREE.Vector3(0, 0, -1)
-                .applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w));
+              const fwd = xrZoomDir || _zoomFwd.set(0, 0, -1)
+                .applyQuaternion(_zoomQ.set(q.x, q.y, q.z, q.w));
               sphere.position.set(
                 pos.x - fwd.x * xrZoomDist,
                 pos.y - fwd.y * xrZoomDist,
@@ -1919,7 +2064,7 @@ async function enterXR() {
             if (SYNCLOG || SHAREDLOG) {
               arPerfPanelPlace(pose);
               syncPanelReport(performance.now());
-            }
+            } else if (ARPERF) arPerfPanelPlace(pose);
           }
         }
       }
@@ -1943,14 +2088,19 @@ async function enterXR() {
         });
       }
 
-      updateAmbiViz();
+      // Sin updateAmbiViz(), como en AR: es un canvas 2D del HUD de la página,
+      // que en sesión inmersiva no se ve, y costaba cuatro lecturas de analyser y
+      // un barrido del buffer en cada frame del hilo principal.
+      const _p2 = ARPERF ? performance.now() : 0;
       renderer.render(scene, camera);
+      if (ARPERF) perfFrameEnd(_p0, _p2);
     });
 
     if (videoEl) videoEl.play();
     if (audioEl) audioEl.play().catch(()=>{});
     if (audioCtx) audioCtx.resume();
     toast('Quest 3 VR activo');
+    if (ARPERF) { _perf.t0 = _perf.lastT = 0; arPerfPanelDraw(['[perf] measuring…', '', 'first window in 2 s', '']); }
 
   } catch(e) {
     toast('Error WebXR: ' + e.message);
@@ -2048,6 +2198,7 @@ function makeLabelSprite(text) {
 // Marcador de fuente: esfera de alambre emisiva + etiqueta con el nombre.
 const AR_MARK_IDLE  = 0x00d4ff;   // marcador en reposo
 const AR_MARK_FOCUS = 0xffd24a;   // marcador del músico enfocado
+const AR_MARK_LOCK  = 0xff7a1a;   // enfocado y fijado con un pinch
 
 function makeSourceMarker(name) {
   const g = new THREE.Group();
@@ -2235,9 +2386,10 @@ let arFocus      = -1;   // músico enfocado (índice de stem) o -1
 let arFocusCand  = -1;   // candidato en observación
 let arFocusSince = 0;    // ms en que el candidato pasó a serlo
 let arFocusLost  = 0;    // ms en que el enfocado salió del cono ancho (0 = dentro)
+let arLocked     = -1;   // músico fijado con un pinch: el foco no lo suelta la mirada
 
 function resetARFocus() {
-  arFocus = arFocusCand = -1;
+  arFocus = arFocusCand = arLocked = -1;
   arFocusSince = arFocusLost = 0;
   engine?.setFocusedStem(-1);   // que no quede un músico realzado de la sesión anterior
 }
@@ -2250,6 +2402,9 @@ const _coneKeep  = { coneDeg: AR_FOCUS.keepDeg };
 // Un frame de foco. `now` es el timestamp del bucle de render (ms).
 function updateARFocus(now) {
   if (!engine) return -1;
+  // A pinned musician stays focused wherever the head goes: that is the point of
+  // pinning, listening to one player while looking around the room.
+  if (arLocked >= 0) return arLocked;
   const prev = arFocus;
   const cand = engine.getGazedStem(_coneEnter);
 
@@ -2286,8 +2441,97 @@ function paintARFocus() {
     // Con malla manda el aro del suelo; sin ella, la esfera de alambre. Nunca las
     // dos: la esfera está oculta en cuanto hay músico que mirar.
     const mark = m.userData.focusRing || m.children[0];
-    if (mark && mark.material) mark.material.color.copy(MeshFit.colour(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE));
+    const c = i !== arFocus ? AR_MARK_IDLE : i === arLocked ? AR_MARK_LOCK : AR_MARK_FOCUS;
+    if (mark && mark.material) mark.material.color.copy(MeshFit.colour(c));
   });
+}
+
+// Pin the focus on musician `i` (a pinch on them), or unpin with -1. Pinning
+// skips the gaze dwell: the pinch already is the deliberate "this one". Unpinning
+// hands the focus back to the gaze policy as it stands —if you are still
+// looking at them they stay focused, otherwise they go after releaseMs— rather
+// than dropping it at once, which would be a jump in the mix for no reason.
+function lockARFocus(i) {
+  arLocked = i;
+  arFocusLost = 0;
+  if (i >= 0) arFocus = i;
+  paintARFocus();
+  engine?.setFocusedStem(arFocus);
+}
+
+// ── Ray and pinch (both XR modes) ──────────────────────────────────────────
+// A pinch (or trigger) tap with the hand's ray on musician `target`, or on
+// nothing (-1):
+//   VR: on a musician → zoom in to them (close-up and spotlight follow); on
+//       another one while zoomed → the zoom swings across; on nothing → out.
+//   AR: on a musician → pin them; on the pinned one or on nothing → unpin.
+function xrSelect(target) {
+  if (arSession) {
+    if (target >= 0 && target !== arLocked) lockARFocus(target);
+    else if (arLocked >= 0) lockARFocus(-1);
+    return;
+  }
+  if (!xrSession) return;
+  const d = target >= 0 ? engine?.getStemDirection(target) : null;
+  if (!d) {                                  // on nothing: zoom back out
+    xrZoomStem = -1;
+    if (xrZoomDist > 0 || xrZoomGoal) xrZoomGoal = 0;
+    return;
+  }
+  xrZoomStem = target;
+  xrZoomGoal = VR_PINCH_ZOOM;
+  xrZoomDirGoal[0] = d[0]; xrZoomDirGoal[1] = d[1]; xrZoomDirGoal[2] = d[2];
+  // Start from where the zoom already is: along the head if it came from the
+  // stick, or the previous musician — so it swings rather than jumps.
+  if (!xrZoomDir) {
+    xrZoomDir = xrZoomDist > 0 ? camera.getWorldDirection(new THREE.Vector3())
+                               : new THREE.Vector3(d[0], d[1], d[2]);
+  }
+}
+
+// World position of musician `i` when it is a point of the room (AR), so the
+// ray can end on them. In the 360 they are at infinity: null.
+const _stemPos = [0, 0, 0];
+const _stemV = new THREE.Vector3();
+function xrStemWorldPos(i) {
+  if (!arSession || !arSources[i]) return null;
+  arSources[i].getWorldPosition(_stemV);
+  _stemPos[0] = _stemV.x; _stemPos[1] = _stemV.y; _stemPos[2] = _stemV.z;
+  return _stemPos;
+}
+
+// ── XR menu (long pinch on nothing) ─────────────────────────────────────────
+function xrOpenMenu() {
+  if (!xrLastPose) return;
+  const inVR = !!xrSession, inAR = !!arSession;
+  xrMenu.show([
+    { id: 'vr',   label: 'VR · 360°',        active: inVR, note: inVR ? 'now' : '', disabled: !vrOk },
+    { id: 'ar',   label: 'AR · passthrough', active: inAR, note: inAR ? 'now' : arOk ? '' : 'not available', disabled: !arOk },
+    { id: 'exit', label: 'Exit immersive' },
+  ], xrLastPose);
+}
+
+function xrMenuChoose(id) {
+  xrMenu.close();
+  if (id === 'exit') { (xrSession || arSession)?.end(); return; }
+  if ((id === 'vr' && xrSession) || (id === 'ar' && arSession)) return;   // already there
+  xrPending = id;
+  (xrSession || arSession)?.end();
+}
+
+// Switching mode is ending one session and requesting the other: WebXR has no
+// way to turn a VR session into an AR one. requestSession() needs a user
+// gesture, and the pinch that chose the option is one — select events are user
+// activation in the Quest browser — as long as the new request comes soon
+// after it, which it does: the old session ends in a few frames. If the
+// browser refuses anyway, the user lands on the page with a toast saying which
+// button to press, rather than stuck in a mode they did not pick.
+function xrResumePending() {
+  const m = xrPending;
+  xrPending = null;
+  if (!m) return;
+  const go = m === 'ar' ? enterAR : enterXR;
+  go().catch(e => toast(`No se pudo entrar en ${m.toUpperCase()}: pulsa el botón ${m.toUpperCase()} (${e.message})`));
 }
 
 // ══════════════════════════════════════════════════════
@@ -3049,8 +3293,8 @@ async function enterAR() {
       // se cae a la calibración a mano, que sigue entera.
       optionalFeatures: SHAREDSPACE
         // 'unbounded' porque el ejemplo que funciona lo pide junto a 'shared'.
-        ? ['hand-tracking', 'anchors', 'shared', 'unbounded']
-        : ['hand-tracking', 'anchors'],
+        ? [...HAND_FEATS, 'anchors', 'shared', 'unbounded']
+        : [...HAND_FEATS, 'anchors'],
     });
     // Lo primero a descartar cuando la sala no vuelve a su sitio: sin 'anchors'
     // concedida no hay nada que persistir, y como va en optionalFeatures la
@@ -3058,7 +3302,9 @@ async function enterAR() {
     const arFeats = arSession.enabledFeatures ? Array.from(arSession.enabledFeatures) : null;
     console.log('[ar] features:', arFeats ? arFeats.join(' ') : 'no expuestas');
     renderer.xr.setReferenceSpaceType('local-floor');
+    xrHeadroomBefore();
     await renderer.xr.setSession(arSession);
+    xrHeadroomAfter(arSession);
 
     // El marco común se pide en el primer frame, no aquí: ver requestSharedSpace.
     sharedActive = false; arSharedSpace = null; arViewerSpace = null;
@@ -3104,6 +3350,7 @@ async function enterAR() {
     // y restaurarla gasta tiempo y toca el cupo de 8 para nada.
     if (!SHAREDSPACE) restoreRoomAnchor(arSession);
     buildARSources();
+    pointer.attach(arSession);
 
     arSession.addEventListener('end', () => {
       // ?arperf=1: el resumen se enseña aquí, que es cuando vuelve a haber pantalla.
@@ -3117,6 +3364,8 @@ async function enterAR() {
       }
       telemetryLeaveXR();
       voice?.mark('exit-ar');
+      pointer.detach();
+      xrMenu.close();
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
       // salir con el grip apretado (en marco común no se persiste: ver updateARCalib)
@@ -3140,6 +3389,7 @@ async function enterAR() {
       document.getElementById('ar-btn').textContent = 'AR';
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
+      xrResumePending();
     });
 
     renderer.setAnimationLoop((time, frame) => {
@@ -3153,11 +3403,12 @@ async function enterAR() {
       // fuera del `if (frame)`: es la escena la que tiene que estar al día,
       // haya pose de visor o no.
       updateMeshAnims();
-      const _p0 = ARPERF ? performance.now() : 0;
+      const _p0 = ARPERF ? perfFrameStart(time) : 0;
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
+          xrLastPose = pose;
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
           if (SHAREDSPACE && !sharedRequested) requestSharedSpace(frame.session);
           if (sharedActive) updateSharedFrame(frame, refSpace, pose);  // S: el marco común, este frame
@@ -3180,6 +3431,7 @@ async function enterAR() {
           // al consumidor sobre en qué rango leer `z`.
           const [tp, tq] = arTelemetryPose(pose);
           telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
+          pointer.update(frame, refSpace);
           if (ARPERF) {
             _perf.audio += _p1 - _p0; _perf.focus += performance.now() - _p1;
           }
@@ -3203,16 +3455,7 @@ async function enterAR() {
       // el bucle de escritorio y se repinta solo.
       const _p2 = ARPERF ? performance.now() : 0;
       renderer.render(scene, camera);
-      if (ARPERF) {
-        const end = performance.now(), total = end - _p0;
-        _perf.render += end - _p2; _perf.sum += total; _perf.n++;
-        if (total > _perf.worst) {
-          _perf.worst = total;
-          // El reparto del PEOR frame es lo que dice dónde se fue el tiempo.
-          _perf.worstAt = `audio ${(_p2 - _p0).toFixed(1)} / render ${(end - _p2).toFixed(1)}`;
-        }
-        arPerfReport(end);
-      }
+      if (ARPERF) perfFrameEnd(_p0, _p2);
     });
 
     if (videoEl) videoEl.play();
@@ -3221,7 +3464,7 @@ async function enterAR() {
     toast(`AR · ${arSources.length} fuentes · grip + joystick para alinear la sala`);
     // El panel no tiene nada que enseñar hasta cerrar la primera ventana de 2 s.
     // Sin este cartel, esos dos segundos se leen como "?arperf=1 no funciona".
-    if (ARPERF) { arPerfPanelDraw(['[arperf] measuring…', '', 'first window in 2 s', '']); }
+    if (ARPERF) { _perf.t0 = _perf.lastT = 0; arPerfPanelDraw(['[arperf] measuring…', '', 'first window in 2 s', '']); }
     // Después de arrancar la sesión: la recarga corta el audio un instante y es
     // menos molesta con el passthrough ya puesto que retrasando la entrada.
     if (AR_CUT_VIDEO) {

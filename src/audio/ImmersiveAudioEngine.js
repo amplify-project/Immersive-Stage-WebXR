@@ -770,9 +770,28 @@ export class ImmersiveAudioEngine {
    * @returns {number} índice de stem, o -1 si ninguno cae en el cono
    */
   getGazedStem({ coneDeg = 12, tieAim = 0.01 } = {}) {
-    if (!this._stems.length) return -1;
-    const f = this._lookForward, lp = this._listenerPos;
-    if (!f) return -1;
+    if (!this._lookForward) return -1;
+    return this.getStemAlong(this._listenerPos, this._lookForward, { coneDeg, tieAim });
+  }
+
+  /**
+   * Stem along an arbitrary ray: getGazedStem with the ray given instead of the
+   * head's. The player uses it for a finger pointing at a musician (the ray from
+   * the eye through the fingertip), where the head may be looking elsewhere.
+   *
+   * Anchored stems are measured from `origin`, so where the ray starts matters.
+   * Head-locked ones (the 360) are directions at infinity as far as the eye can
+   * tell, so only `dir` counts for them: a ray starting a hand's length away
+   * from the head still points at the same spot of the sphere.
+   *
+   * @param {number[]} origin  [x,y,z] in world (the XR reference space)
+   * @param {number[]} dir     [x,y,z] unit vector in world
+   * @param {object} [o]       same options as getGazedStem
+   * @returns {number} stem index, or -1 if none falls inside the cone
+   */
+  getStemAlong(origin, dir, { coneDeg = 12, tieAim = 0.01 } = {}) {
+    if (!this._stems.length || !origin || !dir) return -1;
+    const f = dir, lp = origin;
     const minAim = Math.cos(coneDeg * Math.PI / 180);
     let bi = -1, bAim = -1, bDist = Infinity;
     for (let i = 0; i < this._stems.length; i++) {
@@ -795,6 +814,16 @@ export class ImmersiveAudioEngine {
       }
     }
     return bi;
+  }
+
+  /**
+   * World direction of stem `i` as placed on the 360 sphere (front = −Z, left =
+   * −X, up = +Y), or null. The player zooms the sphere along it when a musician
+   * is pointed at, so the zoom goes to them and not wherever the head turns.
+   */
+  getStemDirection(i) {
+    const s = this._stems[i];
+    return s && s.dir ? s.dir : null;
   }
 
   /**
