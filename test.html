@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebCodecs probe</title>
+<!--
+  Can this browser decode a close-up track with WebCodecs, in parallel with the
+  360, fast enough to slave it to the 360's frame clock?
+
+  Open it on the headset:  https://<server>:60000/test.html   (options: ?rep=2&segs=15)
+  It checks VideoDecoder and the codec of the close-up track (hardware and
+  software), downloads `segs` segments of Representation `rep` from
+  /encoded/manifest.mpd, demuxes them (mp4box.js) and decodes them as fast as
+  it can — alone, and again while a <video> plays the 360 — then uploads a
+  decoded frame to WebGL. The report is shown here and POSTed to /api/arlog, so
+  it also appears in the server's terminal.
+-->
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
+<!-- Same Shaka as the player: the 360 plays from the same DASH, as in real use. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.6/shaka-player.compiled.js"></script>
+<style>
+  :root { --bg: #080a0f; --fg: #e6edf3; --muted: #8b949e; --ok: #5dff8f; --bad: #ff6b6b; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 15px/1.5 monospace; }
+  button { font: inherit; padding: 14px 28px; border-radius: 8px; border: none; background: #7c3aed; color: #fff; cursor: pointer; }
+  pre { white-space: pre-wrap; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .muted { color: var(--muted); }
+  video { width: 320px; display: block; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h3>WebCodecs probe</h3>
+<p class="muted">Decodes a close-up track with VideoDecoder, alone and next to the 360 playing. Tap to start (the 360 needs a gesture to play).</p>
+<button id="go">Run</button>
+<pre id="out"></pre>
+<video id="v360" muted playsinline crossorigin="anonymous"></video>
+<script>
+const q = new URLSearchParams(location.search);
+const REP = q.get('rep') || '2';
+const SEGS = +(q.get('segs') || 15);
+const MPD = q.get('mpd') || '/encoded/manifest.mpd';
+const out = document.getElementById('out');
+const report = [];
+function log(s, cls) {
+  report.push(s);
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = s + '\n';
+  out.appendChild(span);
+}
+
+async function manifestInfo() {
+  const txt = await (await fetch(MPD, { cache: 'no-store' })).text();
+  const doc = new DOMParser().parseFromString(txt, 'application/xml');
+  const rep = [...doc.querySelectorAll('Representation')].find(r => r.getAttribute('id') === REP);
+  if (!rep) throw new Error('no Representation ' + REP + ' in ' + MPD);
+  const as = rep.parentElement;
+  const tpl = rep.querySelector('SegmentTemplate') || as.querySelector('SegmentTemplate');
+  const sub = (s, n) => s.replace('$RepresentationID$', REP)
+    .replace(/\$Number%0(\d+)d\$/, (_, w) => String(n).padStart(+w, '0')).replace('$Number$', String(n));
+  const base = new URL(MPD, location.href);
+  const start = +(tpl.getAttribute('startNumber') || 1);
+  return {
+    codec: rep.getAttribute('codecs') || as.getAttribute('codecs'),
+    width: +rep.getAttribute('width'), height: +rep.getAttribute('height'),
+    init: new URL(sub(tpl.getAttribute('initialization'), 0), base).href,
+    seg: n => new URL(sub(tpl.getAttribute('media'), start + n), base).href,
+  };
+}
+
+// Demux fragmented MP4 (init + media segments) into EncodedVideoChunks.
+function demux(buffers) {
+  return new Promise((resolve, reject) => {
+    const file = MP4Box.createFile();
+    const chunks = []; let config = null;
+    file.onError = reject;
+    file.onReady = info => {
+      const t = info.videoTracks[0];
+      const trak = file.getTrackById(t.id);
+      const e = trak.mdia.minf.stbl.stsd.entries[0];
+      const box = e.avcC || e.hvcC;
+      const ds = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+      box.write(ds);
+      config = { codec: t.codec, codedWidth: t.video.width, codedHeight: t.video.height,
+                 description: new Uint8Array(ds.buffer, 8) };
+      file.setExtractionOptions(t.id, null, { nbSamples: Infinity });
+      file.start();
+    };
+    file.onSamples = (id, user, samples) => {
+      for (const s of samples)
+        chunks.push(new EncodedVideoChunk({ type: s.is_sync ? 'key' : 'delta',
+          timestamp: Math.round(1e6 * s.cts / s.timescale), duration: Math.round(1e6 * s.duration / s.timescale),
+          data: s.data }));
+    };
+    let off = 0;
+    for (const b of buffers) { b.fileStart = off; off += b.byteLength; file.appendBuffer(b); }
+    file.flush();
+    setTimeout(() => config ? resolve({ config, chunks }) : reject(new Error('mp4box: no video track')), 0);
+  });
+}
+
+// Decode every chunk as fast as the decoder takes them; returns frames/s and
+// keeps one frame for the WebGL test.
+async function decodeAll(config, chunks, keep, hw) {
+  let n = 0, kept = null, err = null;
+  const dec = new VideoDecoder({
+    output: f => { n++; if (keep && !kept && n === 10) kept = f; else f.close(); },
+    error: e => { err = e; },
+  });
+  dec.configure({ ...config, hardwareAcceleration: hw, optimizeForLatency: false });
+  const t0 = performance.now();
+  for (const c of chunks) {
+    // A decoder that failed is closed by the browser; say why, not "closed codec".
+    if (err || dec.state === 'closed') throw new Error('decoder closed: ' + (err ? err.message : 'unknown'));
+    dec.decode(c);
+    // Do not flood the queue: real playback feeds a few frames ahead.
+    while (dec.decodeQueueSize > 8) await new Promise(r => setTimeout(r, 1));
+  }
+  await dec.flush();
+  const ms = performance.now() - t0;
+  dec.close();
+  if (err) throw err;
+  return { frames: n, ms, fps: n / (ms / 1000), kept };
+}
+
+async function run() {
+  document.getElementById('go').disabled = true;
+  log('UA ' + navigator.userAgent);
+  if (!('VideoDecoder' in window)) { log('VideoDecoder: NOT available', 'bad'); return finish(); }
+  log('VideoDecoder: available', 'ok');
+
+  const m = await manifestInfo();
+  log(`close-up track rep ${REP}: ${m.codec} ${m.width}x${m.height}`);
+  const sup = {};
+  for (const hw of ['prefer-hardware', 'prefer-software']) {
+    const r = await VideoDecoder.isConfigSupported({ codec: m.codec, codedWidth: m.width, codedHeight: m.height, hardwareAcceleration: hw });
+    sup[hw] = r.supported;
+    log(`isConfigSupported ${hw}: ${r.supported}`, r.supported ? 'ok' : 'bad');
+  }
+  // What the player would use: hardware if offered, else whatever works.
+  const HW = sup['prefer-hardware'] ? 'prefer-hardware' : 'no-preference';
+  log(`decoding with hardwareAcceleration: ${HW}`);
+
+  const t0 = performance.now();
+  const bufs = [await (await fetch(m.init)).arrayBuffer()];
+  for (let i = 0; i < SEGS; i++) bufs.push(await (await fetch(m.seg(i))).arrayBuffer());
+  const mb = bufs.reduce((a, b) => a + b.byteLength, 0) / 1e6;
+  log(`downloaded init + ${SEGS} segments, ${mb.toFixed(1)} MB in ${(performance.now() - t0).toFixed(0)} ms`);
+
+  const { config, chunks } = await demux(bufs);
+  const span = (chunks[chunks.length - 1].timestamp - chunks[0].timestamp) / 1e6;
+  log(`demuxed ${chunks.length} frames, ${span.toFixed(2)} s of video (first ts ${(chunks[0].timestamp / 1e6).toFixed(3)} s), codec ${config.codec}`);
+
+  const a = await decodeAll(config, chunks, true, HW);
+  log(`decode alone: ${a.frames} frames in ${a.ms.toFixed(0)} ms = ${a.fps.toFixed(0)} fps (${(a.fps / (chunks.length / span)).toFixed(1)}x real time)`,
+      a.fps > 60 ? 'ok' : 'bad');
+
+  // In parallel with the 360 playing in a <video> (the real situation).
+  // The 360 from the same manifest, pinned to Representation 0 (the sphere),
+  // as the player does: with close-ups in the MPD, Shaka would otherwise pick
+  // one of them by bandwidth.
+  const v = document.getElementById('v360');
+  const sphereSrc = MPD + ' (rep 0)';
+  try {
+    shaka.polyfill.installAll();
+    const sp = new shaka.Player(v);
+    sp.configure({ abr: { enabled: false }, manifest: { disableAudio: true } });
+    await sp.load(MPD);
+    const s0 = sp.getVariantTracks().filter(t => t.originalVideoId === '0').sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+    if (s0) sp.selectVariantTrack(s0, true);
+    await v.play();
+  } catch (e) { log('360 did not play: ' + (e.message || ('Shaka ' + e.code)), 'bad'); }
+  await new Promise(r => setTimeout(r, 1500));
+  const q0 = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+  const b = await decodeAll(config, chunks, false, HW);
+  const q1 = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+  log(`decode while the 360 plays (${sphereSrc}, ${v.videoWidth}x${v.videoHeight}): ${b.fps.toFixed(0)} fps`, b.fps > 60 ? 'ok' : 'bad');
+  if (q0 && q1) log(`  360 meanwhile: ${q1.totalVideoFrames - q0.totalVideoFrames} frames decoded, ${q1.droppedVideoFrames - q0.droppedVideoFrames} dropped`);
+  v.pause();
+
+  // WebGL upload of a VideoFrame (what the player would do each frame).
+  if (a.kept) {
+    try {
+      const gl = document.createElement('canvas').getContext('webgl2');
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+      let ms = 0;
+      for (let i = 0; i < 20; i++) {
+        const t = performance.now();
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, a.kept);
+        gl.finish(); ms += performance.now() - t;
+      }
+      log(`WebGL texImage2D(VideoFrame ${a.kept.displayWidth}x${a.kept.displayHeight}): ok, ${(ms / 20).toFixed(2)} ms per upload`, 'ok');
+    } catch (e) { log('WebGL upload of VideoFrame failed: ' + e.message, 'bad'); }
+    a.kept.close();
+  }
+  finish();
+}
+
+function finish() {
+  log('done');
+  fetch('/api/arlog', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ log: '[test.html webcodecs]\n' + report.join('\n') }) }).catch(() => {});
+}
+
+const start = () => run().catch(e => { log('ERROR ' + (e && e.message || e), 'bad'); finish(); });
+document.getElementById('go').onclick = start;
+if (q.get('auto') === '1') start();   // muted video may autoplay; for desktop testing
+</script>
+</body>
+</html>

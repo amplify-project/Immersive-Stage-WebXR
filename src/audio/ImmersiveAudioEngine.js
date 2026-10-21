@@ -102,6 +102,11 @@ export class ImmersiveAudioEngine {
       // que se grabó 6 dB por debajo nunca llega a despegarse del bed, por más
       // que se le mire. Es una propiedad de la TOMA, así que vive en scene.json.
       trimDb: s.gainDb || 0,
+      // Half-angle (deg) of the cone that selects this musician by pointing or
+      // gazing. Per musician because they are not all the same size in the
+      // picture: a drummer spans more of the 360 than a sax. null = the
+      // caller's default.
+      hitDeg: +s.hitDeg > 0 ? +s.hitDeg : null,
       trim: null,
       gain: null, panner: null, dir: null,
       pos: null,          // posición mundo [x,y,z] (anclada) o derivada de dir
@@ -786,10 +791,10 @@ export class ImmersiveAudioEngine {
    *
    * @param {number[]} origin  [x,y,z] in world (the XR reference space)
    * @param {number[]} dir     [x,y,z] unit vector in world
-   * @param {object} [o]       same options as getGazedStem
+   * @param {object} [o]       same options as getGazedStem, plus perStem (use each stem's hitDeg)
    * @returns {number} stem index, or -1 if none falls inside the cone
    */
-  getStemAlong(origin, dir, { coneDeg = 12, tieAim = 0.01 } = {}) {
+  getStemAlong(origin, dir, { coneDeg = 12, tieAim = 0.01, perStem = false } = {}) {
     if (!this._stems.length || !origin || !dir) return -1;
     const f = dir, lp = origin;
     const minAim = Math.cos(coneDeg * Math.PI / 180);
@@ -808,7 +813,10 @@ export class ImmersiveAudioEngine {
         dist = this._stemRadius;           // igual para todas: el desempate no entra
       }
       const aim = dx * f[0] + dy * f[1] + dz * f[2];
-      if (aim < minAim) continue;
+      // perStem: the pointer honours each musician's own cone (hitDeg). The
+      // gaze focus keeps its enter/keep pair, whose hysteresis a single
+      // per-musician angle would erase.
+      if (aim < ((perStem && s.hitDeg) ? Math.cos(s.hitDeg * Math.PI / 180) : minAim)) continue;
       if (bi < 0 || aim > bAim + tieAim || (Math.abs(aim - bAim) <= tieAim && dist < bDist)) {
         bi = i; bAim = aim; bDist = dist;
       }
@@ -824,6 +832,31 @@ export class ImmersiveAudioEngine {
   getStemDirection(i) {
     const s = this._stems[i];
     return s && s.dir ? s.dir : null;
+  }
+
+  /** Selection half-angle of stem `i` in degrees, or null for the default. */
+  getStemHitDeg(i) {
+    const s = this._stems[i];
+    return s ? s.hitDeg : null;
+  }
+
+  setStemHitDeg(i, deg) {
+    const s = this._stems[i];
+    if (s) s.hitDeg = +deg > 0 ? +deg : null;
+  }
+
+  /**
+   * Move stem `i` on the 360 sphere, live: its direction (what pointing and
+   * gazing test against) and, unless it is anchored in the room, its panner.
+   * The player's calibration marks drag musicians with this.
+   */
+  setStemAngles(i, azimuthDeg, elevationDeg) {
+    const s = this._stems[i];
+    if (!s) return;
+    s.az = azimuthDeg * Math.PI / 180; s.el = elevationDeg * Math.PI / 180;
+    const ce = Math.cos(s.el), se = Math.sin(s.el);
+    s.dir = [-ce * Math.sin(s.az), se, -ce * Math.cos(s.az)];
+    if (!s.anchored && s.panner) { s.pos = this._staticPos(s); this._setPannerPos(s, s.pos); }
   }
 
   /**

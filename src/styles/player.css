@@ -307,3 +307,37 @@ canvas#three-canvas { width: 100% !important; height: 100% !important; display: 
   display: none;
   pointer-events: none;
 }
+
+/* ── Headset intro (#xr-intro) ─────────────────────────────────────────────
+   Big targets: in the Quest browser they are hit with a laser or a pinch. */
+#xr-intro {
+  position: fixed; inset: 0;
+  z-index: 250;                      /* above #loader (100) and #spinner (200), below #toast */
+  background: var(--bg);
+  display: none;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 32px;
+}
+#xr-intro.show { display: flex; }
+#xr-intro h1 {
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0.3em;
+  color: var(--accent); text-transform: uppercase;
+}
+#xr-intro .intro-btns { display: flex; gap: 32px; flex-wrap: wrap; justify-content: center; }
+#xr-intro .intro-btns button {
+  width: 280px; height: 200px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  border: none; border-radius: 16px; cursor: pointer; color: #fff;
+  background: linear-gradient(135deg, var(--accent2), #5b21b6);
+  transition: transform 0.15s, opacity 0.15s;
+}
+#xr-intro #intro-ar { background: linear-gradient(135deg, #0ea5e9, #0369a1); }
+#xr-intro .intro-btns b { font-family: var(--mono); font-size: 56px; letter-spacing: 0.08em; }
+#xr-intro .intro-btns span { font-size: 16px; opacity: 0.85; }
+#xr-intro .intro-btns button:hover:not(:disabled) { transform: scale(1.04); }
+#xr-intro .intro-btns button:disabled { opacity: 0.35; cursor: wait; }
+#intro-status { font-family: var(--mono); font-size: 13px; color: var(--muted); min-height: 1.4em; }
+#intro-web {
+  background: none; border: 1px solid rgba(139,148,158,0.4); border-radius: 6px;
+  color: var(--muted); font-family: var(--mono); font-size: 13px; padding: 10px 20px; cursor: pointer;
+}

@@ -283,6 +283,10 @@
         <div><label>Name</label><input type="text" id="selName"></div>
         <div style="flex:0 0 110px"><label>Azimuth °</label><input type="number" id="selAz" step="1"></div>
         <div style="flex:0 0 110px"><label>Elevation °</label><input type="number" id="selEl" step="1"></div>
+        <!-- Half-angle of the cone that selects this musician when pointing in
+             the headset (empty = the player's default, 8°). Also set by
+             dragging/resizing the rings in a player in debug mode. -->
+        <div style="flex:0 0 110px"><label>Hit area °</label><input type="number" id="selHit" step="0.5" min="2" max="30" placeholder="8"></div>
         <!-- Misma magnitud que selEl, en las unidades en las que se piensa una
              sala. Ver la vista de altura para por qué los metros dependen del
              radio de colocación en AR. -->
@@ -455,6 +459,12 @@
       <button onclick="saveScene(true)">Save scene</button>
       <button class="ghost" onclick="openPlayer()">Open player</button>
     </div>
+    <!-- Every player that loads while this is on starts with the musician
+         rings (movable: drag / long pinch, saved back here) and the
+         performance trace. Saved at once; open players pick it up on reload. -->
+    <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:10px;cursor:pointer">
+      <input type="checkbox" id="debugMode" style="width:auto"> Debug mode on players (musician rings + performance)
+    </label>
   </div>
 </div>
 
@@ -554,6 +564,38 @@ async function init() {
   setInterval(pollStatus, 1500);
   pollBridge();
   setInterval(()=>{ if($('liveSources').style.display!=='none') pollBridge(); }, 3000);
+  pollSceneRev();
+  setInterval(pollSceneRev, 2000);
+}
+
+// ── Musician positions changed from a player ─────────────────────────────────
+// A player in debug mode moves/resizes a musician's ring and the server
+// patches azimuth/elevation/hit area into scene.json. This editor keeps the
+// whole scene in memory and saves it whole, so without reloading those fields
+// its next save would undo what was done in the headset. Only those three
+// fields are taken, matched by name; everything else stays as edited here.
+let sceneRev = null;
+async function pollSceneRev() {
+  let rev;
+  try { rev = (await (await fetch('/api/scene/rev')).json()).stemsRev; } catch (_) { return; }
+  if (sceneRev === null) { sceneRev = rev; return; }       // first look: nothing to reload
+  if (rev === sceneRev) return;
+  sceneRev = rev;
+  let file;
+  try { file = await (await fetch('/api/scene')).json(); } catch (_) { return; }
+  const changed = [];
+  for (const f of (file.stems || [])) {
+    const s = scene.stems.find(x => x.name === f.name);
+    if (!s) continue;
+    const before = `${s.azimuthDeg}/${s.elevationDeg}/${s.hitDeg}`;
+    if (f.azimuthDeg != null) s.azimuthDeg = f.azimuthDeg;
+    if (f.elevationDeg != null) s.elevationDeg = f.elevationDeg;
+    if (f.hitDeg != null) s.hitDeg = f.hitDeg;
+    if (before !== `${s.azimuthDeg}/${s.elevationDeg}/${s.hitDeg}`) changed.push(s.name);
+  }
+  if (!changed.length) return;
+  renderStems(); drawViews(); syncSelPanel();
+  toast('Updated from a player: ' + changed.join(', '));
 }
 
 // ── VOD / LIVE mode ───────────────────────────────────────────────────────────
@@ -805,6 +847,14 @@ function bindControls() {
   $('selH').oninput    = e => { if(selected>=0){ const el=Math.round(elOfH(clampH(+e.target.value)));
                                                 scene.stems[selected].elevationDeg=el;
                                                 renderStems(); drawViews(); $('selEl').value=el; } };
+  $('selHit').oninput  = e => { if(selected>=0){ const v=+e.target.value;
+                                                if (v > 0) scene.stems[selected].hitDeg = v; else delete scene.stems[selected].hitDeg; } };
+  $('debugMode').checked = !!scene.debug;
+  $('debugMode').onchange = async e => {
+    scene.debug = e.target.checked;
+    await saveScene(false);
+    toast(scene.debug ? 'Debug mode ON — players pick it up when they load' : 'Debug mode off');
+  };
   $('selGain').oninput = e => { if(selected>=0){ scene.stems[selected].gainDb=+e.target.value;
     if (mon) { mon.setStemGainDb(selected, +e.target.value); const g=$('mg'+selected); if (g) g.value=e.target.value; } } };
 
@@ -877,6 +927,7 @@ function addLiveStem() {
 function videoOptionsHTML(sel) {
   const vids = media.filter(m => m.kind === 'video' && m.file !== scene.video);
   return '<option value="">— no close-up —</option>' +
+    `<option value="crop" ${sel==='crop'?'selected':''}>✂ crop from the 360</option>` +
     vids.map(m=>`<option value="${m.file}" ${m.file===sel?'selected':''}>${m.name}</option>`).join('');
 }
 
@@ -1202,7 +1253,10 @@ function renderStems() {
       ${live ? `<span class="small" style="flex:none">ch</span>
       <input type="number" class="az" style="width:54px" min="0" value="${s.channel!=null?s.channel:''}"
              onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=this.value===''?null:+this.value" placeholder="—" title="Device channel for this musician. Empty = silent in live">` : ''}
-      ${!live ? `<select title="Close-up video (Case B)" style="flex:0 0 130px"
+      ${live ? `<label class="small" style="flex:none;display:flex;gap:4px;align-items:center" title="Close-up cut from the live 360 at this musician's angles"
+             onclick="event.stopPropagation()"><input type="checkbox" style="width:auto" ${s.closeup==='crop'?'checked':''}
+             onchange="scene.stems[${i}].closeup=this.checked?'crop':undefined">✂</label>` : ''}
+      ${!live ? `<select title="Close-up (Case B): a video, or a crop of the 360 at this musician's angles" style="flex:0 0 130px"
              onclick="event.stopPropagation()"
              onchange="scene.stems[${i}].closeup=this.value||undefined">${videoOptionsHTML(s.closeup)}</select>
       <button class="ghost" style="flex:0 0 auto;padding:4px 8px" title="Pick a close-up from anywhere on the server machine"
@@ -1222,6 +1276,7 @@ function syncSelPanel() {
   const s = scene.stems[selected];
   $('selName').value = s.name||''; $('selAz').value = Math.round(s.azimuthDeg); $('selEl').value = Math.round(s.elevationDeg||0);
   $('selH').value = hOfEl(s.elevationDeg||0).toFixed(2);
+  $('selHit').value = s.hitDeg || '';
   $('selGain').value = s.gainDb || 0;
 }
 

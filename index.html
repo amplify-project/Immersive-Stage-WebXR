@@ -31,6 +31,19 @@
   </div>
 </div>
 
+<!-- Headset intro: one tap straight into VR or AR. Shown only in a headset
+     browser (or with ?intro=1); a PC keeps the web page above. The tap is the
+     user gesture requestSession needs, so the source is loaded beforehand. -->
+<div id="xr-intro">
+  <h1>360° Ambisonics Player</h1>
+  <div class="intro-btns">
+    <button id="intro-vr" disabled onclick="introGo('vr')"><b>VR</b><span>360° around you</span></button>
+    <button id="intro-ar" disabled onclick="introGo('ar')"><b>AR</b><span>the musicians in your room</span></button>
+  </div>
+  <p id="intro-status">Loading…</p>
+  <button id="intro-web" onclick="introWeb()">Web mode</button>
+</div>
+
 <!-- Spinner -->
 <div id="spinner"><div class="spin-ring"></div></div>
 

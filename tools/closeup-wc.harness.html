@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>wc harness</title><pre id="o"></pre>
+<!-- Exercises src/app/closeup-wc.js against /encoded/manifest.mpd with a simulated 72 Hz clock:
+     start, jump forward, jump back; prints when each is ready and how far behind
+     or ahead the frames are. In a browser: /tools/closeup-wc.harness.html, or
+     headless: SP=/tmp node tools/cdp-console.mjs https://localhost:60000/tools/closeup-wc.harness.html -->
+<script type="module">
+import { CloseupWC } from '../src/app/closeup-wc.js';
+const o = document.getElementById('o'); const L = s => { o.textContent += s + '\n'; console.log(s); };
+const wc = new CloseupWC(new URL('/encoded/manifest.mpd', location.href).href, { log: L });
+const ok = await wc.init(['2'])
+L('init ' + ok + ' hw=' + wc.hw);
+wc.select('2');
+async function run(t0, secs, label) {
+  let t = t0, lags = [], first = null; const start = performance.now();
+  for (let i = 0; i < secs * 72; i++) {
+    const f = wc.update(t);
+    if (f) { if (first == null) first = ((performance.now() - start) / 1000).toFixed(2); lags.push(wc.lagMs); }
+    await new Promise(r => setTimeout(r, 1000 / 72));
+    t += 1 / 72;
+  }
+  const late = lags.filter(x => x < -40).length; const ready = lags.findIndex(x => x > -80);
+  L(`${label}: first frame after ${first} s, ${lags.length} frames shown, lag ms min ${Math.min(...lags)} max ${Math.max(...lags)}, >1 frame late ${late}, ready (hasFrame) after ${ready} renders`);
+}
+await run(30, 4, 'start at 30 s');
+await run(100, 3, 'jump to 100 s');
+await run(60, 3, 'jump back to 60 s');
+L('decoded ' + wc.decoded + ' errors ' + wc.errors);
+L('DONE');
+</script>

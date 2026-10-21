@@ -37,7 +37,7 @@ const TAP_MAX_MS = 450;
 const HOLD_MS    = 700;
 
 const OFF_PANEL  = -2;               // menu hit: the ray is not on the panel at all
-const RAY_CONE   = { coneDeg: 8 };   // half-angle around the ray that counts as "on" a musician
+export const RAY_CONE = { coneDeg: 8 };   // half-angle around the ray that counts as "on" a musician
 const RAY_LEN_M  = 2.0;              // drawn length when not ending on something in the room
 const BEAM_R0    = 0.004;            // beam radius at the hand (m)
 const BEAM_R1    = 0.0012;           // ...and at the tip
@@ -204,9 +204,13 @@ export class RayPointer {
    * @param {(source:XRInputSource) => void} [o.onHold]  long pinch on nothing
    * @param {XRMenu} [o.menu]  while open, it takes the ray before the musicians do
    * @param {boolean} [o.hidden]  run everything but draw nothing (perf experiment)
+   * @param {object} [o.grab]  long pinch ON a musician grabs it, if grab.can(i):
+   *   start(i, src) once, move(i, origin, dir, src) every frame while held
+   *   (the arrays are reused: copy what you keep), end(i, src) on release.
    */
-  constructor(scene, { pick, targetPos, onTap, onHold, menu, hidden = false }) {
+  constructor(scene, { pick, targetPos, onTap, onHold, menu, grab = null, hidden = false }) {
     this._hidden = hidden;
+    this._grab = grab;
     this._pick = pick;
     this._targetPos = targetPos;
     this._onTap = onTap;
@@ -227,6 +231,7 @@ export class RayPointer {
     this._end = e => {
       const d = this._down.get(e.inputSource);
       this._down.delete(e.inputSource);
+      if (d && d.grab) { this._grab.end(d.target, e.inputSource); return; }
       if (!d || d.held || performance.now() - d.t > TAP_MAX_MS) return;
       const r = this._rayOf(e.inputSource);
       if (r) r.burstAt = performance.now();
@@ -248,6 +253,8 @@ export class RayPointer {
       this._session.removeEventListener('selectend', this._end);
       this._session = null;
     }
+    // A grab still held when the session ends is released, so it is saved.
+    for (const [src, d] of this._down) if (d.grab) this._grab.end(d.target, src);
     this._down.clear();
     for (const k in this._rays) this._rays[k].hide();
   }
@@ -292,11 +299,20 @@ export class RayPointer {
 
       const press = this._down.get(src);
       let holdFill = 0;
-      if (press && !press.held && !menuOpen && press.target < 0) {
-        // Only on nothing: a hold on a musician is kept free for grabbing.
+      if (press && press.grab) {
+        // Holding a musician: the ray stays on them while it drags them.
+        r.target = press.target;
+        this._grab.move(press.target, o, d, src);
+      } else if (press && !press.held && !menuOpen && press.target < 0) {
+        // On nothing: the menu.
         const held = now - press.t;
         if (held > TAP_MAX_MS) holdFill = Math.min(1, (held - TAP_MAX_MS) / (HOLD_MS - TAP_MAX_MS));
         if (held >= HOLD_MS) { press.held = true; r.burstAt = now; this._onHold(src); }
+      } else if (press && !press.held && !menuOpen && press.target >= 0 && this._grab && this._grab.can(press.target)) {
+        // On a musician, where grabbing is enabled: pick it up.
+        const held = now - press.t;
+        if (held > TAP_MAX_MS) holdFill = Math.min(1, (held - TAP_MAX_MS) / (HOLD_MS - TAP_MAX_MS));
+        if (held >= HOLD_MS) { press.held = press.grab = true; r.burstAt = now; this._grab.start(press.target, src); }
       }
       const on = r.target >= 0 || r.menuHit >= 0;
       if (!this._hidden) r.draw(o, d, len, press ? 2 : on ? 1 : 0, holdFill, now);

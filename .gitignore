@@ -40,3 +40,6 @@ meshes/*
 # Generated documentation bundle (tools/docs-bundle.sh) — a copy of the docs,
 # rebuilt on demand; the sources are README.md and docs/.
 dist/
+
+# Render traces posted by the player with ?arperf=1 (server.js /api/perflog)
+perflog/
