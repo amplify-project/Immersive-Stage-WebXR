@@ -152,13 +152,32 @@ fi
 #     CLOSEUPS="media/sax_cu.mp4;media/tpt_cu.mp4"   (solo modo archivo, no captura)
 #     CLOSEUP_SCALE=1280:720     escala de cada close-up (vacío = original)
 #     CLOSEUP_VBITRATE=2500k     bitrate de vídeo de cada close-up
+#
+#  Un close-up también puede RECORTARSE del propio 360, sin vídeo aparte:
+#     crop:AZ:EL:HFOV   azimut/elevación del músico (convenio de scene.json) y
+#                       ancho del encuadre en grados. Sale una vista plana exacta
+#                       (v360 → flat) de los mismos fotogramas ya decodificados:
+#                       ni se vuelve a abrir el equirect ni hay nada que alinear.
+#                       Funciona también en captura (LIVE), a diferencia de los
+#                       ficheros. El player lo coloca ENCIMA de la esfera, en el
+#                       sitio exacto del que sale (closeups.json junto al manifest).
+#     CLOSEUP_NAMES="DR;KEY"       nombre del músico de cada entrada de CLOSEUPS
+#                       (mismo orden). Va a closeups.json, junto al manifest, y
+#                       con él el player sabe qué pista es de quién sin depender
+#                       del orden (en LIVE solo quedan los recortes).
+#     CROP_INTERP=lanc|line|cube   interpolación de v360 (vod lanc, captura line)
+#     CROP_SHARPEN=0.5             cas tras el recorte (0 = sin enfoque)
 CLOSEUPS="${CLOSEUPS:-}"
 CLOSEUP_SCALE="${CLOSEUP_SCALE:-1280:720}"
 CLOSEUP_VBITRATE="${CLOSEUP_VBITRATE:-2500k}"
-CLOSE_ARR=()
+CROP_SHARPEN="${CROP_SHARPEN:-0.5}"
+CLOSE_ARR=(); CLOSE_NAME=()
+_rawn=(); [[ -n "${CLOSEUP_NAMES:-}" ]] && IFS=';' read -r -a _rawn <<< "$CLOSEUP_NAMES"
 if [[ -n "$CLOSEUPS" ]]; then
   IFS=';' read -r -a _rawc <<< "$CLOSEUPS"
+  _ci=-1
   for c in "${_rawc[@]}"; do
+    ((_ci++)) || true
     c="${c#"${c%%[![:space:]]*}"}"   # ltrim
     c="${c%"${c##*[![:space:]]}"}"   # rtrim
     [[ -z "$c" ]] && continue
@@ -169,14 +188,21 @@ if [[ -n "$CLOSEUPS" ]]; then
       echo "  WARNING: close-up '$c' es el propio vídeo 360 → ignorado."
       continue
     fi
-    CLOSE_ARR+=("$c")
+    CLOSE_ARR+=("$c"); CLOSE_NAME+=("${_rawn[_ci]:-}")
   done
 fi
-NCLOSE=${#CLOSE_ARR[@]}
-if [[ "$CAPTURE" == "1" && $NCLOSE -gt 0 ]]; then
-  echo "  WARNING: close-ups (CLOSEUPS) aún no soportados en captura LIVE → ignorados."
-  CLOSE_ARR=(); NCLOSE=0
+# En captura no hay ficheros que abrir: se quedan solo los recortes del 360.
+if [[ "$CAPTURE" == "1" ]]; then
+  _keep=(); _keepn=()
+  for ((k=0; k<${#CLOSE_ARR[@]}; k++)); do
+    c="${CLOSE_ARR[k]}"
+    if [[ "$c" == crop:* ]]; then _keep+=("$c"); _keepn+=("${CLOSE_NAME[k]}")
+    else echo "  WARNING: close-up '$c' es un fichero; en captura LIVE solo valen recortes (crop:) → ignorado."; fi
+  done
+  CLOSE_ARR=("${_keep[@]}"); CLOSE_NAME=("${_keepn[@]}")
 fi
+NCLOSE=${#CLOSE_ARR[@]}
+if [[ "$CAPTURE" == "1" ]]; then CROP_INTERP="${CROP_INTERP:-line}"; else CROP_INTERP="${CROP_INTERP:-lanc}"; fi
 
 ABITRATE="${ABITRATE:-$(( 160 + 64 * NSTEMS ))k}"
 
@@ -193,6 +219,7 @@ if [[ "$CAPTURE" != "1" ]]; then
     [[ -f "$s" ]] || { echo "No existe el stem: $s"; exit 1; }
   done
   for c in "${CLOSE_ARR[@]}"; do
+    [[ "$c" == crop:* ]] && continue
     [[ -f "$c" ]] || { echo "No existe el close-up: $c"; exit 1; }
   done
 fi
@@ -200,7 +227,7 @@ fi
 mkdir -p "$OUT"
 # Pizarra limpia en cada arranque: fuera segmentos, inits, manifest y .tmp de la
 # pasada anterior, para que un pipeline nuevo nunca mezcle restos.
-rm -f "$OUT"/*.webm "$OUT"/*.mp4 "$OUT"/*.m4s "$OUT"/*.mpd "$OUT"/*.tmp 2>/dev/null || true
+rm -f "$OUT"/*.webm "$OUT"/*.mp4 "$OUT"/*.m4s "$OUT"/*.mpd "$OUT"/*.tmp "$OUT"/closeups.json 2>/dev/null || true
 
 # ── Cadena de filtros de vídeo: escala opcional + 8-bit/420 para NVENC ───────
 #  NVENC H.264 necesita entrada 8-bit 4:2:0; un origen 10-bit/HEVC falla sin esto.
@@ -262,7 +289,16 @@ case "$CODEC" in
     # contenido. pix_fmt forzado en VF (format=yuv420p). Live: low-latency CBR.
     SEGTYPE="mp4(v)+webm(a) · NVENC"
     VID_COMMON=(-c:v h264_nvenc -g "$GOP" -keyint_min "$GOP")
-    VID_VOD=(-preset p5 -tune hq -rc vbr -cq 21)
+    # VOD: calidad constante (-cq 21) PERO con techo. Sin -maxrate, -cq manda y
+    # el -b:v de VBITRATE es solo orientativo: un 360 4K con 20000k pedidos salía
+    # a ~31 Mbps, y bajar segmentos tan gordos tira frames en la Quest (medido
+    # con ?arperf=1: casi todos los frames perdidos caen durante una descarga).
+    # Solo en el 360 (v:0); los close-ups llevan su propio CLOSEUP_VBITRATE.
+    _vb_num="${VBITRATE%[kKmM]}"; _vb_suf="${VBITRATE:${#_vb_num}}"
+    if [[ "$_vb_num" =~ ^[0-9]+$ ]]; then _vb_buf="$(( _vb_num * 2 ))${_vb_suf}"
+    else _vb_buf="$VBITRATE"; fi              # "2.5M": sin aritmética, buffer = 1 s
+    VID_VOD=(-preset p5 -tune hq -rc vbr -cq 21
+             -maxrate:v:0 "$VBITRATE" -bufsize:v:0 "$_vb_buf")
     VID_LIVE=(-preset p4 -tune ll -rc cbr -delay 0)
     ;;
   *) echo "CODEC desconocido: '$CODEC' (usa 'vp9', 'h264' o 'h264_nvenc')"; exit 1 ;;
@@ -296,8 +332,33 @@ for ((i=0; i<NCLOSE; i++)); do AS_STR+=" id=${_asid},streams=$((i+1))"; ((_asid+
 AS_STR+=" id=${_asid},streams=$((NCLOSE+1))"
 
 # Mapas de los close-ups: input (2+NSTEMS+i) en modo archivo (tras vídeo, FOA y stems).
-CLOSE_MAPS=()
-for ((i=0; i<NCLOSE; i++)); do CLOSE_MAPS+=(-map "$((2 + NSTEMS + i)):v:0"); done
+#  Los recortes (crop:) salen de un -filter_complex propio sobre el vídeo 0; los
+#  ficheros, de sus inputs, numerados solo entre ficheros.
+CLOSE_MAPS=(); CROP_FC=""; CROP_JSON=""; _nfile=0; _ncrop=0
+IFS=':' read -r _cw _ch <<< "${CLOSEUP_SCALE:-1280:720}"
+for ((i=0; i<NCLOSE; i++)); do
+  c="${CLOSE_ARR[i]}"
+  if [[ "$c" == crop:* ]]; then
+    IFS=':' read -r _ az el hfov <<< "$c"
+    # Alto del encuadre que da exactamente la proporción de salida (proyección plana).
+    vfov=$(awk -v h="$hfov" -v w="$_cw" -v hh="$_ch" 'BEGIN{pi=atan2(0,-1); printf "%.3f", 2*atan2(sin(h*pi/360)/cos(h*pi/360)*hh/w,1)*180/pi}')
+    yaw=$(awk -v a="$az" 'BEGIN{printf "%.3f", -a}')       # v360: yaw = -azimuthDeg
+    _sh=""; [[ "$CROP_SHARPEN" != "0" ]] && _sh=",cas=${CROP_SHARPEN}"
+    CROP_FC+="[cs${_ncrop}]v360=input=e:output=flat:yaw=${yaw}:pitch=${el}:h_fov=${hfov}:v_fov=${vfov}:w=${_cw}:h=${_ch}:interp=${CROP_INTERP}${_sh},format=yuv420p[crop${i}];"
+    CLOSE_MAPS+=(-map "[crop${i}]")
+    CROP_JSON+="${CROP_JSON:+,}{\"rep\":\"$((i+1))\",\"name\":\"${CLOSE_NAME[i]}\",\"crop\":{\"azimuthDeg\":${az},\"elevationDeg\":${el},\"hFovDeg\":${hfov},\"vFovDeg\":${vfov}}}"
+    ((_ncrop++)) || true
+  else
+    CROP_JSON+="${CROP_JSON:+,}{\"rep\":\"$((i+1))\",\"name\":\"${CLOSE_NAME[i]}\"}"
+    CLOSE_MAPS+=(-map "$((2 + NSTEMS + _nfile)):v:0")
+    ((_nfile++)) || true
+  fi
+done
+CROP_ARGS=()
+if (( _ncrop > 0 )); then
+  _split="[0:v]split=${_ncrop}"; for ((k=0; k<_ncrop; k++)); do _split+="[cs${k}]"; done
+  CROP_ARGS=(-filter_complex "${_split};${CROP_FC%;}")
+fi
 
 # Ensambla los args de codificación de vídeo en VENC, según haya close-ups o no.
 #  $1 = nombre de un array con las opciones específicas del modo (VID_VOD/VID_LIVE).
@@ -311,7 +372,9 @@ assemble_venc() {
     [[ -n "$VF_CHAIN" ]] && VENC+=(-filter:v:0 "$VF_CHAIN")
     VENC+=(-b:v:0 "$VBITRATE")
     for ((i=0; i<NCLOSE; i++)); do
-      [[ -n "$CLOSEUP_VF_CHAIN" ]] && VENC+=(-filter:v:$((i+1)) "$CLOSEUP_VF_CHAIN")
+      # Un recorte ya sale escalado y en 4:2:0 de su filter_complex, y ffmpeg no
+      # deja poner un -filter a un stream que viene de un grafo complejo.
+      [[ -n "$CLOSEUP_VF_CHAIN" && "${CLOSE_ARR[i]}" != crop:* ]] && VENC+=(-filter:v:$((i+1)) "$CLOSEUP_VF_CHAIN")
       VENC+=(-b:v:$((i+1)) "$CLOSEUP_VBITRATE")
     done
   fi
@@ -345,8 +408,10 @@ build_inputs() {   # $1 = "live" | "vod"  → rellena IN_ARGS y A_ARGS globales
   for s in "${STEM_ARR[@]}"; do
     IN_ARGS+=("${loop[@]}" -i "$s")
   done
-  # Close-ups: inputs extra tras los stems (índices 2+NSTEMS..1+NSTEMS+NCLOSE).
+  # Close-ups de fichero: inputs extra tras los stems (índices 2+NSTEMS..). Los
+  # recortes no abren nada: salen del vídeo 0.
   for c in "${CLOSE_ARR[@]}"; do
+    [[ "$c" == crop:* ]] && continue
     IN_ARGS+=("${loop[@]}" -i "$c")
   done
 
@@ -455,6 +520,14 @@ echo "  códec vídeo : $CODEC ($SEGTYPE)   FOA: $FORMAT   stems: $NSTEMS   audi
 if (( NCLOSE > 0 )); then
   echo "  close-ups   : $NCLOSE pista(s) de vídeo extra (RepresentationID 1..$NCLOSE)  escala: ${CLOSEUP_SCALE:-original}  bitrate: $CLOSEUP_VBITRATE"
   for c in "${CLOSE_ARR[@]}"; do echo "    · $c"; done
+  (( _ncrop > 0 )) && echo "  recortes    : $_ncrop del 360 (v360 interp=$CROP_INTERP, cas=$CROP_SHARPEN) → $OUT/closeups.json"
+fi
+# Qué pista es de qué músico y, si es un recorte, de dónde sale: el player lo
+# pone encima de la esfera en el sitio exacto. Con los ángulos de ESTE encode:
+# si luego se recalibra en el editor, el recorte sigue saliendo de donde salió
+# hasta re-encodear.
+if (( NCLOSE > 0 )); then
+  printf '{"closeups":[%s]}\n' "$CROP_JSON" > "$OUT/closeups.json"
 fi
 if [[ "$CAPTURE" == "1" ]]; then
   echo "  captura     : vídeo[$VIDEO_SRC]=${VIDEO_SRC/usb/$VIDEO_DEVICE}${VIDEO_URL:+ $VIDEO_URL}   audio[$AUDIO_SRC]=${AUDIO_SRC/usb/$AUDIO_DEVICE}${AUDIO_URL:+ $AUDIO_URL}"
@@ -474,6 +547,7 @@ case "$MODE" in
     ffmpeg -y \
       "${IN_ARGS[@]}" \
       -map_metadata -1 -map_chapters -1 \
+      "${CROP_ARGS[@]}" \
       -map 0:v:0 "${CLOSE_MAPS[@]}" "${MAP_AUDIO[@]}" \
       "${VENC[@]}" \
       "${A_FILTER[@]}" "${AUDIO_ENC[@]}" \
@@ -529,6 +603,7 @@ case "$MODE" in
     fi
     ffmpeg -y \
       "${IN_ARGS[@]}" \
+      "${CROP_ARGS[@]}" \
       -map 0:v:0 "${CLOSE_MAPS[@]}" "${MAP_AUDIO[@]}" \
       "${VENC[@]}" \
       "${A_FILTER[@]}" "${AUDIO_ENC[@]}" \
