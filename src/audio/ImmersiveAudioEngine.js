@@ -132,6 +132,7 @@ export class ImmersiveAudioEngine {
     // —un índice— y se le pone ganancia. Factores, no dB, para multiplicar en el
     // bucle sin convertir; los dB son la unidad de la API pública.
     this._focusIdx   = -1;   // stem enfocado, o -1
+    this._spotIdx    = -1;   // stem al que va TODO el spotlight (pinch en VR), o -1
     this._focusBoost = 1;    // factor sobre el enfocado  (1 = sin realce)
     this._focusDuck  = 1;    // factor sobre los demás    (1 = no se les toca)
     this._bedGain   = null;  // GainNode del bed, escrito por el duck (creado en attach)
@@ -703,7 +704,10 @@ export class ImmersiveAudioEngine {
         [dx, dy, dz] = s.dir;                         // ya unitario
       }
       const dot = dx * f[0] + dy * f[1] + dz * f[2];
-      const aim = Math.max(0, dot);                  // 1 = mirándola de frente
+      // A chosen stem (setSpotlightStem) takes the whole spotlight wherever the
+      // head turns; the rest stay at rest.
+      const aim = this._spotIdx >= 0 ? (s === this._stems[this._spotIdx] ? 1 : 0)
+                                     : Math.max(0, dot);   // 1 = mirándola de frente
       const focus = Math.pow(aim, this._focusExp);
       s._weight = focus * zN;                         // 0..1: cuán "enfocada" está
       if (s._weight > maxW) maxW = s._weight;
@@ -875,6 +879,19 @@ export class ImmersiveAudioEngine {
     const idx = (typeof i === 'number' && i >= 0 && i < this._stems.length) ? i : -1;
     if (idx === this._focusIdx) return;
     this._focusIdx = idx;
+    this._updateSpotlight();
+  }
+
+  /**
+   * Gives the zoom spotlight to stem `i` regardless of where the head looks
+   * (the VR pinch: "this one"), or back to the gaze with -1. The zoom amount
+   * still comes from setZoomNormalized. Idempotent.
+   * @param {number} i  stem index, or -1
+   */
+  setSpotlightStem(i) {
+    const idx = (typeof i === 'number' && i >= 0 && i < this._stems.length) ? i : -1;
+    if (idx === this._spotIdx) return;
+    this._spotIdx = idx;
     this._updateSpotlight();
   }
 

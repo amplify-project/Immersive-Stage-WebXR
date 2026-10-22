@@ -74,6 +74,8 @@ musician + zoom in**, their stem appears from its position.
 | `?intro=1` / `?intro=0` | Force / disable the **headset intro** (two big buttons straight into VR or AR, plus "Web mode"). By default it shows in a headset browser (Quest/Pico/Wolvic UA, or AR support) and not on a PC. The source loads while it is up; leaving VR/AR comes back to it. |
 | `?stemmarks=1` | **Musician calibration rings** on the 360: one per stem at its `azimuthDeg`/`elevationDeg`, as wide as its selection cone (`hitDeg`), with name and angles. Drag on the PC (wheel = size); long pinch to grab in VR (stick = size). Saved on release through `/api/scene/stems`. Also switched on for every player by the editor's **Debug mode** (`scene.debug`), together with `?arperf=1`. |
 | `?cuwc=0` | Close-ups through a second Shaka + playbackRate sync instead of WebCodecs (the fallback). `?cuoffset=ms` trims a constant close-up offset in the WebCodecs path. |
+| `?aim=hand` | Aim with each hand's system ray instead of the head. Default: look at a musician and pinch; a glow sits on the musician you look at, no reticle. |
+| `?vrzoom=move` | In VR, a pinch on a musician moves the 360 sphere towards them again (the old zoom). Default: the 360 stays still and the pinch zoom is audio spotlight + close-up panel only; crop close-ups and the stick still move it. |
 | `?noray=1` / `?nojoints=1` / `?xrfps=72` / `?fovea=1` | VR perf experiments: hide the hand ray, the joints; ask a frame rate; fixed foveation. |
 
 ---

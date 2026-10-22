@@ -1,11 +1,18 @@
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Ray and pinch: the hands-free input of the XR player (Pilot 3, T2).
  *
- *  Aim at a musician with the ray that comes out of your hand and pinch: in VR
+ *  Look at a musician and pinch (either hand, or a controller's trigger): in VR
  *  it zooms in on them, in AR it pins them. Pinch with the ray on nothing to
  *  undo (zoom back out / unpin). Hold the pinch on nothing to open the menu
  *  (switch VR ↔ AR, leave). It is the Quest's own system interaction —the home
  *  menu works the same way— so there is nothing new to learn.
+ *
+ *  AIM. By default it is the HEAD: the viewer pose's forward axis, the
+ *  look-and-pinch of the Vision Pro. Nothing is drawn while you look at nothing
+ *  —a fixed reticle in the middle of the view was tried and felt wrong— only a
+ *  glow ON the musician you are looking at (snapped to them, so it does not
+ *  shake with the head), plus the hold ring and the flash while you pinch.
+ *  With aim 'hand' (?aim=hand) each hand has its own visible ray instead:
  *
  *  Both halves come from the browser, nothing is recognised here:
  *    - the RAY is the input source's `targetRaySpace`, which for a tracked
@@ -42,6 +49,7 @@ const RAY_LEN_M  = 2.0;              // drawn length when not ending on somethin
 const BEAM_R0    = 0.004;            // beam radius at the hand (m)
 const BEAM_R1    = 0.0012;           // ...and at the tip
 const CURSOR_M   = 0.07;             // glow size at the end of the ray
+const HEAD_CURSOR_M = 3.0;           // head aim: distance the glow is drawn at on a 360 musician
 const BURST_MS   = 350;              // the flash when a pinch lands
 
 const C_IDLE = 0xbfe9ff, C_TARGET = 0x00d4ff, C_PRESSED = 0xffd24a;
@@ -150,8 +158,10 @@ class Ray {
     this.beam.visible = this.glow.visible = this.hold.visible = this.burst.visible = false;
   }
 
-  /** Place and paint. `o`/`d` the ray; `len` where it ends; `t` seconds. */
-  draw(o, d, len, state, holdFill, now) {
+  /** Place and paint. `o`/`d` the ray; `len` where it ends; `t` seconds.
+   *  `beam`/`glow` false leave that part out (head aim draws no beam, and its
+   *  glow only when it is on something). */
+  draw(o, d, len, state, holdFill, now, beam = true, glow = true) {
     const c = this.colours[state];               // 0 idle, 1 on something, 2 pressed
 
     this.beam.position.set(o[0], o[1], o[2]);
@@ -190,7 +200,8 @@ class Ray {
       this.burstU.uAlpha.value = 1 - b;
     }
 
-    this.beam.visible = this.glow.visible = true;
+    this.beam.visible = beam;
+    this.glow.visible = glow;
   }
 }
 
@@ -204,12 +215,20 @@ export class RayPointer {
    * @param {(source:XRInputSource) => void} [o.onHold]  long pinch on nothing
    * @param {XRMenu} [o.menu]  while open, it takes the ray before the musicians do
    * @param {boolean} [o.hidden]  run everything but draw nothing (perf experiment)
+   * @param {'head'|'hand'} [o.aim]  what aims: the head (default) or each hand's ray
+   * @param {(i:number, origin:number[]) => ?number[]} [o.targetDir]  head aim: unit
+   *   direction from `origin` to musician `i` when targetPos has no point for it
+   *   (a musician of the 360), so the glow sits on them and not on the gaze
    * @param {object} [o.grab]  long pinch ON a musician grabs it, if grab.can(i):
    *   start(i, src) once, move(i, origin, dir, src) every frame while held
    *   (the arrays are reused: copy what you keep), end(i, src) on release.
    */
-  constructor(scene, { pick, targetPos, onTap, onHold, menu, grab = null, hidden = false }) {
+  constructor(scene, { pick, targetPos, onTap, onHold, menu, grab = null, hidden = false,
+                       aim = 'head', targetDir = null }) {
     this._hidden = hidden;
+    this._aim = aim === 'hand' ? 'hand' : 'head';
+    this._targetDir = targetDir || (() => null);
+    this._cd = [0, 0, 0];
     this._grab = grab;
     this._pick = pick;
     this._targetPos = targetPos;
@@ -221,7 +240,8 @@ export class RayPointer {
     const colours = [C_IDLE, C_TARGET, C_PRESSED].map(c => MeshFit.colour(c));
     this._session = null;
     this._down = new Map();      // XRInputSource → { t, target, menuHit, held }
-    this._rays = { left: new Ray(scene, colours), right: new Ray(scene, colours), none: new Ray(scene, colours) };
+    this._rays = { left: new Ray(scene, colours), right: new Ray(scene, colours), none: new Ray(scene, colours),
+                   head: new Ray(scene, colours) };
 
     this._start = e => {
       const r = this._rayOf(e.inputSource);
@@ -261,6 +281,7 @@ export class RayPointer {
 
   /** The musician the main ray is on (for preloading its close-up), or -1. */
   get hovered() {
+    if (this._aim === 'head') return this._rays.head.source ? this._rays.head.target : -1;
     const r = this._rays.right.source ? this._rays.right : this._rays.left;
     return r.source ? r.target : -1;
   }
@@ -272,7 +293,8 @@ export class RayPointer {
     const menuOpen = !!(this._menu && this._menu.open);
     let menuHover = -1;
 
-    for (const src of frame.session.inputSources) {
+    if (this._aim === 'head') menuHover = this._updateHead(frame, refSpace, now, menuOpen);
+    else for (const src of frame.session.inputSources) {
       // 'gaze' sources (a headset button, no hand) have no ray worth drawing:
       // it would come out from between your eyes.
       if (src.targetRayMode !== 'tracked-pointer') continue;
@@ -321,7 +343,65 @@ export class RayPointer {
     if (menuOpen) this._menu.setHover(menuHover);
   }
 
+  /** Head aim: one ray from the viewer pose; any pinch confirms what it is on. */
+  _updateHead(frame, refSpace, now, menuOpen) {
+    const r = this._rays.head;
+    const vp = frame.getViewerPose(refSpace);
+    if (!vp) return -1;
+    r.source = 'head';
+    const p = vp.transform.position, m = vp.transform.matrix;
+    const o = this._origin, d = this._dir;
+    o[0] = p.x; o[1] = p.y; o[2] = p.z;
+    d[0] = -m[8]; d[1] = -m[9]; d[2] = -m[10];
+
+    let len = RAY_LEN_M, menuHover = -1;
+    r.menuHit = OFF_PANEL; r.target = -1;
+    if (menuOpen) {
+      const hit = this._menu.hit(o, d);
+      if (hit) { r.menuHit = hit.button; len = hit.dist; if (hit.button >= 0) menuHover = hit.button; }
+    } else {
+      r.target = this._pick(o, d, RAY_CONE);
+    }
+
+    // Whichever hand is pinching drives the hold and the grab.
+    let press = null, psrc = null;
+    for (const [s, pr] of this._down) { press = pr; psrc = s; break; }
+    let holdFill = 0;
+    if (press && press.grab) {
+      r.target = press.target;
+      this._grab.move(press.target, o, d, psrc);
+    } else if (press && !press.held && !menuOpen && press.target < 0) {
+      const held = now - press.t;
+      if (held > TAP_MAX_MS) holdFill = Math.min(1, (held - TAP_MAX_MS) / (HOLD_MS - TAP_MAX_MS));
+      if (held >= HOLD_MS) { press.held = true; r.burstAt = now; this._onHold(psrc); }
+    } else if (press && !press.held && !menuOpen && press.target >= 0 && this._grab && this._grab.can(press.target)) {
+      const held = now - press.t;
+      if (held > TAP_MAX_MS) holdFill = Math.min(1, (held - TAP_MAX_MS) / (HOLD_MS - TAP_MAX_MS));
+      if (held >= HOLD_MS) { press.held = press.grab = true; r.burstAt = now; this._grab.start(press.target, psrc); }
+    }
+
+    // The glow goes ON the musician, not where the head points: inside the
+    // cone the gaze wanders, the musician does not.
+    let cd = d;
+    if (!menuOpen && r.target >= 0) {
+      const at = this._targetPos(r.target);
+      const c = this._cd;
+      if (at) {
+        const dist = Math.hypot(at[0] - o[0], at[1] - o[1], at[2] - o[2]) || 1;
+        c[0] = (at[0] - o[0]) / dist; c[1] = (at[1] - o[1]) / dist; c[2] = (at[2] - o[2]) / dist;
+        cd = c; len = Math.max(0.05, dist - 0.15);
+      } else {
+        const td = this._targetDir(r.target, o);
+        if (td) { c[0] = td[0]; c[1] = td[1]; c[2] = td[2]; cd = c; len = HEAD_CURSOR_M; }
+      }
+    }
+    const on = r.target >= 0 || r.menuHit !== OFF_PANEL;
+    if (!this._hidden) r.draw(o, cd, len, press ? 2 : on ? 1 : 0, holdFill, now, false, on || !!press);
+    return menuHover;
+  }
+
   _rayOf(src) {
+    if (this._aim === 'head') return this._rays.head.source ? this._rays.head : null;
     for (const k in this._rays) if (this._rays[k].source === src) return this._rays[k];
     return null;
   }

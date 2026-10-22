@@ -116,6 +116,18 @@ let xrZoomDist = 0;   // acercamiento en VR (joystick derecho), 0 = sin zoom
 let xrZoomGoal = null;               // target xrZoomDist set by a pinch, or null
 let xrZoomStem = -1;                 // musician zoomed in by a pinch, or -1
 let xrZoomDir  = null;               // THREE.Vector3 the sphere moves along; null = the head's forward
+// Whether the zoom moves the 360 sphere. A pinch on a musician whose close-up
+// is a panel does NOT: the picture jumping under you while you look at it
+// confused people, and the panel already is the "closer" view. So the zoom
+// there is only audio (spotlight) + the panel, and the 360 stays put. A crop
+// close-up still needs it (it lies on the sphere), and so does the stick.
+// ?vrzoom=move brings back moving the sphere on every pinch.
+const VR_ZOOM_MOVE = new URLSearchParams(location.search).get('vrzoom') === 'move';
+let xrZoomMoves = true;
+// The musician the pinch zoom's audio spotlight belongs to. It outlives
+// xrZoomStem through the zoom-out, so the soloist fades with the zoom instead of
+// switching to whoever the head happens to face on the way out.
+let xrSpotStem = -1;
 const xrZoomDirGoal = [0, 0, -1];    // where xrZoomDir is easing to
 // A pinch zoom is a tween of fixed duration from where it was (distance and
 // direction) to where it is going, on an ease-in-out curve: it starts and lands
@@ -143,6 +155,9 @@ const _zoomFwd = new THREE.Vector3(), _zoomQ = new THREE.Quaternion();   // per-
 //   ?noray=1     keep the ray logic (pick, pinch, menu) but draw nothing.
 const XR_NO_JOINTS = new URLSearchParams(location.search).get('nojoints') === '1';
 const XR_NO_RAY    = new URLSearchParams(location.search).get('noray') === '1';
+//   ?aim=hand    aim with each hand's system ray instead of the head (default:
+//                look at a musician and pinch).
+const XR_AIM       = new URLSearchParams(location.search).get('aim') === 'hand' ? 'hand' : 'head';
 const HAND_FEATS   = XR_NO_JOINTS ? [] : ['hand-tracking'];
 
 // Headroom experiments. With hands in view and the head turning fast, the
@@ -258,6 +273,8 @@ function initThree() {
     menu: xrMenu,
     grab: markGrabXR,
     hidden: XR_NO_RAY,
+    aim: XR_AIM,
+    targetDir: xrStemDirFrom,
   });
 
   window.addEventListener('resize', () => {
@@ -2378,13 +2395,13 @@ async function enterXR() {
     introShow(false);
     closeupPlaced = undefined;     // the head is somewhere else now: re-place the panel
     pointer.attach(xrSession);
-    xrZoomGoal = null; xrZoomStem = -1; xrZoomDir = null; xrLastT = 0;
+    xrZoomGoal = null; xrZoomStem = -1; xrZoomDir = null; xrLastT = 0; xrSpotStem = -1; xrZoomMoves = true;
 
     xrSession.addEventListener('end', () => {
       xrSession = null;
       pointer.detach();
       xrMenu.close();
-      xrZoomGoal = null; xrZoomStem = -1; xrZoomDir = null;
+      xrZoomGoal = null; xrZoomStem = -1; xrZoomDir = null; xrSpotStem = -1; xrZoomMoves = true; engine?.setSpotlightStem(-1);
       telemetryLeaveXR();
       voice?.mark('exit-vr');   // la grabación sigue: lo que se dice al salir vale tanto como lo de dentro
       if (debugMesh) debugMesh.visible = false;
@@ -2450,6 +2467,10 @@ async function enterXR() {
                 const jy = isrc.gamepad.axes[3];   // adelante = negativo
                 if (Math.abs(jy) > 0.15) {
                   xrZoomGoal = null; xrZoomStem = -1;   // the stick takes over from a point
+                  // From a still-sphere pinch zoom: start the stick from zero,
+                  // or the sphere would leap to where the audio zoom was.
+                  if (!xrZoomMoves) { xrZoomDist = 0; xrZoomDir = null; xrZoomMoves = true; }
+                  xrSpotStem = -1;                        // the stick zooms where you look
                   xrZoomDist = Math.max(0, Math.min(80, xrZoomDist - jy * 1.2));
                 }
               }
@@ -2473,13 +2494,14 @@ async function enterXR() {
             }
             // Back at zero zoom the direction no longer matters and the head's
             // forward takes over again.
-            if (xrZoomDir && xrZoomDist <= 0 && xrZoomGoal == null) xrZoomDir = null;
+            if (xrZoomDist <= 0 && xrZoomGoal == null) { xrZoomDir = null; xrZoomMoves = true; xrSpotStem = -1; }
 
             // El zoom de VR (joystick) alimenta el spotlight de stems: en
             // escritorio lo hace el FOV vía setZoomByFactor, pero en VR no hay
             // FOV controlable, así que mapeamos xrZoomDist → zoom normalizado.
             // Boost completo a media carrera (≈40) para que responda pronto.
             const zoomN = xrZoomDist / 40;
+            engine?.setSpotlightStem(xrSpotStem);
             engine?.setZoomNormalized(zoomN);
             updateCloseupFocus();   // close-up del músico enfocado (joystick zoom)
             pointer.update(frame, refSpace);
@@ -2504,10 +2526,11 @@ async function enterXR() {
             if (sphere) {
               const fwd = xrZoomDir || _zoomFwd.set(0, 0, -1)
                 .applyQuaternion(_zoomQ.set(q.x, q.y, q.z, q.w));
+              const k = xrZoomMoves ? xrZoomDist : 0;
               sphere.position.set(
-                pos.x - fwd.x * xrZoomDist,
-                pos.y - fwd.y * xrZoomDist,
-                pos.z - fwd.z * xrZoomDist);
+                pos.x - fwd.x * k,
+                pos.y - fwd.y * k,
+                pos.z - fwd.z * k);
             }
 
             // Debug panel fijo delante — altura ojo, 2m adelante
@@ -2946,6 +2969,12 @@ function xrSelect(target) {
     return;
   }
   xrZoomStem = target;
+  xrSpotStem = target;
+  // Only a crop close-up (or ?vrzoom=move) moves the sphere; see xrZoomMoves.
+  // Switching musicians mid-zoom keeps what the first pinch chose, so the
+  // sphere never jumps.
+  if (xrZoomDist <= 0 && !xrZoomGoal)
+    xrZoomMoves = VR_ZOOM_MOVE || !!closeupCropByRep[closeupRepByStem[target]];
   xrZoomDirGoal[0] = d[0]; xrZoomDirGoal[1] = d[1]; xrZoomDirGoal[2] = d[2];
   // Start from where the zoom already is: along the head if it came from the
   // stick, or the previous musician — so it swings rather than jumps.
@@ -3193,6 +3222,20 @@ function xrStemWorldPos(i) {
   arSources[i].getWorldPosition(_stemV);
   _stemPos[0] = _stemV.x; _stemPos[1] = _stemV.y; _stemPos[2] = _stemV.z;
   return _stemPos;
+}
+
+// Direction from `o` to musician `i` on the 360 sphere (moved by the zoom), for
+// the head-aim glow; null for anything targetPos already places.
+const _stemDir = [0, 0, 0];
+function xrStemDirFrom(i, o) {
+  if (!engine || i < 0 || i === CLOSEUP_TARGET) return null;
+  const d = engine.getStemDirection(i);
+  if (!d) return null;
+  const c = sphere && sphere.visible ? sphere.position : { x: 0, y: 0, z: 0 }, R = 100;
+  const x = c.x + d[0] * R - o[0], y = c.y + d[1] * R - o[1], z = c.z + d[2] * R - o[2];
+  const n = Math.hypot(x, y, z) || 1;
+  _stemDir[0] = x / n; _stemDir[1] = y / n; _stemDir[2] = z / n;
+  return _stemDir;
 }
 
 // ── XR menu (long pinch on nothing) ─────────────────────────────────────────
