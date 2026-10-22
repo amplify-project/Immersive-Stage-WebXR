@@ -50,6 +50,14 @@ sync_type() {  # $1 = glob   $2 = content-type
 }
 
 upload_once() {
+  # Snapshot the manifest BEFORE the segments go up, and publish that snapshot
+  # after them. A sync of big segments can take longer than a segment, and
+  # ffmpeg keeps writing meanwhile: a manifest read at the end would list
+  # segments that were born during the sync and are not on S3 yet, and the
+  # player asks for them and gets 403. This way the manifest never names a
+  # segment that is not already up.
+  local mpd="$OUT/manifest.mpd" snap="$OUT/.manifest.upload.mpd"
+  [[ -f "$mpd" ]] && cp "$mpd" "$snap"
   sync_type "*.m4s"  "video/iso.segment"
   sync_type "*.mp4"  "video/mp4"
   sync_type "*.webm" "video/webm"
@@ -68,9 +76,7 @@ upload_once() {
   # sale a medias, se omite esta pasada: la siguiente (~INTERVAL s) lo recoge ya
   # cerrado. Se sube el snapshot validado, no el fichero vivo, así que no hay
   # ventana entre comprobar y subir (sin TOCTOU).
-  local mpd="$OUT/manifest.mpd" snap="$OUT/.manifest.upload.mpd"
-  if [[ -f "$mpd" ]]; then
-    cp "$mpd" "$snap"
+  if [[ -f "$snap" ]]; then
     if tail -c 64 "$snap" | grep -q '</MPD>'; then
       aws s3 cp "$snap" "$DEST/manifest.mpd" \
         --content-type "application/dash+xml" \
