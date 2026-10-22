@@ -43,10 +43,34 @@ command -v aws >/dev/null || { echo "AWS CLI no encontrado (instala awscli y haz
 REGION_ARG=(); [[ -n "$REGION" ]] && REGION_ARG=(--region "$REGION")
 
 # Sube por tipo con su Content-Type y cache larga (los segmentos son inmutables).
+#
+# Only the files not uploaded yet, and WITHOUT listing the bucket. `aws s3 sync`
+# lists the whole destination on every call, and the bucket root keeps every
+# segment of every past live (tens of thousands): that alone took ~8 s per call,
+# ~30 s per pass, longer than the manifest's window, so on the CDN every segment
+# the player was told about had already expired. Instead: remember what went
+# up (name + size; segments are immutable once renamed from .tmp), hard-link
+# the new ones into a staging dir and `aws s3 cp --recursive` that, which does
+# not list the destination. One aws process per type per pass.
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/upload-s3.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+trap 'exit 0' INT TERM
+declare -A SENT=()
 sync_type() {  # $1 = glob   $2 = content-type
-  aws s3 sync "$OUT" "$DEST" --exclude "*" --include "$1" --size-only \
+  local f b key n=0
+  rm -rf "$STAGE"/*
+  for f in "$OUT"/$1; do
+    [[ -f "$f" ]] || continue
+    b="${f##*/}"; key="$b:$(stat -c %s "$f")"
+    [[ -n "${SENT[$key]:-}" ]] && continue
+    ln "$f" "$STAGE/$b" 2>/dev/null || cp "$f" "$STAGE/$b"
+    n=$((n + 1))
+  done
+  (( n == 0 )) && return 0
+  aws s3 cp "$STAGE" "$DEST" --recursive \
     --content-type "$2" --cache-control "public,max-age=31536000,immutable" \
-    "${REGION_ARG[@]}" --only-show-errors
+    "${REGION_ARG[@]}" --only-show-errors || return 1
+  for f in "$STAGE"/*; do b="${f##*/}"; SENT["$b:$(stat -c %s "$f")"]=1; done
 }
 
 upload_once() {
