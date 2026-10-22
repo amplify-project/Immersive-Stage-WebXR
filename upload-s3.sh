@@ -82,9 +82,11 @@ upload_once() {
   # segment that is not already up.
   local mpd="$OUT/manifest.mpd" snap="$OUT/.manifest.upload.mpd"
   [[ -f "$mpd" ]] && cp "$mpd" "$snap"
-  sync_type "*.m4s"  "video/iso.segment"
-  sync_type "*.mp4"  "video/mp4"
-  sync_type "*.webm" "video/webm"
+  # If any segment failed to go up, do not publish a manifest that names it:
+  # skip it this pass (the next one retries those segments and re-snapshots).
+  sync_type "*.m4s"  "video/iso.segment" &&
+  sync_type "*.mp4"  "video/mp4" &&
+  sync_type "*.webm" "video/webm" || { rm -f "$snap"; return 1; }
   # Manifest al final, sin cache para que el player relea el timeline en vivo.
   #
   # ffmpeg reescribe manifest.mpd en vivo cada segmento; si `aws s3 cp` lo lee a
