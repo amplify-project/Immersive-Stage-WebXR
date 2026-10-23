@@ -781,6 +781,11 @@ async function handleAPI(req, res, pathname) {
 
     // ── Puente Insta360 → cámara virtual v4l2 (inicializar / parar / estado) ──
     if (pathname === '/api/bridge/start' && req.method === 'POST') {
+      // bridge.sh reloads v4l2loopback, which cannot happen while anything has
+      // /dev/video10 open: let go of the editor's own camera readers first.
+      if (bridge && bridge.proc) return sendJSON(res, 409, { error: 'El puente ya está en marcha' });
+      stopSnapshot();
+      if (videoPreview) await videoPreview.release();
       try { startBridge(); return sendJSON(res, 200, { ok: true }); }
       catch (e) { return sendJSON(res, 409, { error: e.message }); }
     }
