@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================================
 #  measure_sync.sh — Mide el desfase A/V del directo AUTOMÁTICAMENTE (sin ojo ni
-#  cuentas). Captura unos segundos de vídeo+audio con timestamps de reloj de
-#  pared (fieles), detecta el instante de la palmada en el audio y el del
+#  cuentas). Captura unos segundos de vídeo+audio igual que el directo
+#  (mismos timestamps), detecta el instante de la palmada en el audio y el del
 #  flash/golpe en el vídeo, y te imprime los milisegundos a meter en el editor.
 #
 #  A diferencia del monitor en vivo, esto NO aplica delay y NO reproduce en
@@ -18,6 +18,12 @@
 #  cámara: las manos juntándose son el evento visual y el sonido, sincronizados.
 #  Valen igual una claqueta o tapar/destapar la lente. La palmada rompe el
 #  silencio (audio) y provoca un cambio de escena (vídeo).
+#
+#  Timestamps: los MISMOS que el directo (stream.sh): sin
+#  -use_wallclock_as_timestamps, v4l2 y ALSA con sus marcas nativas. Con reloj de
+#  pared se medía la latencia de LLEGADA de cada paquete, que no es el desfase
+#  que acaba en el MPD (daba ~990 ms donde el directo necesitaba ~500). Así el
+#  número es el `live.audio.delay` que hay que poner, medido con delay 0.
 #
 #  Detección: el audio (silencedetect) ancla el instante; el vídeo es el punto de
 #  MÁXIMO movimiento en una ventana alrededor de ese instante (no un umbral
@@ -35,7 +41,9 @@ WCH="${WCH:-0}"         # canal a escuchar (W del FOA = omni; 0 en 1-2 ch)
 DUR="${DUR:-8}"         # segundos a capturar
 THRESH="${THRESH:--30}" # umbral de silencio en dB (sube a -25/-20 si hay ruido)
 SKIP="${SKIP:-0.4}"     # s iniciales ignorados (el device abre con un pop/ruido)
-WIN="${WIN:-1.2}"       # ventana (s) alrededor del audio donde buscar el vídeo
+WIN="${WIN:-2.0}"       # s DESPUÉS del audio donde buscar el vídeo (llega tarde)
+PRE="${PRE:-0.2}"       # s ANTES del audio admitidos (el movimiento previo a la
+                        # palmada daba picos falsos y delays negativos imposibles)
 VMIN="${VMIN:-0.008}"   # movimiento mínimo aceptable del pico (rechaza el ruido)
 
 FR="${FR:-30}"           # fps a pedir a la cámara (la misma que el directo)
@@ -81,8 +89,8 @@ VIN=(-f v4l2 -framerate "$FR")
 echo "▶ Capturando ${DUR}s desde video=$VIDEO audio=$AUDIO (${CH}ch ${ACODEC:-?}, canal $WCH)"
 echo "  → quédate 1s en SILENCIO y luego una PALMADA seca delante de la cámara…"
 if ! ffmpeg -hide_banner -loglevel error \
-  "${VIN[@]}" -use_wallclock_as_timestamps 1 -i "$VIDEO" \
-  -f alsa ${ACODEC:+-acodec "$ACODEC"} -channels "$CH" -use_wallclock_as_timestamps 1 -i "$AUDIO" \
+  -thread_queue_size 1024 "${VIN[@]}" -i "$VIDEO" \
+  -thread_queue_size 1024 -f alsa ${ACODEC:+-acodec "$ACODEC"} -channels "$CH" -i "$AUDIO" \
   -map 0:v -map 1:a -af "pan=mono|c0=c${WCH}" -t "$DUR" "$CLIP" 2> "$TMP/err"; then
   echo "✗ La captura falló: $(grep -v '^\s*$' "$TMP/err" | tail -2 | tr '\n' ' ')"
   exit 1
@@ -122,13 +130,13 @@ TV=$(ffmpeg -hide_banner -nostats -i "$CLIP" -an \
        -vf "${CROP}select='gt(scene,0)',metadata=print" -f null - 2>&1 \
      | awk '/pts_time:/{t=$0; sub(/.*pts_time:/,"",t); sub(/[^0-9.].*/,"",t)}
             /scene_score=/{s=$0; sub(/.*scene_score=/,"",s); print t" "s}' \
-     | awk -v ta="$TA" -v w="$WIN" -v vmin="$VMIN" '
-            ($1>=ta-w && $1<=ta+w && $2+0>best){best=$2+0; bt=$1}
+     | awk -v ta="$TA" -v w="$WIN" -v pre="$PRE" -v vmin="$VMIN" '
+            ($1>=ta-pre && $1<=ta+w && $2+0>best){best=$2+0; bt=$1}
             END{ if(best>=vmin) print bt }') || true
 
 echo "────────────────────────────────────────────"
 if [ -z "${TV:-}" ]; then
-  echo "✗ No vi la palmada cerca de TA=${TA}s (sin movimiento > ${VMIN} en ±${WIN}s)."
+  echo "✗ No vi la palmada cerca de TA=${TA}s (sin movimiento > ${VMIN} en -${PRE}..+${WIN}s)."
   echo "  Palma dentro del cuadro y usa un ROI ceñido a las manos (📷 ROI en el"
   echo "  editor), o baja VMIN. El clip quedó en: $CLIP (no se borró)"
   trap - EXIT
