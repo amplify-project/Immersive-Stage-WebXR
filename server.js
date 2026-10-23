@@ -862,7 +862,12 @@ async function handleAPI(req, res, pathname) {
       stopSnapshot();   // libera vídeo+audio (compartidos)
       await releaseCaptures('Measuring the A/V delay: it needs the audio device.');
       const proc = spawn('bash', [path.join(ROOT, 'measure_sync.sh'), ...mArgs],
-        { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur), ...(roiRel ? { ROI_REL: roiRel } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+        { cwd: ROOT, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+          // The camera opened as the live opens it: without the input format a
+          // webcam falls back to a low mode, and its frame rate to whatever it has.
+          env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur),
+                 FR: String(V.fr || 30), INFORMAT: V.informat || '', VSIZE: V.size || '',
+                 ...(roiRel ? { ROI_REL: roiRel } : {}) } });
       measureProc = proc;
       let out = '', err = '', sent = false;
       const reply = (code, obj) => { if (sent) return; sent = true; sendJSON(res, code, obj); };
@@ -874,7 +879,9 @@ async function handleAPI(req, res, pathname) {
         const m = out.match(/A\/V delay\s*=\s*(-?\d+)\s*ms/i);
         if (m) return reply(200, { ok: true, delay: parseInt(m[1], 10), out: out.trim().slice(-400) });
         // Sin match: adjuntamos la cola del log (trae 'TA=… TV=…' de qué faltó).
-        reply(422, { error: 'No se pudo medir · ' + (out.trim().slice(-240) || err.trim() || 'sin salida') });
+        // The script's own "✗" line says what went wrong; fall back to the tail.
+        const fail = out.split('\n').filter(l => l.startsWith('✗')).pop();
+        reply(422, { error: 'No se pudo medir · ' + (fail || out.trim().slice(-240) || err.trim() || 'sin salida') });
       });
       return;   // respuesta diferida al exit del proceso (~DUR s)
     }

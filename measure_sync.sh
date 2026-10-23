@@ -34,24 +34,65 @@ CH="${CH:-32}"          # canales que abre el device de audio (X32 = 32)
 WCH="${WCH:-0}"         # canal a escuchar (W del FOA = omni; 0 en 1-2 ch)
 DUR="${DUR:-8}"         # segundos a capturar
 THRESH="${THRESH:--30}" # umbral de silencio en dB (sube a -25/-20 si hay ruido)
+SKIP="${SKIP:-0.4}"     # s iniciales ignorados (el device abre con un pop/ruido)
 WIN="${WIN:-1.2}"       # ventana (s) alrededor del audio donde buscar el vídeo
 VMIN="${VMIN:-0.008}"   # movimiento mínimo aceptable del pico (rechaza el ruido)
+
+FR="${FR:-30}"           # fps a pedir a la cámara (la misma que el directo)
+INFORMAT="${INFORMAT:-}" # p.ej. mjpeg (webcams: sin él no dan resoluciones altas)
+VSIZE="${VSIZE:-}"       # p.ej. 2560x1440
 
 TMP="$(mktemp -d)"; CLIP="$TMP/sync.mkv"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "▶ Capturando ${DUR}s desde video=$VIDEO audio=$AUDIO (${CH}ch, canal $WCH)"
+# Open the devices the way stream.sh does, or the capture fails before it starts.
+# The audio device: ask it what it takes. UAC2 interfaces (X32, Scarlett) only
+# open as S32_LE, a headset only as S16_LE mono; ffmpeg asks S16 by default.
+[[ -e "$VIDEO" ]] || { echo "✗ No existe la cámara $VIDEO (¿desconectada?)."; exit 1; }
+card="${AUDIO#*:}"; card="${card%%,*}"
+if [[ "$AUDIO" == hw:* && ! -e "/proc/asound/card$card" ]]; then
+  echo "✗ No hay tarjeta de sonido $AUDIO (¿desconectada?). Conectadas ahora:"
+  sed -n 's/^ *\([0-9]*\) \[[^]]*\]: \(.*\)/  hw:\1,0  \2/p' /proc/asound/cards
+  exit 1
+fi
+ACODEC="${ACODEC:-}"
+hwp=$(LC_ALL=C timeout 3 arecord -D "$AUDIO" --dump-hw-params -d 1 /dev/null 2>&1 || true)
+if grep -qi busy <<< "$hwp"; then
+  echo "✗ $AUDIO está ocupado por otro programa (¿el directo, el monitor, o PulseAudio/Ajustes de Sonido?)."
+  exit 1
+fi
+fmts=$(sed -n 's/^FORMAT: *//p' <<< "$hwp")
+if [[ -z "$ACODEC" ]]; then
+  for f in S32_LE S16_LE S24_LE; do
+    [[ " $fmts " == *" $f "* ]] && { ACODEC="pcm_$(tr 'A-Z' 'a-z' <<< "${f/_/}")"; break; }
+  done
+fi
+chs=$(sed -n 's/^CHANNELS: *//p' <<< "$hwp" | tr -d '[]')
+if [[ -n "$chs" ]]; then
+  read -r chmin chmax <<< "$chs"; chmax="${chmax:-$chmin}"
+  (( CH > chmax )) && CH=$chmax
+  (( CH < chmin )) && CH=$chmin
+fi
+(( WCH < CH )) || WCH=0
+VIN=(-f v4l2 -framerate "$FR")
+[[ -n "$INFORMAT" ]] && VIN+=(-input_format "$INFORMAT")
+[[ -n "$VSIZE" ]] && VIN+=(-video_size "$VSIZE")
+
+echo "▶ Capturando ${DUR}s desde video=$VIDEO audio=$AUDIO (${CH}ch ${ACODEC:-?}, canal $WCH)"
 echo "  → quédate 1s en SILENCIO y luego una PALMADA seca delante de la cámara…"
-ffmpeg -hide_banner -loglevel error \
-  -f v4l2 -framerate 24 -use_wallclock_as_timestamps 1 -i "$VIDEO" \
-  -f alsa -channels "$CH" -use_wallclock_as_timestamps 1 -i "$AUDIO" \
-  -map 0:v -map 1:a -af "pan=mono|c0=c${WCH}" -t "$DUR" "$CLIP"
+if ! ffmpeg -hide_banner -loglevel error \
+  "${VIN[@]}" -use_wallclock_as_timestamps 1 -i "$VIDEO" \
+  -f alsa ${ACODEC:+-acodec "$ACODEC"} -channels "$CH" -use_wallclock_as_timestamps 1 -i "$AUDIO" \
+  -map 0:v -map 1:a -af "pan=mono|c0=c${WCH}" -t "$DUR" "$CLIP" 2> "$TMP/err"; then
+  echo "✗ La captura falló: $(grep -v '^\s*$' "$TMP/err" | tail -2 | tr '\n' ' ')"
+  exit 1
+fi
 
 # ── Audio: primer instante en que el sonido rompe el silencio (la palmada) ──
 #  `|| true` + awk sin `exit`: no cerramos la tubería pronto (evita SIGPIPE →
 #  pipefail → set -e), y un "sin coincidencias" deja TA vacío en vez de abortar.
 TA=$(ffmpeg -hide_banner -nostats -i "$CLIP" -af "silencedetect=n=${THRESH}dB:d=0.05" -f null - 2>&1 \
-     | awk -F'silence_end: ' '/silence_end/ && !f {print $2+0; f=1}') || true
+     | awk -F'silence_end: ' -v t0="${SKIP:-0.4}" '/silence_end/ && !f && $2+0 > t0 {print $2+0; f=1}') || true
 
 # Sin audio no hay ancla → no se puede medir (y el vídeo solo no basta).
 if [ -z "${TA:-}" ]; then
