@@ -11,7 +11,8 @@
 #  Uso:
 #     ./measure_sync.sh                       # hw:1,0 + /dev/video10, 8 s
 #     ./measure_sync.sh hw:1,0 /dev/video10   # dispositivos explícitos
-#     DUR=6 CH=32 WCH=0 THRESH=-30 ./measure_sync.sh
+#     DUR=6 CH=32 WCH=0 JUMP=15 ./measure_sync.sh
+#     FROM_OUT=encoded CUR_DELAY=450 ./measure_sync.sh   # sobre el directo (mejor)
 #
 #  Método: UNA sola acción que suene y se vea a la vez (no dos manos). En cuanto
 #  arranque, quédate ~1 s EN SILENCIO y luego da una PALMADA seca delante de la
@@ -25,7 +26,7 @@
 #  que acaba en el MPD (daba ~990 ms donde el directo necesitaba ~500). Así el
 #  número es el `live.audio.delay` que hay que poner, medido con delay 0.
 #
-#  Detección: el audio (silencedetect) ancla el instante; el vídeo es el punto de
+#  Detección: el audio (el golpe más brusco) ancla el instante; el vídeo es el punto de
 #  MÁXIMO movimiento en una ventana alrededor de ese instante (no un umbral
 #  global), así el fondo de la escena no despista. Un ROI ceñido a las manos
 #  afina el pico si hace falta:
@@ -39,7 +40,6 @@ VIDEO="${2:-/dev/video10}"
 CH="${CH:-32}"          # canales que abre el device de audio (X32 = 32)
 WCH="${WCH:-0}"         # canal a escuchar (W del FOA = omni; 0 en 1-2 ch)
 DUR="${DUR:-8}"         # segundos a capturar
-THRESH="${THRESH:--30}" # umbral de silencio en dB (sube a -25/-20 si hay ruido)
 SKIP="${SKIP:-0.4}"     # s iniciales ignorados (el device abre con un pop/ruido)
 WIN="${WIN:-2.0}"       # s DESPUÉS del audio donde buscar el vídeo (llega tarde)
 PRE="${PRE:-0.2}"       # s ANTES del audio admitidos (el movimiento previo a la
@@ -52,6 +52,33 @@ VSIZE="${VSIZE:-}"       # p.ej. 2560x1440
 
 TMP="$(mktemp -d)"; CLIP="$TMP/sync.mkv"
 trap 'rm -rf "$TMP"' EXIT
+AFILE="$CLIP"; VFILE="$CLIP"; ACH="$WCH"
+
+# ── FROM_OUT: measure ON THE RUNNING LIVE, from its own DASH output ─────────
+#  The capture below opens the devices on its own, and its A/V offset is not
+#  the live's (it gave 989 and 200 where the live needed 450). The live's
+#  segments are exactly what the players get: clap while it runs, rebuild the
+#  last seconds of the 360 and of the audio from $FROM_OUT, and measure the
+#  offset LEFT in them. The answer is CUR_DELAY (the delay the live runs with)
+#  plus that residual. Does not touch the devices.
+if [[ -n "${FROM_OUT:-}" ]]; then
+  SEG="${SEG:-2}"; CUR_DELAY="${CUR_DELAY:-0}"
+  echo "▶ Midiendo sobre el directo ($FROM_OUT, delay actual ${CUR_DELAY} ms)"
+  echo "  → quédate 1s en SILENCIO y luego una PALMADA seca delante de la cámara…"
+  # Wait for the clap, then for the segments that hold it to close.
+  [[ "${NOWAIT:-0}" == "1" ]] || sleep "$(( DUR + 2 * SEG ))"
+  vinit=$(ls -t "$FROM_OUT"/init_*_0.m4s 2>/dev/null | head -1)
+  [[ -n "$vinit" ]] || { echo "✗ No hay segmentos del directo en $FROM_OUT (¿está en marcha?)."; exit 1; }
+  sess="${vinit##*/init_}"; sess="${sess%_0.m4s}"
+  ainit=$(ls "$FROM_OUT"/init_"$sess"_*.webm 2>/dev/null | head -1)
+  [[ -n "$ainit" ]] || { echo "✗ El directo no tiene pista de audio Opus (.webm) en $FROM_OUT."; exit 1; }
+  arep="${ainit##*_}"; arep="${arep%.webm}"
+  n=$(( (DUR + 2 * SEG) / SEG + 1 ))
+  # Only closed segments (ffmpeg writes .tmp and renames), the newest n of each.
+  { cat "$vinit"; ls "$FROM_OUT"/chunk_"$sess"_0_*.m4s | sort | tail -n "$n" | xargs cat; } > "$TMP/v.mp4"
+  { cat "$ainit"; ls "$FROM_OUT"/chunk_"$sess"_"$arep"_*.webm | sort | tail -n "$n" | xargs cat; } > "$TMP/a.webm"
+  VFILE="$TMP/v.mp4"; AFILE="$TMP/a.webm"; ACH=0   # channel 0 of the output = W
+else
 
 # Open the devices the way stream.sh does, or the capture fails before it starts.
 # The audio device: ask it what it takes. UAC2 interfaces (X32, Scarlett) only
@@ -95,18 +122,34 @@ if ! ffmpeg -hide_banner -loglevel error \
   echo "✗ La captura falló: $(grep -v '^\s*$' "$TMP/err" | tail -2 | tr '\n' ' ')"
   exit 1
 fi
+ACH=0   # the clip is already mono (pan above)
+fi
 
-# ── Audio: primer instante en que el sonido rompe el silencio (la palmada) ──
-#  `|| true` + awk sin `exit`: no cerramos la tubería pronto (evita SIGPIPE →
-#  pipefail → set -e), y un "sin coincidencias" deja TA vacío en vez de abortar.
-TA=$(ffmpeg -hide_banner -nostats -i "$CLIP" -af "silencedetect=n=${THRESH}dB:d=0.05" -f null - 2>&1 \
-     | awk -F'silence_end: ' -v t0="${SKIP:-0.4}" '/silence_end/ && !f && $2+0 > t0 {print $2+0; f=1}') || true
+# ── Audio: el GOLPE más brusco (la palmada) ─────────────────────────────────
+#  Not "the first sound after silence": in a live room there is no silence, and
+#  that picked a voice or the band. A clap is the biggest sudden jump in level:
+#  peak per 10 ms block, minus the loudest of the previous 100 ms. It must be
+#  at least JUMP dB, or it was not a clap. -copyts keeps each file's own times
+#  (the live's segments do not start at 0, and A and V share that timeline).
+JUMP="${JUMP:-15}"
+ASTART=$(ffprobe -v error -show_entries format=start_time -of csv=p=0 "$AFILE" 2>/dev/null || echo 0)
+TA=$(ffmpeg -hide_banner -nostats -copyts -i "$AFILE" \
+       -af "pan=mono|c0=c${ACH},asetnsamples=n=480:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.Peak_level" \
+       -f null - 2>&1 \
+     | awk '/pts_time:/{t=$0; sub(/.*pts_time:/,"",t); sub(/[^0-9.].*/,"",t)}
+            /Peak_level=/{v=$0; sub(/.*=/,"",v); if (v ~ /inf/) v=-120; print t, v+0}' \
+     | awk -v t0="$(awk -v a="${ASTART:-0}" -v k="$SKIP" 'BEGIN{print a+k}')" -v jump="$JUMP" '
+            {t[NR]=$1; v[NR]=$2}
+            END{ for (i=11; i<=NR; i++) { if (t[i] < t0) continue
+                   m=-200; for (j=i-10; j<i; j++) if (v[j]>m) m=v[j]
+                   if (v[i]-m > best) { best=v[i]-m; bt=t[i] } }
+                 if (best >= jump) print bt }') || true
 
 # Sin audio no hay ancla → no se puede medir (y el vídeo solo no basta).
 if [ -z "${TA:-}" ]; then
   echo "────────────────────────────────────────────"
-  echo "✗ No oí la palmada (TA vacío). Sube el nivel o baja el umbral: THRESH=-25"
-  echo "  (o -20). Verifica que la palmada está en el canal WCH=$WCH. Clip: $CLIP"
+  echo "✗ No oí la palmada: ningún golpe de ${JUMP} dB sobre lo anterior. Más fuerte y"
+  echo "  más seca, cerca del micro (o baja JUMP). Canal: $ACH. Clip: $AFILE"
   trap - EXIT; exit 1
 fi
 
@@ -126,7 +169,7 @@ else
   CROP=""
 fi
 # Lista (t score) de todos los frames; el argmax en la ventana lo hace awk.
-TV=$(ffmpeg -hide_banner -nostats -i "$CLIP" -an \
+TV=$(ffmpeg -hide_banner -nostats -copyts -i "$VFILE" -an \
        -vf "${CROP}select='gt(scene,0)',metadata=print" -f null - 2>&1 \
      | awk '/pts_time:/{t=$0; sub(/.*pts_time:/,"",t); sub(/[^0-9.].*/,"",t)}
             /scene_score=/{s=$0; sub(/.*scene_score=/,"",s); print t" "s}' \
@@ -138,7 +181,7 @@ echo "────────────────────────�
 if [ -z "${TV:-}" ]; then
   echo "✗ No vi la palmada cerca de TA=${TA}s (sin movimiento > ${VMIN} en -${PRE}..+${WIN}s)."
   echo "  Palma dentro del cuadro y usa un ROI ceñido a las manos (📷 ROI en el"
-  echo "  editor), o baja VMIN. El clip quedó en: $CLIP (no se borró)"
+  echo "  editor), o baja VMIN. Clip: $VFILE (no se borró)"
   trap - EXIT
   exit 1
 fi
@@ -146,6 +189,10 @@ fi
 DELAY=$(awk -v tv="$TV" -v ta="$TA" 'BEGIN{printf "%.0f", (tv-ta)*1000}')
 echo "  Audio (palmada)  Ta = ${TA}s"
 echo "  Vídeo (palmada)  Tv = ${TV}s"
+if [[ -n "${FROM_OUT:-}" ]]; then
+  echo "  queda en el directo: ${DELAY} ms (con delay ${CUR_DELAY} ms)"
+  DELAY=$(( CUR_DELAY + DELAY ))
+fi
 echo "────────────────────────────────────────────"
 echo "  A/V delay = ${DELAY} ms"
 if (( DELAY >= 0 )); then
