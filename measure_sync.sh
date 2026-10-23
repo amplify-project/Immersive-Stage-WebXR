@@ -129,7 +129,10 @@ fi
 #  Not "the first sound after silence": in a live room there is no silence, and
 #  that picked a voice or the band. A clap is the biggest sudden jump in level:
 #  peak per 10 ms block, minus the loudest of the previous 100 ms. It must be
-#  at least JUMP dB, or it was not a clap. -copyts keeps each file's own times
+#  at least JUMP dB, or it was not a clap. Of those, the LOUDEST: when the
+#  player is heard in the room the mic takes the clap again ~20 s later (the
+#  CDN delay), quieter, with no clap on the video; the biggest jump could be
+#  one of those echoes and gave nonsense (218 where the live needed 440). -copyts keeps each file's own times
 #  (the live's segments do not start at 0, and A and V share that timeline).
 JUMP="${JUMP:-15}"
 ASTART=$(ffprobe -v error -show_entries format=start_time -of csv=p=0 "$AFILE" 2>/dev/null || echo 0)
@@ -142,8 +145,8 @@ TA=$(ffmpeg -hide_banner -nostats -copyts -i "$AFILE" \
             {t[NR]=$1; v[NR]=$2}
             END{ for (i=11; i<=NR; i++) { if (t[i] < t0) continue
                    m=-200; for (j=i-10; j<i; j++) if (v[j]>m) m=v[j]
-                   if (v[i]-m > best) { best=v[i]-m; bt=t[i] } }
-                 if (best >= jump) print bt }') || true
+                   if (v[i]-m >= jump && (bt == "" || v[i] > bv)) { bv=v[i]; bt=t[i] } }
+                 if (bt != "") print bt }') || true
 
 # Sin audio no hay ancla → no se puede medir (y el vídeo solo no basta).
 if [ -z "${TA:-}" ]; then
