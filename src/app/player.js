@@ -2145,22 +2145,49 @@ function setupPointerControls() {
     prevMouse = {x: e.clientX, y: e.clientY};
   });
 
-  let lastTouch = null;
-  c.addEventListener('touchstart', e => { lastTouch = e.touches[0]; });
+  // Touch: one finger looks around, two fingers pinch to zoom (the wheel's
+  // job on a PC: everything the zoom drives, audio spotlight and close-ups,
+  // follows camera.fov). The page itself must not zoom: without touch-action
+  // the browser took the pinch and scaled the whole page instead.
+  c.style.touchAction = 'none';
+  let lastTouch = null, pinchDist = 0, pinchFov = 0;
+  const touchDist = ts => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
+  const touchStart = e => {
+    if (e.touches.length >= 2) {
+      lastTouch = null;
+      pinchDist = touchDist(e.touches); pinchFov = camera.fov;
+    } else {
+      // Back to one finger after a pinch: restart the drag from where it is
+      // now, or the view would jump by the distance between the fingers.
+      pinchDist = 0;
+      lastTouch = e.touches[0] || null;
+    }
+  };
+  c.addEventListener('touchstart', touchStart);
+  c.addEventListener('touchend', touchStart);
+  c.addEventListener('touchcancel', touchStart);
   c.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (pinchDist && e.touches.length >= 2) {
+      // Fingers apart → narrower field of view (zoom in), as a picture would.
+      setFov(pinchFov * pinchDist / Math.max(1, touchDist(e.touches)));
+      return;
+    }
     if (!lastTouch) return;
     const t = e.touches[0];
     yaw   -= (t.clientX - lastTouch.clientX) * 0.005;
     pitch -= (t.clientY - lastTouch.clientY) * 0.005;
     pitch  = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
     lastTouch = t;
-    e.preventDefault();
   }, { passive: false });
 
-  c.addEventListener('wheel', e => {
-    camera.fov = Math.max(30, Math.min(100, camera.fov + e.deltaY * 0.05));
-    camera.updateProjectionMatrix();
-  });
+  c.addEventListener('wheel', e => setFov(camera.fov + e.deltaY * 0.05));
+}
+
+// The screen zoom: field of view between 30° (fully in) and 100° (wide).
+function setFov(fov) {
+  camera.fov = Math.max(30, Math.min(100, fov));
+  camera.updateProjectionMatrix();
 }
 
 // ══════════════════════════════════════════════════════
