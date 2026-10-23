@@ -991,6 +991,7 @@ async function startManifest(src) {
 
   // Limpiar players anteriores
   if (syncInterval) { clearInterval(syncInterval); syncInterval = null; }
+  stopLiveWatch();
   if (shakaVideo) { try { await shakaVideo.destroy(); } catch(e){} shakaVideo = null; }
   if (shakaAudio) { try { await shakaAudio.destroy(); } catch(e){} shakaAudio = null; }
   if (shakaCloseup) { try { await shakaCloseup.destroy(); } catch(e){} shakaCloseup = null; }
@@ -1129,6 +1130,7 @@ async function loadDualShaka(src) {
       toast(`Live edge: ${CDN_LIVE ? 'CDN' : 'directo'} · ${T_LIVE.toFixed(0)} s`);
     }
     videoEl.play();
+    if (isLive) startLiveWatch(src);
 
     // ── UN SOLO Shaka ───────────────────────────────────────────────────────
     //  El <video> ya trae vídeo + audio Opus multicanal (el MPD tiene ambos
@@ -1357,6 +1359,85 @@ async function loadDualShaka(src) {
     toast('Error: ' + msg);
     console.error('[load] error completo:', e, e && e.data);
   }
+}
+
+// ── Live source watchdog ─────────────────────────────────────────────────────
+//
+// When one track stops at the source (a USB audio interface that drops off the
+// bus, a camera unplugged), ffmpeg can keep running and keep publishing the
+// OTHER track. Shaka then waits forever for the dead one: playback freezes and
+// nothing reports an error. So: if a live stream has not advanced for a while,
+// read the manifest and say which track stopped and how long ago. The track
+// comparison uses only the manifest's own times, so it does not depend on this
+// device's clock; "nothing new at all" does (publishTime vs now), hence the
+// wider margin there.
+const LIVE_STALL_S = 8;          // playback frozen this long → look at the source
+const LIVE_STALE_TRACK_S = 10;   // a track this far behind the newest one is dead
+const LIVE_STALE_MPD_S = 30;     // no new manifest for this long → source stopped
+let liveWatchTimer = null;
+
+function stopLiveWatch() {
+  if (liveWatchTimer) { clearInterval(liveWatchTimer); liveWatchTimer = null; }
+}
+
+// Where each adaptation set's timeline ends, in seconds since the Period start.
+function mpdTrackEnds(xml) {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const out = [];
+  for (const as of doc.getElementsByTagName('AdaptationSet')) {
+    const tpl = as.getElementsByTagName('SegmentTemplate')[0];
+    if (!tpl) continue;
+    const ts = +tpl.getAttribute('timescale') || 1;
+    const pto = +tpl.getAttribute('presentationTimeOffset') || 0;
+    let t = 0, end = 0;
+    for (const S of tpl.getElementsByTagName('S')) {
+      if (S.hasAttribute('t')) t = +S.getAttribute('t');
+      const d = +S.getAttribute('d'), r = +(S.getAttribute('r') || 0);
+      t += d * (r + 1); end = t;
+    }
+    const rep = as.getElementsByTagName('Representation')[0];
+    const kind = as.getAttribute('contentType') ||
+      ((rep && rep.getAttribute('mimeType')) || '').split('/')[0] || 'track';
+    out.push({ kind, id: as.getAttribute('id'), end: (end - pto) / ts });
+  }
+  return { doc, tracks: out };
+}
+
+function startLiveWatch(src) {
+  stopLiveWatch();
+  let lastT = -1, frozenSince = 0, lastWarn = 0;
+  liveWatchTimer = setInterval(async () => {
+    const now = performance.now();
+    if (videoEl.paused) { frozenSince = 0; return; }        // paused on purpose
+    const t = videoEl.currentTime;
+    if (t !== lastT) { lastT = t; frozenSince = 0; return; }
+    if (!frozenSince) { frozenSince = now; return; }
+    if (now - frozenSince < LIVE_STALL_S * 1000 || now - lastWarn < 10000) return;
+    lastWarn = now;
+    const frozen = Math.round((now - frozenSince) / 1000);
+    let msg = `Live stalled ${frozen} s: `;
+    try {
+      const xml = await (await fetch(src, { cache: 'no-store' })).text();
+      const { doc, tracks } = mpdTrackEnds(xml);
+      const mpd = doc.documentElement;
+      const newest = Math.max(...tracks.map(k => k.end));
+      const dead = tracks.filter(k => newest - k.end > LIVE_STALE_TRACK_S);
+      const pub = Date.parse(mpd.getAttribute('publishTime') || '');
+      const age = isFinite(pub) ? (Date.now() - pub) / 1000 : 0;
+      if (dead.length) {
+        msg += dead.map(k => `${k.kind} (set ${k.id}) stopped ${Math.round(newest - k.end)} s ago`)
+          .join(', ') + ' at the source, the rest keeps coming. Check that capture device and restart the live.';
+      } else if (age > LIVE_STALE_MPD_S) {
+        msg += `the source has published nothing for ${Math.round(age)} s (encoder or upload stopped).`;
+      } else {
+        msg += 'the source looks alive; the network or the CDN is not delivering segments.';
+      }
+    } catch (e) {
+      msg += `cannot read the manifest (${e.message}).`;
+    }
+    console.warn('[live]', msg);
+    arNotice(msg);
+  }, 1000);
 }
 
 // Textura de vídeo que se sube SOLO cuando hay fotograma nuevo.
@@ -2064,22 +2145,49 @@ function setupPointerControls() {
     prevMouse = {x: e.clientX, y: e.clientY};
   });
 
-  let lastTouch = null;
-  c.addEventListener('touchstart', e => { lastTouch = e.touches[0]; });
+  // Touch: one finger looks around, two fingers pinch to zoom (the wheel's
+  // job on a PC: everything the zoom drives, audio spotlight and close-ups,
+  // follows camera.fov). The page itself must not zoom: without touch-action
+  // the browser took the pinch and scaled the whole page instead.
+  c.style.touchAction = 'none';
+  let lastTouch = null, pinchDist = 0, pinchFov = 0;
+  const touchDist = ts => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
+  const touchStart = e => {
+    if (e.touches.length >= 2) {
+      lastTouch = null;
+      pinchDist = touchDist(e.touches); pinchFov = camera.fov;
+    } else {
+      // Back to one finger after a pinch: restart the drag from where it is
+      // now, or the view would jump by the distance between the fingers.
+      pinchDist = 0;
+      lastTouch = e.touches[0] || null;
+    }
+  };
+  c.addEventListener('touchstart', touchStart);
+  c.addEventListener('touchend', touchStart);
+  c.addEventListener('touchcancel', touchStart);
   c.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (pinchDist && e.touches.length >= 2) {
+      // Fingers apart → narrower field of view (zoom in), as a picture would.
+      setFov(pinchFov * pinchDist / Math.max(1, touchDist(e.touches)));
+      return;
+    }
     if (!lastTouch) return;
     const t = e.touches[0];
     yaw   -= (t.clientX - lastTouch.clientX) * 0.005;
     pitch -= (t.clientY - lastTouch.clientY) * 0.005;
     pitch  = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
     lastTouch = t;
-    e.preventDefault();
   }, { passive: false });
 
-  c.addEventListener('wheel', e => {
-    camera.fov = Math.max(30, Math.min(100, camera.fov + e.deltaY * 0.05));
-    camera.updateProjectionMatrix();
-  });
+  c.addEventListener('wheel', e => setFov(camera.fov + e.deltaY * 0.05));
+}
+
+// The screen zoom: field of view between 30° (fully in) and 100° (wide).
+function setFov(fov) {
+  camera.fov = Math.max(30, Math.min(100, fov));
+  camera.updateProjectionMatrix();
 }
 
 // ══════════════════════════════════════════════════════

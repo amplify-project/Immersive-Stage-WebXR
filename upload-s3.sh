@@ -87,6 +87,12 @@ upload_once() {
   sync_type "*.m4s"  "video/iso.segment" &&
   sync_type "*.mp4"  "video/mp4" &&
   sync_type "*.webm" "video/webm" || { rm -f "$snap"; return 1; }
+  # Which close-up track is whose, and where a crop of the 360 sits (stream.sh);
+  # small and rewritten per encode, so no cache.
+  if [[ -f "$OUT/closeups.json" ]]; then
+    aws s3 cp "$OUT/closeups.json" "$DEST/closeups.json" --content-type "application/json" \
+      --cache-control "no-cache,no-store,must-revalidate" "${REGION_ARG[@]}" --only-show-errors
+  fi
   # Manifest al final, sin cache para que el player relea el timeline en vivo.
   #
   # ffmpeg reescribe manifest.mpd en vivo cada segmento; si `aws s3 cp` lo lee a

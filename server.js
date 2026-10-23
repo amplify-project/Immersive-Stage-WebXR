@@ -781,6 +781,11 @@ async function handleAPI(req, res, pathname) {
 
     // ── Puente Insta360 → cámara virtual v4l2 (inicializar / parar / estado) ──
     if (pathname === '/api/bridge/start' && req.method === 'POST') {
+      // bridge.sh reloads v4l2loopback, which cannot happen while anything has
+      // /dev/video10 open: let go of the editor's own camera readers first.
+      if (bridge && bridge.proc) return sendJSON(res, 409, { error: 'El puente ya está en marcha' });
+      stopSnapshot();
+      if (videoPreview) await videoPreview.release();
       try { startBridge(); return sendJSON(res, 200, { ok: true }); }
       catch (e) { return sendJSON(res, 409, { error: e.message }); }
     }
@@ -847,8 +852,16 @@ async function handleAPI(req, res, pathname) {
     //  Respuesta diferida: el server contesta cuando el script termina (~DUR s).
     //  body.roi opcional: "w:h:x:y" en fracciones 0..1 (recorte de detección).
     if (pathname === '/api/monitor/measure' && req.method === 'POST') {
-      if (job && job.proc) return sendJSON(res, 409, { error: 'Hay un encode en marcha (' + job.mode + '). Párelo antes (audio ALSA exclusivo).' });
       const body = await readBody(req);
+      // A live is running: measure on its own output (what the players get),
+      // with the delay it was started with. Another encode holds the devices.
+      let liveRun = null;
+      if (job && job.proc) {
+        if (job.mode !== 'live') return sendJSON(res, 409, { error: 'Hay un encode en marcha (' + job.mode + '). Párelo antes (audio ALSA exclusivo).' });
+        if (measureProc) return sendJSON(res, 409, { error: 'Ya hay una medición en marcha.' });
+        const ev = k => ((new RegExp('(?:^| )' + k + '="([^"]*)"')).exec(job.env || '') || [])[1];
+        liveRun = { FROM_OUT: path.join(ROOT, ev('OUT') || 'encoded'), CUR_DELAY: ev('AUDIO_DELAY') || '0', SEG: ev('SEG') || '2' };
+      }
       let scene = {}; try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); } catch (_) {}
       const A = (scene.live && scene.live.audio) || {}, V = (scene.live && scene.live.video) || {};
       const fCh = Number(A.channels) || 32;
@@ -859,10 +872,18 @@ async function handleAPI(req, res, pathname) {
       const roiRel = (typeof body.roi === 'string' && /^(0(\.\d+)?|1(\.0+)?)(:(0(\.\d+)?|1(\.0+)?)){3}$/.test(body.roi)) ? body.roi : '';
       const mArgs = [A.device || 'hw:1,0', V.device || '/dev/video10'];
       console.log('[measure] CH=' + fCh + ' WCH=' + fWch + ' DUR=' + dur + (roiRel ? ' ROI_REL=' + roiRel : '') + ' bash measure_sync.sh ' + mArgs.join(' '));
-      stopSnapshot();   // libera vídeo+audio (compartidos)
-      await releaseCaptures('Measuring the A/V delay: it needs the audio device.');
+      if (!liveRun) {
+        stopSnapshot();   // libera vídeo+audio (compartidos)
+        await releaseCaptures('Measuring the A/V delay: it needs the audio device.');
+      }
       const proc = spawn('bash', [path.join(ROOT, 'measure_sync.sh'), ...mArgs],
-        { cwd: ROOT, detached: true, env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur), ...(roiRel ? { ROI_REL: roiRel } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+        { cwd: ROOT, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+          // The camera opened as the live opens it: without the input format a
+          // webcam falls back to a low mode, and its frame rate to whatever it has.
+          env: { ...process.env, CH: String(fCh), WCH: String(fWch), DUR: String(dur),
+                 FR: String(V.fr || 30), INFORMAT: V.informat || '', VSIZE: V.size || '',
+                 ...(liveRun || {}),
+                 ...(roiRel ? { ROI_REL: roiRel } : {}) } });
       measureProc = proc;
       let out = '', err = '', sent = false;
       const reply = (code, obj) => { if (sent) return; sent = true; sendJSON(res, code, obj); };
@@ -874,7 +895,9 @@ async function handleAPI(req, res, pathname) {
         const m = out.match(/A\/V delay\s*=\s*(-?\d+)\s*ms/i);
         if (m) return reply(200, { ok: true, delay: parseInt(m[1], 10), out: out.trim().slice(-400) });
         // Sin match: adjuntamos la cola del log (trae 'TA=… TV=…' de qué faltó).
-        reply(422, { error: 'No se pudo medir · ' + (out.trim().slice(-240) || err.trim() || 'sin salida') });
+        // The script's own "✗" line says what went wrong; fall back to the tail.
+        const fail = out.split('\n').filter(l => l.startsWith('✗')).pop();
+        reply(422, { error: 'No se pudo medir · ' + (fail || out.trim().slice(-240) || err.trim() || 'sin salida') });
       });
       return;   // respuesta diferida al exit del proceso (~DUR s)
     }

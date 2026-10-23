@@ -212,7 +212,7 @@
       <button class="ghost" id="btnRoi"      style="flex:0 0 auto" onclick="pickRoi()">📷 ROI</button>
       <span class="small" id="monStatus" style="opacity:.8">monitor stopped</span>
     </div>
-    <p class="hint"><b>📐 Auto-measure delay:</b> measures the offset automatically — it captures ~8 s while you give a <b>sharp clap</b> in front of the camera (a single action: the hit is heard and seen at once; a clapperboard works too), and fills the field with the ms (as an absolute value: the video always arrives late). No <code>DISPLAY</code> needed. Equivalent to <code>./measure_sync.sh</code>. <b>📷 ROI:</b> narrows the region of the frame where you'll clap to sharpen detection. ⚠ it uses the ALSA audio exclusively → stop it before going live.</p>
+    <p class="hint"><b>📐 Auto-measure delay:</b> measures the offset automatically — it captures ~8 s while you give a <b>sharp clap</b> in front of the camera (a single action: the hit is heard and seen at once; a clapperboard works too), and fills the field with the ms (as an absolute value: the video always arrives late). No <code>DISPLAY</code> needed. Equivalent to <code>./measure_sync.sh</code>. <b>📷 ROI:</b> narrows the region of the frame where you'll clap to sharpen detection. <b>Best with the live running:</b> it then measures on the live's own output (what the players get, ~12 s) and adds what is left to the delay the live runs with; the live keeps going, and you restart it with the new value. Without a live it opens the devices itself, which can differ from the live by a few hundred ms.</p>
     <div id="roiWrap" style="display:none;position:relative;width:100%;max-width:640px;margin-top:8px;line-height:0">
       <img id="roiImg" style="display:block;width:100%;border-radius:8px;background:#000">
       <canvas id="roiCanvas" style="position:absolute;inset:0;cursor:crosshair"></canvas>
@@ -1881,7 +1881,11 @@ async function pollStatus() {
   } else {
     badge.className='badge b-idle';
     badge.textContent = (s.exit===0)?'completed':(s.exit!=null&&s.exit!==0)?('exit '+s.exit):'idle';
-    $('statusLine').textContent = s.exit===0?'last encode OK':'';
+    // A run that stopped itself says why on a "✕" line (e.g. stream.sh's stall
+    // watchdog): show it here, not only buried in the log.
+    const why = s.exit ? (s.log || []).filter(l => l.startsWith('✕')).pop() : '';
+    $('statusLine').textContent = s.exit===0 ? 'last encode OK' : (why || '');
+    $('statusLine').style.color = why ? 'var(--err, #e5484d)' : '';
   }
   if (s.log && s.log.length){ const l=$('log'); l.textContent=s.log.join('\n'); l.scrollTop=l.scrollHeight; }
 }
