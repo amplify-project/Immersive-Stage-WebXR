@@ -41,9 +41,9 @@ CH="${CH:-32}"          # canales que abre el device de audio (X32 = 32)
 WCH="${WCH:-0}"         # canal a escuchar (W del FOA = omni; 0 en 1-2 ch)
 DUR="${DUR:-8}"         # segundos a capturar
 SKIP="${SKIP:-0.4}"     # s iniciales ignorados (el device abre con un pop/ruido)
-WIN="${WIN:-2.0}"       # s DESPUÉS del audio donde buscar el vídeo (llega tarde)
-PRE="${PRE:-0.2}"       # s ANTES del audio admitidos (el movimiento previo a la
-                        # palmada daba picos falsos y delays negativos imposibles)
+WIN="${WIN:-2.0}"       # s DESPUÉS del audio donde buscar el vídeo
+PRE="${PRE:-1.0}"       # s ANTES del audio: sobre el directo, con demasiado delay,
+                        # la imagen va por delante del sonido
 VMIN="${VMIN:-0.008}"   # movimiento mínimo aceptable del pico (rechaza el ruido)
 
 FR="${FR:-30}"           # fps a pedir a la cámara (la misma que el directo)
@@ -177,8 +177,13 @@ TV=$(ffmpeg -hide_banner -nostats -copyts -i "$VFILE" -an \
      | awk '/pts_time:/{t=$0; sub(/.*pts_time:/,"",t); sub(/[^0-9.].*/,"",t)}
             /scene_score=/{s=$0; sub(/.*scene_score=/,"",s); print t" "s}' \
      | awk -v ta="$TA" -v w="$WIN" -v pre="$PRE" -v vmin="$VMIN" '
-            ($1>=ta-pre && $1<=ta+w && $2+0>best){best=$2+0; bt=$1}
-            END{ if(best>=vmin) print bt }') || true
+            ($1>=ta-pre && $1<=ta+w){n++; t[n]=$1; v[n]=$2+0; if (v[n]>best){best=v[n]; bi=n}}
+            END{ if (best < vmin) exit
+                 # The CONTACT, not the peak: the hands move fastest just before
+                 # they meet, then stop. The last frame of that burst (still
+                 # above a quarter of its peak) is the one where they touch.
+                 c=bi; while (c<n && v[c+1] >= best/4) c++
+                 print t[c] }') || true
 
 echo "────────────────────────────────────────────"
 if [ -z "${TV:-}" ]; then
