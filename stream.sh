@@ -578,13 +578,54 @@ case "$MODE" in
     fi
     REMOVE=1; [[ "${KEEP:-0}" == "1" ]] && REMOVE=0
     # ── Publicación a S3 en paralelo (si S3_BUCKET está definido) ────────────
-    UPLOADER_PID=""
+    UPLOADER_PID="" WATCH_PID=""
+    trap 'for p in $UPLOADER_PID $WATCH_PID; do kill "$p" 2>/dev/null; done; true' EXIT INT TERM
     if [[ -n "${S3_BUCKET:-}" ]]; then
       echo "  publishing → $S3_BUCKET   (upload-s3.sh en background)"
       OUT="$OUT" S3_BUCKET="$S3_BUCKET" REGION="${S3_REGION:-}" INTERVAL="${S3_INTERVAL:-1}" \
         bash upload-s3.sh &
       UPLOADER_PID=$!
-      trap '[[ -n "$UPLOADER_PID" ]] && kill "$UPLOADER_PID" 2>/dev/null || true' EXIT INT TERM
+    fi
+    # ── Stall watchdog ──────────────────────────────────────────────────────
+    #  A capture device that drops off the USB bus does not always make ffmpeg
+    #  fail: it keeps the dead handle, stops that track and goes on publishing
+    #  the others. The manifest then names an audio (or video) that never moves,
+    #  players freeze, and nothing reports an error. So watch the segments each
+    #  representation writes: if one stops for STALL_S while the stream is up
+    #  (or all of them stop), stop ffmpeg and exit with a message that names it.
+    #  STALL_S=0 turns it off.
+    STALL_S="${STALL_S:-$(( SEG * 4 > 10 ? SEG * 4 : 10 ))}"
+    STALL_FILE="$OUT/.stall"; rm -f "$STALL_FILE"; touch "$STALL_FILE.start"
+    if (( STALL_S > 0 )); then
+      ( set +e
+        declare -A LAST=() KIND=()
+        while sleep "$SEG"; do
+          now=$(date +%s); newest=0
+          # Newest segment per representation of THIS run (chunk_<session>_<rep>_<n>.<ext>).
+          while read -r mt name; do
+            rep="${name#chunk_*_}"; rep="${rep%%_*}"; mt="${mt%.*}"
+            (( mt > ${LAST[$rep]:-0} )) && LAST[$rep]=$mt
+            case "$name" in *.webm) KIND[$rep]=audio ;; *) KIND[$rep]=video ;; esac
+          done < <(find "$OUT" -maxdepth 1 -name 'chunk_*' -newer "$STALL_FILE.start" -printf '%T@ %f\n' 2>/dev/null)
+          (( ${#LAST[@]} )) || continue
+          for r in "${!LAST[@]}"; do (( LAST[$r] > newest )) && newest=${LAST[$r]}; done
+          why=""
+          if (( now - newest > STALL_S )); then
+            why="no track has written a segment for $(( now - newest )) s (capture or encoder frozen)"
+          else
+            for r in "${!LAST[@]}"; do
+              (( newest - LAST[$r] > STALL_S )) &&
+                why+="${why:+, }representation $r (${KIND[$r]}) stopped $(( now - LAST[$r] )) s ago"
+            done
+            [[ -n "$why" ]] && why+=" while the rest keeps going: its capture device probably dropped off (USB) or was taken by another program"
+          fi
+          if [[ -n "$why" ]]; then
+            echo "$why" > "$STALL_FILE"
+            pkill -INT -P $$ -x ffmpeg; sleep 3; pkill -KILL -P $$ -x ffmpeg
+            exit 0
+          fi
+        done ) &
+      WATCH_PID=$!
     fi
     if [[ "$CAPTURE" == "1" ]]; then build_inputs_capture; else build_inputs live; fi
     assemble_venc VID_LIVE
@@ -610,7 +651,15 @@ case "$MODE" in
       "${DASH_COMMON[@]}" -adaptation_sets "$AS_STR" \
       "${LIVE_LL[@]}" \
       "${WIN[@]}" -remove_at_exit "$REMOVE" \
-      "$OUT/manifest.mpd"
+      "$OUT/manifest.mpd" || rc=$?
+    rm -f "$STALL_FILE.start"
+    if [[ -f "$STALL_FILE" ]]; then
+      echo "✕ LIVE STOPPED: $(cat "$STALL_FILE")." >&2
+      echo "  Players would have frozen with no error. Fix the device, then start the live again." >&2
+      rm -f "$STALL_FILE"
+      exit 3
+    fi
+    exit "${rc:-0}"
     ;;
 
   *)

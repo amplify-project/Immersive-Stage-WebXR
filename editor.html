@@ -1881,7 +1881,11 @@ async function pollStatus() {
   } else {
     badge.className='badge b-idle';
     badge.textContent = (s.exit===0)?'completed':(s.exit!=null&&s.exit!==0)?('exit '+s.exit):'idle';
-    $('statusLine').textContent = s.exit===0?'last encode OK':'';
+    // A run that stopped itself says why on a "✕" line (e.g. stream.sh's stall
+    // watchdog): show it here, not only buried in the log.
+    const why = s.exit ? (s.log || []).filter(l => l.startsWith('✕')).pop() : '';
+    $('statusLine').textContent = s.exit===0 ? 'last encode OK' : (why || '');
+    $('statusLine').style.color = why ? 'var(--err, #e5484d)' : '';
   }
   if (s.log && s.log.length){ const l=$('log'); l.textContent=s.log.join('\n'); l.scrollTop=l.scrollHeight; }
 }
