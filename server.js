@@ -10,6 +10,9 @@ const ROOT = __dirname;
 const MEDIA_DIR = path.join(ROOT, 'media');
 const MESH_DIR = path.join(ROOT, 'meshes');
 const SCENE_FILE = path.join(ROOT, 'scene.json');
+// Bumped when a player patches musician positions (/api/scene/stems); the
+// editor polls it to reload them. In memory: a restart just triggers a reload.
+let sceneStemsRev = 0;
 const RECORDINGS_DIR = path.join(ROOT, 'recordings');
 
 const MIME = {
@@ -368,6 +371,24 @@ function readBody(req) {
   });
 }
 
+// Close-up tracks in stream.sh order (= Representation 1..N; the player rebuilds
+// the same stem→track map from the stems that have one). A stem's `closeup` is a
+// video file, or 'crop': a flat view cut from the 360 itself, aimed with the
+// stem's calibrated angles. Its width is `cropFovDeg`, or follows the size of
+// the musician's hit area (4 × hitDeg, 8° by default → 32°).
+// A close-up pointing at the 360 FILE is not one: ffmpeg would open and decode
+// the whole equirect again per stem (1000% CPU with three, NVENC stalled).
+function closeupList(scene) {
+  return (scene.stems || [])
+    .filter(s => s.closeup && s.closeup !== scene.video)
+    .map(s => {
+      const name = String(s.name || '').replace(/[;"\\]/g, '');
+      if (s.closeup !== 'crop') return { src: s.closeup, name };
+      const fov = +s.cropFovDeg > 0 ? +s.cropFovDeg : Math.max(20, Math.min(90, 4 * (+s.hitDeg || 8)));
+      return { src: `crop:${+s.azimuthDeg || 0}:${+s.elevationDeg || 0}:${fov}`, name };
+    });
+}
+
 async function handleAPI(req, res, pathname) {
   try {
     // ── Medios disponibles ──────────────────────────────────────────────────
@@ -498,6 +519,23 @@ async function handleAPI(req, res, pathname) {
       return sendJSON(res, 200, { ok: true });
     }
 
+    // ── Per-frame render trace (?arperf=1) ──────────────────────────────────
+    // The headset has no console during an immersive session, so the player
+    // posts each 2 s window here. One JSONL file per XR session in perflog/,
+    // to be read with tools/perf-analyze.js.
+    if (pathname === '/api/perflog' && req.method === 'POST') {
+      const body = await readBody(req);
+      const id = String(body.session || 'unknown').replace(/[^\w.-]/g, '_');
+      const dir = path.join(ROOT, 'perflog');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, `perf-${id}.jsonl`), JSON.stringify(body) + '\n');
+      const s = body.summary;
+      if (s) console.log(`[perflog] ${id} ${s.fps} fps · ${s.slow} slow · gpu ${s.gpuAvg ?? '-'} ms` +
+        ` (worst ${s.gpuWorst ?? '-'}) · hands ${s.hands} pads ${s.pads} · head max ${s.headMax}°/s`);
+      else console.log(`[perflog] ${id} session info: ${JSON.stringify(body.info)}`);
+      return sendJSON(res, 200, { ok: true });
+    }
+
     // ── Dispositivos de captura para LIVE (v4l2 + ALSA) ─────────────────────
     if (pathname === '/api/devices' && req.method === 'GET') {
       const [video, audio] = await Promise.all([listVideoDevices(), listAudioDevices()]);
@@ -514,6 +552,38 @@ async function handleAPI(req, res, pathname) {
       const scene = await readBody(req);
       fs.writeFileSync(SCENE_FILE, JSON.stringify(scene, null, 2));
       return sendJSON(res, 200, { ok: true });
+    }
+
+    // ── Musician positions edited from a player (?stemmarks / debug mode) ───
+    // scene.json belongs to the editor, which saves its whole in-memory copy.
+    // So a player only patches three fields of a stem here, and bumps a
+    // counter the editor polls (GET /api/scene/rev): when it moves, the editor
+    // reloads those fields, and its next save keeps them instead of undoing
+    // them. The name is checked so an index from a stale page cannot write
+    // over a different musician.
+    if (pathname === '/api/scene/stems' && req.method === 'POST') {
+      const { stems } = await readBody(req);
+      let scene;
+      try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); }
+      catch (_) { return sendJSON(res, 400, { error: 'No hay scene.json guardada' }); }
+      if (!Array.isArray(scene.stems) || !Array.isArray(stems))
+        return sendJSON(res, 400, { error: 'no stems' });
+      const num = v => (typeof v === 'number' && isFinite(v)) ? v : undefined;
+      for (const p of stems) {
+        let s = scene.stems[p.i];
+        if (p.name != null && (!s || s.name !== p.name)) s = scene.stems.find(x => x.name === p.name);
+        if (!s) return sendJSON(res, 409, { error: `musician ${p.name ?? p.i} is not in scene.json` });
+        if (num(p.azimuthDeg) !== undefined)   s.azimuthDeg = p.azimuthDeg;
+        if (num(p.elevationDeg) !== undefined) s.elevationDeg = p.elevationDeg;
+        if (num(p.hitDeg) !== undefined)       s.hitDeg = p.hitDeg;
+      }
+      fs.writeFileSync(SCENE_FILE, JSON.stringify(scene, null, 2));
+      sceneStemsRev++;
+      console.log(`[scene] stems patched from a player: ${stems.map(p => `${p.name ?? p.i} az ${p.azimuthDeg} el ${p.elevationDeg} hit ${p.hitDeg}`).join(', ')}`);
+      return sendJSON(res, 200, { ok: true, rev: sceneStemsRev });
+    }
+    if (pathname === '/api/scene/rev' && req.method === 'GET') {
+      return sendJSON(res, 200, { stemsRev: sceneStemsRev });
     }
 
     // ── Lanzar encode (VOD / LIVE) usando stream.sh ─────────────────────────
@@ -567,6 +637,9 @@ async function handleAPI(req, res, pathname) {
           // '-' = no live channel: stream.sh outputs silence there. Never '', or bash drops
           // the trailing empties and the stem count no longer matches scene.stems.
           STEM_CH: (scene.stems || []).map(s => (Number.isInteger(s.channel) ? s.channel : '-')).join(','),
+          // Live has no close-up files, but it can crop them from the 360 itself.
+          CLOSEUPS: closeupList(scene).filter(c => c.src.startsWith('crop:')).map(c => c.src).join(';'),
+          CLOSEUP_NAMES: closeupList(scene).filter(c => c.src.startsWith('crop:')).map(c => c.name).join(';'),
         };
       } else {
         // ── VOD (o live de bucle de archivos) desde archivos ────────────────
@@ -582,9 +655,8 @@ async function handleAPI(req, res, pathname) {
           // Un close-up que apunta al PROPIO vídeo 360 no es un close-up: hace
           // que ffmpeg abra y decodifique otra vez el equirect entero por cada
           // stem (1000% de CPU con tres, y NVENC casi parado). Se descarta.
-          CLOSEUPS: (scene.stems || [])
-            .filter(s => s.closeup && s.closeup !== scene.video)
-            .map(s => s.closeup).join(';'),
+          CLOSEUPS: closeupList(scene).map(c => c.src).join(';'),
+          CLOSEUP_NAMES: closeupList(scene).map(c => c.name).join(';'),
         };
         const bogus = (scene.stems || []).filter(s => s.closeup && s.closeup === scene.video);
         if (bogus.length)

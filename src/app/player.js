@@ -1,5 +1,7 @@
 import { ImmersiveAudioEngine } from '../audio/ImmersiveAudioEngine.js';
 import { Telemetry } from '../telemetry/Telemetry.js';
+import { RayPointer, XRMenu, RAY_CONE } from './xr-input.js';
+import { CloseupWC } from './closeup-wc.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 //  El motor de audio inmersivo (clases HOAST*, matriz de zoom) vive ahora en
@@ -40,12 +42,35 @@ let closeupArmSince = 0;             // desde cuándo es el candidato (performan
 let closeupFade  = 0;                // 0..1, cuánto ha entrado el panel
 let closeupLastT = 0;                // reloj de la transición (performance.now, ms)
 let closeupRepByStem = {};           // índice de stem → RepresentationID del MPD
+// RepresentationID → where that close-up was cut from the 360 ({azimuthDeg,
+// elevationDeg, hFovDeg, vFovDeg}, from closeups.json), for the crops only. A
+// crop is shown ON the sphere, over the very patch it came from; a close-up
+// video is shown on the floating panel.
+let closeupCropByRep = {};
+let closeupPlaced = undefined;       // what the mesh is placed for ('<stem>:panel|crop'), undefined = re-place
+// The close-up's frames come from WebCodecs (CloseupWC), slaved to the 360's
+// clock, when the browser has VideoDecoder; otherwise from a second Shaka on
+// closeupEl, kept in step by the sync loop. ?cuwc=0 forces the second.
+let closeupWC = null;
+const CU_WC = new URLSearchParams(location.search).get('cuwc') !== '0';
+// Tap on the close-up: a bit more zoom. A panel grows by this factor; a crop
+// (on the sphere) takes the VR zoom further, or the desktop FOV narrower.
+let closeupZoom = 1, closeupZoomGoal = 1, cuDeskFov = null;
+const CLOSEUP_MORE = 1.6;
+const VR_PINCH_ZOOM_MORE = 62;
+const CLOSEUP_TARGET = 999;          // what the pointer's pick returns for the close-up itself
 
 // Transición del close-up: ni aparece ni desaparece de golpe. Entra subiendo
 // opacidad y escala a la vez —el panel "se acerca" en vez de encenderse— y sale
 // por el mismo camino. Un cuarto de segundo es suficiente para que no dé un
 // respingo y poco para que no llegue tarde a lo que estás mirando.
 const CLOSEUP_FADE_S   = 0.25;
+// Close-up ↔ 360 sync (see the sync loop): error in seconds, + = close-up ahead.
+//   err 0.1 s → 15% faster/slower; capped at 30%, so 0.5 s is made up in ~2 s.
+//   Within `dead` (about one frame at 24-30 fps) nothing is touched.
+// Runs in the 250 ms sync loop shared with the audio controller (tuned for
+// that tick, so it is not changed for this).
+const CLOSEUP_SYNC = { dead: 0.03, kp: 1.5, cap: 0.3, hardSeek: 1.5 };
 const CLOSEUP_SCALE_IN = 0.92;       // escala con la que entra y a la que se va
 
 // Histéresis del foco: hace falta un peso de ENTER para sacar el panel, pero
@@ -83,6 +108,92 @@ let deviceOrientation = {alpha:0, beta:90, gamma:0};
 let ambiAnalyser = null, ambiTimeDomain = null;
 let syncInterval = null;
 let xrZoomDist = 0;   // acercamiento en VR (joystick derecho), 0 = sin zoom
+// Ray and pinch (src/app/xr-input.js). In VR, a pinch on a musician zooms in
+// to THEM: the sphere moves along that musician's direction, not along the
+// head's, so the zoom stays on them while you look around, and their close-up
+// shows. A pinch on nothing zooms back out. The joystick still works and
+// cancels the goal.
+let xrZoomGoal = null;               // target xrZoomDist set by a pinch, or null
+let xrZoomStem = -1;                 // musician zoomed in by a pinch, or -1
+let xrZoomDir  = null;               // THREE.Vector3 the sphere moves along; null = the head's forward
+// Whether the zoom moves the 360 sphere. A pinch on a musician whose close-up
+// is a panel does NOT: the picture jumping under you while you look at it
+// confused people, and the panel already is the "closer" view. So the zoom
+// there is only audio (spotlight) + the panel, and the 360 stays put. A crop
+// close-up still needs it (it lies on the sphere), and so does the stick.
+// ?vrzoom=move brings back moving the sphere on every pinch.
+const VR_ZOOM_MOVE = new URLSearchParams(location.search).get('vrzoom') === 'move';
+let xrZoomMoves = true;
+// The musician the pinch zoom's audio spotlight belongs to. It outlives
+// xrZoomStem through the zoom-out, so the soloist fades with the zoom instead of
+// switching to whoever the head happens to face on the way out.
+let xrSpotStem = -1;
+const xrZoomDirGoal = [0, 0, -1];    // where xrZoomDir is easing to
+// A pinch zoom is a tween of fixed duration from where it was (distance and
+// direction) to where it is going, on an ease-in-out curve: it starts and lands
+// softly and always takes the same time. The exponential ease it replaces
+// lurched off fast and then crept the last metres, which is when the close-up
+// crop fades in — the part that most needs to be smooth.
+let xrZoomFrom = 0, xrZoomT0 = 0;
+const xrZoomDirFrom = new THREE.Vector3(0, 0, -1);
+function xrZoomTo(goal) {
+  xrZoomFrom = xrZoomDist;
+  xrZoomT0 = performance.now();
+  if (xrZoomDir) xrZoomDirFrom.copy(xrZoomDir);
+  xrZoomGoal = goal;
+}
+let xrLastT    = 0;                  // XR frame clock for the zoom easing (ms)
+let pointer = null, xrMenu = null;
+let xrLastPose = null;               // viewer pose of the last XR frame (to place the menu)
+let xrPending  = null;               // 'vr' | 'ar': mode to enter once the current session has ended
+let vrOk = false, arOk = false;      // what this browser/headset supports (checkWebXR)
+const _zoomFwd = new THREE.Vector3(), _zoomQ = new THREE.Quaternion();   // per-frame temps
+// Perf experiments (the ray costs frames on the Quest; these isolate why):
+//   ?nojoints=1  do not request 'hand-tracking'. Hands should still give a ray
+//                and pinch, just without the 25 joint poses per hand per frame,
+//                which we no longer read.
+//   ?noray=1     keep the ray logic (pick, pinch, menu) but draw nothing.
+const XR_NO_JOINTS = new URLSearchParams(location.search).get('nojoints') === '1';
+const XR_NO_RAY    = new URLSearchParams(location.search).get('noray') === '1';
+//   ?aim=hand    aim with each hand's system ray instead of the head (default:
+//                look at a musician and pinch).
+const XR_AIM       = new URLSearchParams(location.search).get('aim') === 'hand' ? 'hand' : 'head';
+const HAND_FEATS   = XR_NO_JOINTS ? [] : ['hand-tracking'];
+
+// Headroom experiments. With hands in view and the head turning fast, the
+// Quest's own hand tracking competes with us for the same CPU/GPU, and the
+// 4K decode already takes most of it. We cannot make the tracking cheaper, only
+// leave it room:
+//   ?xrfps=72    ask for 72 Hz instead of 90: 13.9 ms per frame instead of
+//                11.1, and a steady 72 looks better than 90 dropping to 50.
+//   ?fovea=1     fixed foveated rendering, 0..1: fewer pixels shaded at the
+//                edges of the lenses, where they are blurred anyway.
+//   ?xrscale=0.8 render the eye buffers at 80% resolution.
+const _xrq = new URLSearchParams(location.search);
+const XR_FPS   = Number(_xrq.get('xrfps')) || 0;
+const XR_FOVEA = _xrq.has('fovea') ? Math.min(1, Math.max(0, Number(_xrq.get('fovea')) || 0)) : null;
+const XR_SCALE = Number(_xrq.get('xrscale')) || 0;
+
+// Before setSession: the framebuffer scale is read when the layer is made.
+function xrHeadroomBefore() {
+  if (XR_SCALE > 0) renderer.xr.setFramebufferScaleFactor(XR_SCALE);
+}
+
+// After setSession: the layer exists, and so does the session's frame rate.
+function xrHeadroomAfter(session) {
+  const layer = session.renderState && session.renderState.baseLayer;
+  if (XR_FOVEA != null && layer && 'fixedFoveation' in layer) layer.fixedFoveation = XR_FOVEA;
+  if (XR_FPS && session.updateTargetFrameRate) {
+    const rates = session.supportedFrameRates ? Array.from(session.supportedFrameRates) : [];
+    // The nearest rate the headset offers: asking for one it lacks rejects.
+    const want = rates.length ? rates.reduce((a, b) => Math.abs(b - XR_FPS) < Math.abs(a - XR_FPS) ? b : a) : XR_FPS;
+    session.updateTargetFrameRate(want).catch(e => console.warn('[xr] frame rate:', e.message));
+  }
+  console.log('[xr] headroom: fps', XR_FPS || 'default', '· fovea', XR_FOVEA ?? 'default',
+              '· scale', XR_SCALE || 1, '· rates', session.supportedFrameRates ? Array.from(session.supportedFrameRates).join('/') : '?');
+}
+const VR_PINCH_ZOOM = 40;            // where a pinch zooms to: full spotlight boost (see zoomN)
+const VR_ZOOM_S     = 0.8;           // s: how long a pinch zoom (in or out) takes
 let telemetry    = null;             // Telemetry: pose de cabeza → relay externo (opt-in)
 let telemetryCfg = null;             // bloque telemetry de scene.json
 let voice        = null;             // VoiceRecorder: micro del participante → /voice (opt-in)
@@ -152,12 +263,28 @@ function initThree() {
   camera.add(closeupMesh);
   scene.add(camera);                   // necesario para que los hijos se rendericen
 
+  // Hands-free input for both XR modes; nothing of it shows on desktop.
+  xrMenu = new XRMenu(scene, xrMenuChoose);
+  pointer = new RayPointer(scene, {
+    pick: (o, d) => pickStem(o, d),
+    targetPos: xrStemWorldPos,
+    onTap: xrSelect,
+    onHold: xrOpenMenu,
+    menu: xrMenu,
+    grab: markGrabXR,
+    hidden: XR_NO_RAY,
+    aim: XR_AIM,
+    targetDir: xrStemDirFrom,
+  });
+
   window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
   });
 
+  setupStemMarkMouse();          // before the view's handlers: it claims clicks on a ring
+  setupCloseupClick();
   setupPointerControls();
   setupGyro();
   checkWebXR();
@@ -215,8 +342,13 @@ function sampleScreenTelemetry() {
 // ══════════════════════════════════════════════════════
 // RENDER LOOP
 // ══════════════════════════════════════════════════════
-function renderLoop() {
-  if (!renderer.xr.isPresenting) {
+function renderLoop(time) {
+  const desk = !renderer.xr.isPresenting;
+  // ?arperf=1 also measures the flat page: on the Quest the 2D page plays the
+  // video sluggishly while VR is smooth, and only the same trace in both modes
+  // says which part differs.
+  const _p0 = (ARPERF && desk && time) ? perfDeskStart(time) : 0;
+  if (desk) {
     requestAnimationFrame(renderLoop);
     applyRotation();
     sampleScreenTelemetry();
@@ -228,7 +360,15 @@ function renderLoop() {
   updateCloseupAnim();
   updateAmbiViz();
   updateSpotLog();
+  updateStemMarks();
+  const _p2 = _p0 ? perfRenderBegin() : 0;
   renderer.render(scene, camera);
+  if (_p0) perfFrameEnd(_p0, _p2, time);
+}
+
+function perfDeskStart(time) {
+  if (_trace.mode !== '2d') { _perf.t0 = _perf.lastT = 0; perfTraceStart('2d'); }
+  return perfFrameStart(time);
 }
 
 // ── HUD del spotlight (?spotlog=1) ─────────────────────────────────────────
@@ -245,7 +385,7 @@ const SPOTLOG = new URLSearchParams(location.search).get('spotlog') === '1';
 // passthrough o en el hilo de audio (seis panners HRTF interpolando HRIRs
 // mientras te desplazas), y no hay nada que optimizar aquí. Si el que sube es un
 // tramo concreto, ese es el culpable y tiene arreglo.
-const ARPERF = new URLSearchParams(location.search).get('arperf') === '1';
+let ARPERF = new URLSearchParams(location.search).get('arperf') === '1';
 
 // ?synclog=1 — el error de sincronía, DENTRO de las gafas.
 //
@@ -309,7 +449,193 @@ const _shared = { ok: 0, nulls: 0, resets: 0, everOk: false, yawDeg: 0, lastRese
 function syncReading() {
   return (window.syncDiag && window.syncDiag()) || null;
 }
-const _perf = { n: 0, t0: 0, worst: 0, sum: 0, audio: 0, focus: 0, render: 0, worstAt: '', vf0: -1 };
+const _perf = { n: 0, t0: 0, worst: 0, sum: 0, audio: 0, focus: 0, render: 0, worstAt: '', vf0: -1,
+                lastT: 0, slow: 0, cf0: -1 };
+
+// ?arperf=1 works in VR too. Two loops share these two helpers, so the numbers
+// mean the same in both.
+//
+// `slow` counts frames that arrived more than 1.5 frame periods after the
+// previous one, i.e. frames the headset had to drop or reproject. That is the
+// number that matches "it stutters when I turn": our JavaScript can be cheap
+// while the GPU or the video decoders miss the frame anyway, and then only the
+// interval between frames shows it.
+function perfFrameStart(time) {
+  if (_perf.lastT) {
+    const rate = renderer.xr.getSession()?.frameRate || 72;
+    if (time - _perf.lastT > 1.5 * 1000 / rate) _perf.slow++;
+  }
+  _perf.lastT = time;
+  return performance.now();
+}
+
+// ── Per-frame trace (?arperf=1) ─────────────────────────────────────────────
+// The window summary says THAT frames drop; this says what each dropped frame
+// had in common. One row per frame, posted to /api/perflog every 2 s and read
+// with tools/perf-analyze.js:
+//   dt   interval since the previous frame (ms) — > 1.5 periods = dropped
+//   js   our JavaScript before render (ms)
+//   rd   renderer.render() on the CPU (ms)
+//   gpu  GPU time of renderer.render() (ms), from EXT_disjoint_timer_query_webgl2
+//        when the browser exposes it; null otherwise or while still pending
+//   v/cu 1 when the 360 / close-up texture was re-uploaded in this frame
+//   w    head angular speed (deg/s)
+//   dc   draw calls of the frame
+// Each window also carries how many hands and controllers were tracked, so
+// "hands vs controllers" and "turning vs still" can be split afterwards.
+const _trace = { rows: [], session: '', gl: null, ext: null, q: null, pend: [],
+                 ev: [], ver: -1, cuVer: -1, qx: 0, qy: 0, qz: 0, qw: 1, lastT: 0, row: null, gpuOk: false };
+
+function perfTraceStart(mode = 'xr') {
+  _trace.mode = mode;
+  _trace.session = new Date().toISOString().replace(/[:.]/g, '-');
+  _trace.rows = []; _trace.pend = []; _trace.ev = []; _trace.lastT = 0;
+  _trace.ct0 = videoEl ? videoEl.currentTime : 0; _trace.wall0 = performance.now();
+  const gl = _trace.gl = renderer.getContext();
+  _trace.ext = (gl.getExtension && gl.getExtension('EXT_disjoint_timer_query_webgl2')) || null;
+  _trace.gpuOk = !!_trace.ext && typeof gl.createQuery === 'function';
+  const s = renderer.xr.getSession();
+  const bl = s && s.renderState && s.renderState.baseLayer;
+  const dbg = gl.getExtension && gl.getExtension('WEBGL_debug_renderer_info');
+  perfPost({ info: {
+    ua: navigator.userAgent,
+    gpu: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    gpuTimer: _trace.gpuOk,
+    frameRate: s && s.frameRate, supportedFrameRates: s && s.supportedFrameRates && [...s.supportedFrameRates],
+    fb: bl ? [bl.framebufferWidth, bl.framebufferHeight] : null,
+    foveation: bl && bl.fixedFoveation,
+    blend: s && s.environmentBlendMode,
+    video: videoEl ? [videoEl.videoWidth, videoEl.videoHeight] : null,
+    closeup: closeupEl ? [closeupEl.videoWidth, closeupEl.videoHeight] : null,
+    url: location.search, mode,
+    canvas: [renderer.domElement.width, renderer.domElement.height], dpr: devicePixelRatio,
+  } });
+}
+
+// Segment requests and responses of a Shaka player, with byte counts, on the
+// same clock as the frame rows (`t`), so drops can be lined up with downloads.
+function perfWatchNet(player, tag) {
+  if (!ARPERF) return;
+  const ne = player.getNetworkingEngine && player.getNetworkingEngine();
+  if (!ne) return;
+  const SEG = shaka.net.NetworkingEngine.RequestType.SEGMENT;
+  ne.registerRequestFilter((type, req) => {
+    if (_trace.ev.length > 500) _trace.ev.shift();   // outside XR nobody flushes
+    if (type === SEG) _trace.ev.push({ t: Math.round(performance.now()), k: tag + '>', u: String(req.uris[0]).split('/').pop() });
+  });
+  ne.registerResponseFilter((type, resp) => {
+    if (type === SEG) _trace.ev.push({ t: Math.round(performance.now()), k: tag + '<', u: String(resp.uri).split('/').pop(),
+                                       b: resp.data ? resp.data.byteLength : 0 });
+  });
+}
+
+function perfPost(body) {
+  body.session = _trace.session;
+  fetch('/api/perflog', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify(body) }).catch(() => {});
+}
+
+// Called right before renderer.render(): opens the GPU query and notes whether
+// this render is going to upload a new video frame (three bumps
+// texture.version on needsUpdate and uploads at the next draw that uses it).
+function perfRenderBegin() {
+  const t = performance.now();
+  const row = _trace.row = { dt: 0, js: 0, rd: 0, gpu: null, v: 0, cu: 0, w: 0, dc: 0 };
+  if (videoTexture && sphere && sphere.visible) {
+    row.v = videoTexture.version !== _trace.ver ? 1 : 0; _trace.ver = videoTexture.version;
+  }
+  if (closeupTexture && closeupMesh && closeupMesh.visible) {
+    row.cu = closeupTexture.version !== _trace.cuVer ? 1 : 0; _trace.cuVer = closeupTexture.version;
+  }
+  if (_trace.gpuOk && !_trace.q) {
+    const gl = _trace.gl, q = gl.createQuery();
+    gl.beginQuery(_trace.ext.TIME_ELAPSED_EXT, q);
+    _trace.q = q; _trace.pend.push({ q, row });
+  }
+  return t;
+}
+
+function perfTraceFrame(time, p0, p2, end) {
+  const row = _trace.row; if (!row) return;
+  _trace.row = null;
+  const gl = _trace.gl;
+  if (_trace.q) { gl.endQuery(_trace.ext.TIME_ELAPSED_EXT); _trace.q = null; }
+  // Results arrive a few frames later and in order; a disjoint event (GPU
+  // frequency change, context switch) invalidates the ones in flight.
+  if (_trace.pend.length) {
+    const disjoint = gl.getParameter(_trace.ext.GPU_DISJOINT_EXT);
+    while (_trace.pend.length) {
+      const p = _trace.pend[0];
+      if (!gl.getQueryParameter(p.q, gl.QUERY_RESULT_AVAILABLE)) break;
+      if (!disjoint) p.row.gpu = +(gl.getQueryParameter(p.q, gl.QUERY_RESULT) / 1e6).toFixed(2);
+      gl.deleteQuery(p.q); _trace.pend.shift();
+    }
+    if (_trace.pend.length > 16) {               // never answered: stop asking
+      _trace.pend.forEach(p => gl.deleteQuery(p.q)); _trace.pend = []; _trace.gpuOk = false;
+    }
+  }
+  row.t = Math.round(time);
+  row.dt = _trace.lastT ? +(time - _trace.lastT).toFixed(1) : 0;
+  _trace.lastT = time;
+  row.js = +(p2 - p0).toFixed(2); row.rd = +(end - p2).toFixed(2);
+  row.dc = renderer.info.render.calls;
+  // Close-up vs 360 (ms, + = close-up ahead), while one is on screen.
+  if (closeupWC) { if (closeupStem >= 0 && closeupFade > 0 && closeupWC.lagMs != null) row.ce = closeupWC.lagMs; }
+  else if (closeupStem >= 0 && closeupFade > 0 && !closeupEl.paused)
+    row.ce = Math.round((closeupEl.currentTime - videoEl.currentTime) * 1000);
+  // In XR, three r128 copies the head pose into `camera` inside render().
+  const q = camera.quaternion;
+  const dot = Math.min(1, Math.abs(q.x * _trace.qx + q.y * _trace.qy + q.z * _trace.qz + q.w * _trace.qw));
+  if (row.dt) row.w = Math.round((2 * Math.acos(dot) * 180 / Math.PI) / (row.dt / 1000));
+  _trace.qx = q.x; _trace.qy = q.y; _trace.qz = q.z; _trace.qw = q.w;
+  _trace.rows.push(row);
+}
+
+function perfTraceFlush(win) {
+  if (!_trace.session) return;
+  let hands = 0, pads = 0;
+  const s = renderer.xr.getSession();
+  if (s) for (const src of s.inputSources) { if (src.hand) hands++; else if (src.gamepad) pads++; }
+  const rows = _trace.rows; _trace.rows = [];
+  const ev = _trace.ev; _trace.ev = [];
+  const g = rows.map(r => r.gpu).filter(x => x != null);
+  // Media seconds per wall second: ~1.0 = the video runs at real speed (any
+  // sluggishness is in how often the picture is redrawn); < 1 = it really
+  // plays slower (stalls, rate control).
+  const now = performance.now(), ct = videoEl ? videoEl.currentTime : 0;
+  const vrate = videoEl && now > _trace.wall0 ? +((ct - _trace.ct0) / ((now - _trace.wall0) / 1000)).toFixed(3) : null;
+  _trace.ct0 = ct; _trace.wall0 = now;
+  perfPost({ summary: {
+    ...win, hands, pads, mode: _trace.mode, vrate,
+    rate: videoEl ? videoEl.playbackRate : null, paused: videoEl ? videoEl.paused : null,
+    ready: videoEl ? videoEl.readyState : null,
+    gpuAvg: g.length ? +(g.reduce((a, b) => a + b, 0) / g.length).toFixed(2) : null,
+    gpuWorst: g.length ? Math.max(...g) : null,
+    headMax: rows.reduce((a, r) => Math.max(a, r.w), 0),
+    cuErrAvg: (() => { const c = rows.filter(r => r.ce != null); return c.length ? Math.round(c.reduce((a, r) => a + Math.abs(r.ce), 0) / c.length) : null; })(),
+    cuErrMax: (() => { const c = rows.filter(r => r.ce != null); return c.length ? Math.max(...c.map(r => Math.abs(r.ce))) : null; })(),
+    dropped360: (videoEl && videoEl.getVideoPlaybackQuality) ? videoEl.getVideoPlaybackQuality().droppedVideoFrames : null,
+    mem: { tex: renderer.info.memory.textures, geo: renderer.info.memory.geometries },
+  }, rows, ev });
+}
+
+function perfFrameEnd(p0, p2, time) {
+  const end = performance.now(), total = end - p0;
+  perfTraceFrame(time, p0, p2, end);
+  _perf.render += end - p2; _perf.sum += total; _perf.n++;
+  if (total > _perf.worst) {
+    _perf.worst = total;
+    // El reparto del PEOR frame es lo que dice dónde se fue el tiempo.
+    _perf.worstAt = `js ${(p2 - p0).toFixed(1)} / render ${(end - p2).toFixed(1)}`;
+  }
+  arPerfReport(end);
+}
+
+function closeupDecodedFrames() {
+  if (closeupWC) return closeupWC.decoded;
+  const q = closeupEl && closeupEl.getVideoPlaybackQuality && closeupEl.getVideoPlaybackQuality();
+  return q ? q.totalVideoFrames : -1;
+}
 
 // Fotogramas de vídeo que el navegador lleva DECODIFICADOS. En AR la esfera está
 // oculta y nadie dibuja esa textura, pero el <video> sigue reproduciendo porque
@@ -463,7 +789,9 @@ function arLogAdd(msg, e) {
 function arNotice(msg) {
   console.log('[ar]', msg);
   arLogAdd(msg);
-  if (!arSession) { toast(msg); return; }      // fuera de sesión sí hay página
+  // Outside an immersive session the page is visible; inside VR or AR only
+  // the panel in front of the face is.
+  if (!renderer.xr.isPresenting) { toast(msg); return; }
   const lines = [];
   let line = '';
   for (const w of msg.split(' ')) {
@@ -478,30 +806,39 @@ function arNotice(msg) {
 function arPerfReport(now) {
   // La ventana arranca en el primer frame; sin esto, t0=0 contra un
   // performance.now() de varios segundos suelta un informe de 1 frame al entrar.
-  if (!_perf.t0) { _perf.t0 = now; _perf.vf0 = decodedFrames(); return; }
+  if (!_perf.t0) { _perf.t0 = now; _perf.vf0 = decodedFrames(); _perf.cf0 = closeupDecodedFrames(); _perf.slow = 0; return; }
   if (_perf.n && now - _perf.t0 >= 2000) {
     const avg = (_perf.sum / _perf.n).toFixed(2);
     // Fotogramas decodificados por segundo en esta ventana. ~24-30 = el vídeo se
     // está decodificando entero; 0 = el navegador ya no lo decodifica.
     const vf = decodedFrames();
-    const vfps = (vf >= 0 && _perf.vf0 >= 0) ? ((vf - _perf.vf0) / ((now - _perf.t0) / 1000)).toFixed(1) : '?';
+    const secs = (now - _perf.t0) / 1000;
+    const vfps = (vf >= 0 && _perf.vf0 >= 0) ? ((vf - _perf.vf0) / secs).toFixed(1) : '?';
+    const cf = closeupDecodedFrames();
+    const cfps = (cf >= 0 && _perf.cf0 >= 0) ? ((cf - _perf.cf0) / secs).toFixed(1) : '?';
+    const fps = (_perf.n / secs).toFixed(0);
     console.log(`[arperf] ${_perf.n} frames · medio ${avg} ms · peor ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})` +
       ` · audio ${(_perf.audio / _perf.n).toFixed(2)} · foco ${(_perf.focus / _perf.n).toFixed(2)}` +
-      ` · render ${(_perf.render / _perf.n).toFixed(2)} · vídeo decodificado ${vfps} fps`);
+      ` · render ${(_perf.render / _perf.n).toFixed(2)} · vídeo decodificado ${vfps} fps` +
+      ` · close-up ${cfps} fps · ${fps} fps reales · ${_perf.slow} frames lentos`);
     // Un aviso vivo manda sobre el informe: el informe vuelve en 2 s, el aviso no.
-    if (!arNoticeUntil) arPerfPanelDraw([
-      `${_perf.n} frames · avg ${avg} ms`,
+    // In the flat page the sprite has no place to hang (it is positioned by the
+    // XR loops); there the numbers go to /api/perflog only.
+    if (!arNoticeUntil && renderer.xr.isPresenting) arPerfPanelDraw([
+      `${fps} fps · ${_perf.slow} slow · js+render ${avg} ms`,
       `worst ${_perf.worst.toFixed(1)} ms (${_perf.worstAt})`,
-      `audio ${(_perf.audio / _perf.n).toFixed(2)} · render ${(_perf.render / _perf.n).toFixed(2)}`,
-      `video decoded ${vfps} fps`,
+      `render ${(_perf.render / _perf.n).toFixed(2)} ms`,
+      `decoded: 360 ${vfps} · close-up ${cfps} fps`,
     ]);
     // Cada ventana se guarda además para el volcado de la página al salir, que
     // sobrevive a quitarse las gafas.
     window.__arperf = window.__arperf || [];
     window.__arperf.push({ frames: _perf.n, avgMs: +avg, worstMs: +_perf.worst.toFixed(1),
-                           worstAt: _perf.worstAt, videoFps: +vfps });
-    _perf.n = _perf.sum = _perf.worst = _perf.audio = _perf.focus = _perf.render = 0;
-    _perf.t0 = now; _perf.vf0 = vf;
+                           worstAt: _perf.worstAt, videoFps: +vfps, closeupFps: +cfps,
+                           fps: +fps, slow: _perf.slow });
+    perfTraceFlush({ fps: +fps, slow: _perf.slow, avgMs: +avg, videoFps: +vfps, closeupFps: +cfps });
+    _perf.n = _perf.sum = _perf.worst = _perf.audio = _perf.focus = _perf.render = _perf.slow = 0;
+    _perf.t0 = now; _perf.vf0 = vf; _perf.cf0 = cf;
   }
 }
 
@@ -657,7 +994,8 @@ async function startManifest(src) {
   if (shakaVideo) { try { await shakaVideo.destroy(); } catch(e){} shakaVideo = null; }
   if (shakaAudio) { try { await shakaAudio.destroy(); } catch(e){} shakaAudio = null; }
   if (shakaCloseup) { try { await shakaCloseup.destroy(); } catch(e){} shakaCloseup = null; }
-  closeupReady = false; closeupRepByStem = {};
+  if (closeupWC) { closeupWC.close(); closeupWC = null; }
+  closeupReady = false; closeupRepByStem = {}; closeupCropByRep = {};
   resetCloseup();
 
   videoEl.pause();
@@ -699,6 +1037,8 @@ async function loadDualShaka(src) {
       bufferingGoal: 6,
       rebufferingGoal: 2,
       bufferBehind: 10,
+      // Ignored by the Shaka we load (4.3.6): segment prefetch arrived in a
+      // later 4.x. Kept so an upgrade behaves as this config was meant to.
       segmentPrefetchLimit: 2,
       updateIntervalSeconds: 0.1,
       lowLatencyMode: true,
@@ -728,6 +1068,7 @@ async function loadDualShaka(src) {
     // ── Shaka 1: vídeo (muted) → Three.js ──────────
     shakaVideo = new shaka.Player(videoEl);
     shakaVideo.configure(shakaConfig);
+    perfWatchNet(shakaVideo, 'v');
     await shakaVideo.load(src);
 
     // Con close-ups el manifest trae VARIAS AdaptationSets de vídeo y ninguna
@@ -859,13 +1200,27 @@ async function loadDualShaka(src) {
       if (videoEl.paused && !audioEl.paused) audioEl.pause();
       if (!videoEl.paused && audioEl.paused) audioEl.play().catch(()=>{});
 
-      // Close-up: misma timeline → mismo currentTime/playbackRate que el 360.
-      if (closeupReady && closeupStem >= 0) {
-        if (Math.abs(closeupEl.currentTime - videoEl.currentTime) > 0.5)
-          closeupEl.currentTime = videoEl.currentTime;
-        closeupEl.playbackRate = base;
+      // Close-up: same timeline, but its own <video> and its own clock — two
+      // Shaka instances do not share one. It used to be corrected only past
+      // 0.5 s, by a seek, and left alone below that: a close-up that started
+      // 300 ms late (play() lags the seek) stayed 300 ms late for good, which on
+      // a drum hit is plainly visible. Now it is steered like the audio is,
+      // through playbackRate, continuously. It is muted, so the rate can move
+      // far more than the audio's ever could without anyone hearing it.
+      if (closeupReady && closeupStem >= 0 && !closeupWC) {
         if (videoEl.paused && !closeupEl.paused) closeupEl.pause();
         if (!videoEl.paused && closeupEl.paused) closeupEl.play().catch(()=>{});
+        const err = closeupEl.currentTime - videoEl.currentTime;    // + = close-up ahead
+        const a = Math.abs(err);
+        if (a > CLOSEUP_SYNC.hardSeek) {
+          closeupEl.currentTime = videoEl.currentTime;
+          closeupEl.playbackRate = base;
+        } else if (a > CLOSEUP_SYNC.dead && !closeupEl.paused && !closeupEl.seeking) {
+          const k = Math.max(-CLOSEUP_SYNC.cap, Math.min(CLOSEUP_SYNC.cap, -err * CLOSEUP_SYNC.kp));
+          closeupEl.playbackRate = base * (1 + k);
+        } else if (closeupEl.playbackRate !== base) {
+          closeupEl.playbackRate = base;
+        }
       }
     }, 250);
 
@@ -1026,9 +1381,12 @@ function makeVideoTexture(el) {
   tex.generateMipmaps = false;   // 8 Mpx: generar mipmaps por fotograma, ni de broma
   tex.needsUpdate = true;
   if (HAS_RVFC) {
-    const tick = () => {
+    const tick = (now, md) => {
       if (tex.__stop) return;    // textura ya reemplazada: no resucitarla
       tex.needsUpdate = true;
+      // The media time of the frame this texture now shows: the clock the
+      // WebCodecs close-up follows (see closeupClock).
+      el.__mt = md ? md.mediaTime : el.currentTime; el.__mtAt = performance.now();
       el.requestVideoFrameCallback(tick);
     };
     el.requestVideoFrameCallback(tick);
@@ -1092,6 +1450,7 @@ async function setupFOA() {
         if (_sc.ar) arCfg = _sc.ar;
         if (_sc.telemetry) telemetryCfg = _sc.telemetry;
         if (_sc.voice) voiceCfg = _sc.voice;
+        if (_sc.debug) enableDebugMode();
       }
     } catch (_) { /* sin escena → DEFAULT_STEMS */ }
 
@@ -1242,13 +1601,52 @@ async function setupCloseups(src) {
 
   // Mapa stem→RepresentationID: los stems con closeup reciben 1,2,… EN ORDEN,
   // igual que stream.sh los empaqueta (filter(closeup) en orden de escena).
-  closeupRepByStem = {};
+  closeupRepByStem = {}; closeupCropByRep = {};
   let rep = 1;
   stemDefs.forEach((s, i) => { if (s && s.closeup) closeupRepByStem[i] = String(rep++); });
+  // stream.sh writes which track is whose next to the manifest. With it the map
+  // goes by name and does not depend on order — in LIVE only the crops are
+  // encoded, so counting the stems that have a close-up would be off — and it
+  // says where each crop sits. Encodes from before it fall back to the order.
+  try {
+    const r = await fetch(new URL('closeups.json', src).href, { cache: 'no-store' });
+    if (r.ok) {
+      const list = (await r.json()).closeups || [];
+      closeupRepByStem = {};
+      for (const c of list) {
+        const i = stemDefs.findIndex(s => s && s.name === c.name);
+        if (i >= 0) closeupRepByStem[i] = String(c.rep);
+        if (c.crop) closeupCropByRep[String(c.rep)] = c.crop;
+      }
+    }
+  } catch (_) { /* local file or no sidecar: order it is */ }
   if (!Object.keys(closeupRepByStem).length) return;
+
+  // WebCodecs first: frames slaved to the 360's clock. Any failure here falls
+  // back to the second Shaka below.
+  if (CU_WC && CloseupWC.available()) {
+    try {
+      const off = parseFloat(new URLSearchParams(location.search).get('cuoffset') || '0') / 1000 || 0;
+      const wc = new CloseupWC(new URL(src, location.href).href, { log: m => console.log(m), offsetS: off });
+      if (await wc.init([...new Set(Object.values(closeupRepByStem))])) {
+        closeupWC = wc;
+        closeupTexture = new THREE.Texture();
+        MeshFit.srgb(closeupTexture);
+        closeupTexture.minFilter = THREE.LinearFilter;
+        closeupTexture.magFilter = THREE.LinearFilter;
+        closeupTexture.generateMipmaps = false;
+        closeupMesh.material.map = closeupTexture;
+        closeupMesh.material.needsUpdate = true;
+        closeupReady = true;
+        toast('Close-ups (WebCodecs) · mira a un músico y haz zoom');
+        return;
+      }
+    } catch (e) { console.warn('[closeup-wc] falling back to a second Shaka:', e); }
+  }
 
   try {
     shakaCloseup = new shaka.Player(closeupEl);
+    perfWatchNet(shakaCloseup, 'c');
     // El audio de este manifest es el Opus multicanal del motor: que la segunda
     // instancia no se lo descargue otra vez para tirarlo (va muteada).
     // Colchón corto: a esta instancia se le pide arrancar pronto, no aguantar.
@@ -1325,6 +1723,11 @@ function showCloseup(idx) {
 // cambiar el contenido a media opacidad se vería como un corte.
 function selectCloseupTrack(idx) {
   closeupStem = -1;
+  if (closeupWC) {
+    closeupWC.select(closeupCanShow(idx) ? closeupRepByStem[idx] : null);
+    if (closeupCanShow(idx)) closeupStem = idx;
+    return;
+  }
   if (!closeupCanShow(idx)) return closeupEl.pause();
   const repId = closeupRepByStem[idx];
   const v = shakaCloseup.getVariantTracks().find(t => t.originalVideoId === repId);
@@ -1370,8 +1773,15 @@ function updateCloseupAnim() {
   // Si la pista está parada, que siga parada FUERA de cámara. El elemento se
   // queda en pausa más a menudo de lo que parece: el salto de `currentTime`
   // aborta el `play()` anterior, y Shaka no da imagen hasta llenar su colchón.
-  if (closeupStem >= 0 && closeupEl.paused && !videoEl.paused)
+  if (!closeupWC && closeupStem >= 0 && closeupEl.paused && !videoEl.paused)
     closeupEl.play().catch(() => {});
+
+  // WebCodecs: the frame due at the 360's time, into the texture. Runs while
+  // the track is selected, shown or not, so it is decoded when it is wanted.
+  if (closeupWC && closeupStem >= 0) {
+    const f = closeupWC.update(closeupClock());
+    if (f && f !== closeupTexture.image) { closeupTexture.image = f; closeupTexture.needsUpdate = true; }
+  }
 
   // No empezar a entrar hasta que la pista nueva tenga imagen Y esté corriendo:
   // selectVariantTrack con clearBuffer más el salto de currentTime dejan unos
@@ -1379,19 +1789,109 @@ function updateCloseupAnim() {
   // músico ANTERIOR, que es justo el corte que este fundido viene a evitar. Solo
   // condiciona el arranque: una vez dentro, un rebuffer no lo echa fuera y lo
   // vuelve a meter, que se vería peor que un parón de medio segundo.
-  const fresh  = closeupEl.readyState >= 3 && !closeupEl.seeking && !closeupEl.paused;
+  const fresh  = closeupWC ? closeupWC.hasFrame()
+                            : closeupEl.readyState >= 3 && !closeupEl.seeking && !closeupEl.paused;
   const want   = closeupStem >= 0 && closeupStem === closeupWant;
   const target = (want && (closeupFade > 0 || fresh)) ? 1 : 0;
-  const step   = dt / CLOSEUP_FADE_S;
+  const crop   = closeupStem >= 0 ? (closeupCropByRep[closeupRepByStem[closeupStem]] || null) : null;
+  // A crop fades slower than the panel: it lands during the zoom (it rides the
+  // sphere), and over the same picture a long fade just reads as focusing.
+  const step   = dt / (crop ? CROP_FADE_S : CLOSEUP_FADE_S);
   closeupFade  = target > closeupFade ? Math.min(target, closeupFade + step)
                                       : Math.max(target, closeupFade - step);
 
   closeupMesh.visible = closeupFade > 0.001;
-  if (!closeupMesh.visible) return;
+  if (!closeupMesh.visible) {
+    // Gone: the next appearance is placed afresh, where the viewer is then,
+    // and starts without the extra zoom.
+    closeupPlaced = undefined;
+    if (closeupZoomGoal !== 1) closeupZoomReset();
+    return;
+  }
+  const key = closeupStem + (crop ? ':crop' : ':panel');
+  if (key !== closeupPlaced) placeCloseup(closeupStem, crop, key);
   const e = closeupFade * closeupFade * (3 - 2 * closeupFade);   // smoothstep
   closeupMesh.material.opacity = e;
-  closeupMesh.scale.setScalar(CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e);
-  if (closeupTexture && !HAS_RVFC) closeupTexture.needsUpdate = true;
+  // A crop must sit exactly on its patch of the sphere: no scale-in, only the
+  // fade — the picture underneath is the same, so it reads as sharpening.
+  closeupZoom += (closeupZoomGoal - closeupZoom) * Math.min(1, dt * 8);
+  if (!crop) closeupMesh.scale.setScalar((CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e) * closeupZoom);
+  if (!closeupWC && closeupTexture && !HAS_RVFC) closeupTexture.needsUpdate = true;
+}
+
+// The 360's media time for the frame on screen, from its rVFC (exact), carried
+// forward between its frames so a close-up at a higher frame rate can step at
+// its own pace — never more than one 360 frame ahead of what is shown.
+function closeupClock() {
+  const v = videoEl;
+  if (v.__mtAt == null) return v.currentTime;
+  if (v.paused || v.seeking) return v.__mt;
+  return v.__mt + Math.min(1 / 24, (performance.now() - v.__mtAt) / 1000 * v.playbackRate);
+}
+
+// A tap on the close-up: a bit more zoom, a second tap back.
+function closeupZoomTap() {
+  const crop = closeupStem >= 0 ? closeupCropByRep[closeupRepByStem[closeupStem]] : null;
+  const more = closeupZoomGoal === 1;
+  closeupZoomGoal = more ? CLOSEUP_MORE : 1;
+  if (!crop) return;                       // a panel just grows
+  if (xrSession) xrZoomTo(more ? VR_PINCH_ZOOM_MORE : VR_PINCH_ZOOM);
+  else if (more) { cuDeskFov = camera.fov; camera.fov = Math.max(30, camera.fov / CLOSEUP_MORE); camera.updateProjectionMatrix(); }
+  else if (cuDeskFov) { camera.fov = cuDeskFov; cuDeskFov = null; camera.updateProjectionMatrix(); }
+}
+function closeupZoomReset() {
+  closeupZoomGoal = 1; closeupZoom = 1;
+  if (cuDeskFov) { camera.fov = cuDeskFov; cuDeskFov = null; camera.updateProjectionMatrix(); }
+}
+
+// Is a ray on the close-up? Then the world point it hits, else null.
+const _cuRay = new THREE.Raycaster();
+function closeupHit(o, d) {
+  if (!closeupMesh || !closeupMesh.visible || closeupFade < 0.5) return null;
+  _cuRay.ray.origin.set(o[0], o[1], o[2]);
+  _cuRay.ray.direction.set(d[0], d[1], d[2]);
+  const h = _cuRay.intersectObject(closeupMesh, false)[0];
+  return h ? h.point : null;
+}
+
+// Where the close-up mesh goes. A close-up VIDEO is a panel hanging 2.5 m in
+// front of the camera. A CROP of the 360 is laid on the sphere over the patch
+// it was cut from: a flat view of h × v degrees, seen from the sphere's centre,
+// is a plane tangent at that direction, 2·D·tan(fov/2) across at distance D.
+// As a child of the sphere it rides the zoom with it — the zoom pushes the
+// sphere, and the crop is pushed alike — so it never slides over the picture.
+// lookAt() with the default up gives the same no-roll orientation as v360's
+// yaw/pitch.
+const CROP_D = 99;                   // just inside the 100 m sphere
+const CROP_FADE_S = 0.6;             // s: fade of a crop over its patch of the sphere
+const _cropC = new THREE.Vector3();
+const CLOSEUP_DIST = 2.5;             // m from the head to the panel
+const _cuHead = new THREE.Vector3(), _cuDir = new THREE.Vector3();
+function placeCloseup(stem, crop, key) {
+  closeupPlaced = key;
+  if (!crop) {
+    // The panel stays where it appeared — in the musician's direction, 2.5 m
+    // from the head at that moment — instead of hanging off the camera and
+    // following every turn of the head. Seen face-on from where the viewer was.
+    scene.add(closeupMesh);
+    camera.getWorldPosition(_cuHead);
+    const d = engine && stem >= 0 ? engine.getStemDirection(stem) : null;
+    if (d) _cuDir.set(d[0], d[1], d[2]);
+    else camera.getWorldDirection(_cuDir);
+    closeupMesh.position.copy(_cuHead).addScaledVector(_cuDir.normalize(), CLOSEUP_DIST);
+    closeupMesh.lookAt(_cuHead);
+    closeupMesh.scale.setScalar(1);
+    return;
+  }
+  sphere.add(closeupMesh);
+  const az = crop.azimuthDeg * Math.PI / 180, el = crop.elevationDeg * Math.PI / 180;
+  const ce = Math.cos(el);
+  closeupMesh.position.set(-ce * Math.sin(az) * CROP_D, Math.sin(el) * CROP_D, -ce * Math.cos(az) * CROP_D);
+  // The geometry is 2 × 1.125 (the panel's 16:9).
+  closeupMesh.scale.set(CROP_D * Math.tan(crop.hFovDeg * Math.PI / 360),
+                        CROP_D * Math.tan(crop.vFovDeg * Math.PI / 360) * 2 / 1.125, 1);
+  sphere.updateMatrixWorld(true);
+  closeupMesh.lookAt(sphere.getWorldPosition(_cropC));
 }
 
 // Deja el close-up a cero de golpe, sin transición: cambio de manifest o entrada
@@ -1407,6 +1907,8 @@ function resetCloseup() {
 // los stems y una asignación; el trabajo de verdad lo hace la transición.
 function updateCloseupFocus() {
   if (!closeupReady || arSession || !engine) { closeupArmed = -1; return showCloseup(-1); }
+  // Pinched: that musician's close-up, whatever the head is looking at.
+  if (xrZoomStem >= 0) { closeupArmed = -1; return showCloseup(xrZoomStem); }
   const enter = engine.getFocusedStem(CLOSEUP_ENTER);   // quién se lo gana de sobra
   const stay  = engine.getFocusedStem(CLOSEUP_EXIT);    // quién manda con el listón bajo
   // Cruzar EXIT no saca el panel, pero sí manda ir cargando esa pista... si el
@@ -1780,13 +2282,91 @@ function voiceBadge(state) {
 // ══════════════════════════════════════════════════════
 async function checkWebXR() {
   if (!navigator.xr) return;
-  const ok = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
+  const ok = vrOk = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
   if (ok) {
     document.getElementById('xr-btn').disabled = false;
     document.getElementById('xr-badge').style.display = 'inline';
   }
-  const arOk = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+  arOk = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
   if (arOk) document.getElementById('ar-btn').disabled = false;
+  maybeShowIntro();
+}
+
+// ══════════════════════════════════════════════════════
+// HEADSET INTRO — one tap into VR or AR
+// ══════════════════════════════════════════════════════
+// In the headset the flat page is only a doorway (and a poor screen: the 2D
+// page plays the 360 choppily on the Quest), so it opens on two big buttons
+// that go straight into a mode. The source loads while the intro is up: the
+// tap is the user gesture requestSession() needs, and awaiting a manifest
+// load in between could spend it. Leaving VR/AR comes back here, which also
+// covers a VR <-> AR switch from the in-headset menu that the browser refused.
+// A PC keeps the web page. ?intro=1 forces the intro, ?intro=0 disables it.
+const INTRO_Q = new URLSearchParams(location.search).get('intro');
+let introOn = false;
+
+function maybeShowIntro() {
+  if (INTRO_Q === '0') return;
+  const headset = /OculusBrowser|Quest|Pico|Wolvic/i.test(navigator.userAgent) || arOk;
+  if (INTRO_Q !== '1' && !(headset && (vrOk || arOk))) return;
+  introOn = true;
+  document.getElementById('intro-ar').style.display = arOk ? '' : 'none';
+  introShow(true);
+  if (curManifestSrc) introReady(true);
+  else introLoad();
+}
+
+function introShow(v) {
+  if (!introOn) return;
+  document.getElementById('xr-intro').classList.toggle('show', v);
+}
+
+function introStatus(text) { document.getElementById('intro-status').textContent = text; }
+
+function introReady(ok) {
+  document.getElementById('intro-vr').disabled = !(ok && vrOk);
+  document.getElementById('intro-ar').disabled = !(ok && arOk);
+  introStatus(ok ? '' : 'Could not load the stream — use web mode to pick another source');
+}
+
+async function introLoad() {
+  const src = document.getElementById('video-url-input').value.trim();
+  if (!src) return introReady(false);
+  introReady(false); introStatus('Loading…');
+  // The buttons wake up with the first picture, not when startManifest()
+  // returns: after the load it still sets up audio, live sync and close-ups,
+  // and none of that has to finish before a session can start.
+  videoEl.addEventListener('loadeddata', () => introReady(true), { once: true });
+  try { await startManifest(src); } catch (e) { console.warn('[intro] load:', e); }
+  const ok = videoEl.readyState >= 1 && !videoEl.error;
+  // A recording waits at the start for whoever puts the headset on; the
+  // session start plays it. A live stream keeps running: its place is the edge.
+  if (ok && isFinite(videoEl.duration) && introOn &&
+      document.getElementById('xr-intro').classList.contains('show')) {
+    videoEl.pause(); videoEl.currentTime = 0; updatePlayBtn();
+  }
+  introReady(ok);
+}
+
+// The tap has to start the audio too. The intro loads the source WITHOUT a
+// gesture, so the engine's AudioContext is born suspended and engine.attach()
+// sits in `await ctx.resume()` until one comes — and everything after it waits
+// with it: the musicians' directions (so the pinch picked nobody and the zoom
+// did nothing), `audioCtx`, spotlight, close-ups. `audioCtx` is only assigned
+// after attach returns, so the context has to be taken from the engine.
+function resumeAudio() {
+  const ctx = audioCtx || (engine && engine.audioContext);
+  if (ctx && ctx.state === 'suspended') ctx.resume();
+}
+
+function introGo(mode) {
+  resumeAudio();
+  (mode === 'ar' ? enterAR : enterXR)();
+}
+
+function introWeb() {
+  introShow(false);
+  introOn = false;         // web mode chosen: leaving XR later lands on the page
 }
 
 async function enterXR() {
@@ -1799,27 +2379,39 @@ async function enterXR() {
 
     xrSession = await navigator.xr.requestSession('immersive-vr', {
       requiredFeatures: ['local-floor'],
-      optionalFeatures: ['bounded-floor', 'hand-tracking'],
+      optionalFeatures: ['bounded-floor', ...HAND_FEATS],
     });
 
     renderer.xr.setReferenceSpaceType('local-floor');
+    xrHeadroomBefore();
     await renderer.xr.setSession(xrSession);
+    xrHeadroomAfter(xrSession);
 
     // frame: en qué marco viajan p/q. En VR es el del propio casco (ver arTelemetryPose).
     telemetrySetMode('vr');
     voice?.mark('enter-vr');
 
     document.getElementById('xr-btn').textContent = 'EXIT VR';
+    introShow(false);
+    closeupPlaced = undefined;     // the head is somewhere else now: re-place the panel
+    pointer.attach(xrSession);
+    xrZoomGoal = null; xrZoomStem = -1; xrZoomDir = null; xrLastT = 0; xrSpotStem = -1; xrZoomMoves = true;
 
     xrSession.addEventListener('end', () => {
       xrSession = null;
+      pointer.detach();
+      xrMenu.close();
+      xrZoomGoal = null; xrZoomStem = -1; xrZoomDir = null; xrSpotStem = -1; xrZoomMoves = true; engine?.setSpotlightStem(-1);
       telemetryLeaveXR();
       voice?.mark('exit-vr');   // la grabación sigue: lo que se dice al salir vale tanto como lo de dentro
       if (debugMesh) debugMesh.visible = false;
-      if (SYNCLOG || SHAREDLOG) arPerfPanelClear();
+      if (SYNCLOG || SHAREDLOG || ARPERF) arPerfPanelClear();
       document.getElementById('xr-btn').textContent = 'VR';
+      closeupPlaced = undefined; closeupZoomReset();
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
+      introShow(true);
+      xrResumePending();
     });
 
     let frameCount = 0;
@@ -1827,6 +2419,7 @@ async function enterXR() {
     renderer.setAnimationLoop((time, frame) => {
 
       frameCount++;
+      const _p0 = ARPERF ? perfFrameStart(time) : 0;
 
       // ── Actualizar textura vídeo ──────────────────
       if (videoEl && videoEl.readyState >= 2) {
@@ -1844,6 +2437,7 @@ async function enterXR() {
           const pose = frame.getViewerPose(refSpace);
           if (pose) {
             hasPose = true;
+            xrLastPose = pose;
             const q = pose.transform.orientation;
             const pos = pose.transform.position;
 
@@ -1868,20 +2462,49 @@ async function enterXR() {
 
             // ── Zoom/acercamiento con el joystick derecho (eje Y) ────────
             for (const isrc of xrSession.inputSources) {
+              if (markGrab >= 0) break;            // the stick is resizing a grabbed ring
               if (isrc.handedness === 'right' && isrc.gamepad && isrc.gamepad.axes.length >= 4) {
                 const jy = isrc.gamepad.axes[3];   // adelante = negativo
-                if (Math.abs(jy) > 0.15)
+                if (Math.abs(jy) > 0.15) {
+                  xrZoomGoal = null; xrZoomStem = -1;   // the stick takes over from a point
+                  // From a still-sphere pinch zoom: start the stick from zero,
+                  // or the sphere would leap to where the audio zoom was.
+                  if (!xrZoomMoves) { xrZoomDist = 0; xrZoomDir = null; xrZoomMoves = true; }
+                  xrSpotStem = -1;                        // the stick zooms where you look
                   xrZoomDist = Math.max(0, Math.min(80, xrZoomDist - jy * 1.2));
+                }
               }
             }
+            // ...or towards where a pinch asked for (see xrSelect).
+            const dt = xrLastT ? Math.min((time - xrLastT) / 1000, 0.1) : 0;
+            xrLastT = time;
+            if (xrZoomGoal != null) {
+              // Smootherstep: zero speed AND acceleration at both ends.
+              const p = Math.min(1, (performance.now() - xrZoomT0) / 1000 / VR_ZOOM_S);
+              const e = p * p * p * (p * (p * 6 - 15) + 10);
+              xrZoomDist = xrZoomFrom + (xrZoomGoal - xrZoomFrom) * e;
+              // Pinching one musician after another swings the zoom across
+              // instead of cutting to them, on the same curve.
+              if (xrZoomDir) {
+                xrZoomDir.set(xrZoomDirFrom.x + (xrZoomDirGoal[0] - xrZoomDirFrom.x) * e,
+                              xrZoomDirFrom.y + (xrZoomDirGoal[1] - xrZoomDirFrom.y) * e,
+                              xrZoomDirFrom.z + (xrZoomDirGoal[2] - xrZoomDirFrom.z) * e).normalize();
+              }
+              if (p >= 1) xrZoomGoal = null;
+            }
+            // Back at zero zoom the direction no longer matters and the head's
+            // forward takes over again.
+            if (xrZoomDist <= 0 && xrZoomGoal == null) { xrZoomDir = null; xrZoomMoves = true; xrSpotStem = -1; }
 
             // El zoom de VR (joystick) alimenta el spotlight de stems: en
             // escritorio lo hace el FOV vía setZoomByFactor, pero en VR no hay
             // FOV controlable, así que mapeamos xrZoomDist → zoom normalizado.
             // Boost completo a media carrera (≈40) para que responda pronto.
             const zoomN = xrZoomDist / 40;
+            engine?.setSpotlightStem(xrSpotStem);
             engine?.setZoomNormalized(zoomN);
             updateCloseupFocus();   // close-up del músico enfocado (joystick zoom)
+            pointer.update(frame, refSpace);
 
             // Telemetría: pose de cabeza + zoom/foco (decimado a rateHz en la clase).
             // pos/q son referencias de la pose ya leída → sin coste por frame.
@@ -1893,18 +2516,21 @@ async function enterXR() {
             // el mismo rango venga de VR, de escritorio o del simulador.
             // setZoomNormalized() acaba de recalcular los pesos, así que el foco es
             // el de este frame.
-            telemetry?.sample(pos, q, zoomN, engine?.getFocusedStem(0.3) ?? -1,
+            // A musician zoomed in by a pinch is the focus wherever the head is.
+            telemetry?.sample(pos, q, zoomN,
+                              xrZoomStem >= 0 ? xrZoomStem : (engine?.getFocusedStem(0.3) ?? -1),
                               videoEl?.currentTime || 0);
 
             // Centrar la esfera en la cabeza y desplazarla EN CONTRA de la vista
             // para "acercar" lo que miras (xrZoomDist = 0 → solo centrada).
             if (sphere) {
-              const fwd = new THREE.Vector3(0, 0, -1)
-                .applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w));
+              const fwd = xrZoomDir || _zoomFwd.set(0, 0, -1)
+                .applyQuaternion(_zoomQ.set(q.x, q.y, q.z, q.w));
+              const k = xrZoomMoves ? xrZoomDist : 0;
               sphere.position.set(
-                pos.x - fwd.x * xrZoomDist,
-                pos.y - fwd.y * xrZoomDist,
-                pos.z - fwd.z * xrZoomDist);
+                pos.x - fwd.x * k,
+                pos.y - fwd.y * k,
+                pos.z - fwd.z * k);
             }
 
             // Debug panel fijo delante — altura ojo, 2m adelante
@@ -1919,6 +2545,12 @@ async function enterXR() {
             if (SYNCLOG || SHAREDLOG) {
               arPerfPanelPlace(pose);
               syncPanelReport(performance.now());
+            } else if (ARPERF || arNoticeUntil) arPerfPanelPlace(pose);
+            // A notice (e.g. "GT saved" from the calibration rings) expires
+            // as in AR; the panel stays if there is a report to show.
+            if (arNoticeUntil && performance.now() > arNoticeUntil) {
+              arNoticeUntil = 0;
+              if (!ARPERF && !SYNCLOG && !SHAREDLOG) arPerfPanelClear();
             }
           }
         }
@@ -1943,14 +2575,20 @@ async function enterXR() {
         });
       }
 
-      updateAmbiViz();
+      // Sin updateAmbiViz(), como en AR: es un canvas 2D del HUD de la página,
+      // que en sesión inmersiva no se ve, y costaba cuatro lecturas de analyser y
+      // un barrido del buffer en cada frame del hilo principal.
+      updateStemMarks();
+      const _p2 = ARPERF ? perfRenderBegin() : 0;
       renderer.render(scene, camera);
+      if (ARPERF) perfFrameEnd(_p0, _p2, time);
     });
 
     if (videoEl) videoEl.play();
     if (audioEl) audioEl.play().catch(()=>{});
     if (audioCtx) audioCtx.resume();
     toast('Quest 3 VR activo');
+    if (ARPERF) { _perf.t0 = _perf.lastT = 0; perfTraceStart(); arPerfPanelDraw(['[perf] measuring…', '', 'first window in 2 s', '']); }
 
   } catch(e) {
     toast('Error WebXR: ' + e.message);
@@ -2048,6 +2686,7 @@ function makeLabelSprite(text) {
 // Marcador de fuente: esfera de alambre emisiva + etiqueta con el nombre.
 const AR_MARK_IDLE  = 0x00d4ff;   // marcador en reposo
 const AR_MARK_FOCUS = 0xffd24a;   // marcador del músico enfocado
+const AR_MARK_LOCK  = 0xff7a1a;   // enfocado y fijado con un pinch
 
 function makeSourceMarker(name) {
   const g = new THREE.Group();
@@ -2235,9 +2874,10 @@ let arFocus      = -1;   // músico enfocado (índice de stem) o -1
 let arFocusCand  = -1;   // candidato en observación
 let arFocusSince = 0;    // ms en que el candidato pasó a serlo
 let arFocusLost  = 0;    // ms en que el enfocado salió del cono ancho (0 = dentro)
+let arLocked     = -1;   // músico fijado con un pinch: el foco no lo suelta la mirada
 
 function resetARFocus() {
-  arFocus = arFocusCand = -1;
+  arFocus = arFocusCand = arLocked = -1;
   arFocusSince = arFocusLost = 0;
   engine?.setFocusedStem(-1);   // que no quede un músico realzado de la sesión anterior
 }
@@ -2250,6 +2890,9 @@ const _coneKeep  = { coneDeg: AR_FOCUS.keepDeg };
 // Un frame de foco. `now` es el timestamp del bucle de render (ms).
 function updateARFocus(now) {
   if (!engine) return -1;
+  // A pinned musician stays focused wherever the head goes: that is the point of
+  // pinning, listening to one player while looking around the room.
+  if (arLocked >= 0) return arLocked;
   const prev = arFocus;
   const cand = engine.getGazedStem(_coneEnter);
 
@@ -2286,8 +2929,347 @@ function paintARFocus() {
     // Con malla manda el aro del suelo; sin ella, la esfera de alambre. Nunca las
     // dos: la esfera está oculta en cuanto hay músico que mirar.
     const mark = m.userData.focusRing || m.children[0];
-    if (mark && mark.material) mark.material.color.copy(MeshFit.colour(i === arFocus ? AR_MARK_FOCUS : AR_MARK_IDLE));
+    const c = i !== arFocus ? AR_MARK_IDLE : i === arLocked ? AR_MARK_LOCK : AR_MARK_FOCUS;
+    if (mark && mark.material) mark.material.color.copy(MeshFit.colour(c));
   });
+}
+
+// Pin the focus on musician `i` (a pinch on them), or unpin with -1. Pinning
+// skips the gaze dwell: the pinch already is the deliberate "this one". Unpinning
+// hands the focus back to the gaze policy as it stands —if you are still
+// looking at them they stay focused, otherwise they go after releaseMs— rather
+// than dropping it at once, which would be a jump in the mix for no reason.
+function lockARFocus(i) {
+  arLocked = i;
+  arFocusLost = 0;
+  if (i >= 0) arFocus = i;
+  paintARFocus();
+  engine?.setFocusedStem(arFocus);
+}
+
+// ── Ray and pinch (both XR modes) ──────────────────────────────────────────
+// A pinch (or trigger) tap with the hand's ray on musician `target`, or on
+// nothing (-1):
+//   VR: on a musician → zoom in to them (close-up and spotlight follow); on
+//       another one while zoomed → the zoom swings across; on nothing → out.
+//   AR: on a musician → pin them; on the pinned one or on nothing → unpin.
+function xrSelect(target) {
+  if (arSession) {
+    if (target >= 0 && target !== arLocked) lockARFocus(target);
+    else if (arLocked >= 0) lockARFocus(-1);
+    return;
+  }
+  if (!xrSession) return;
+  if (target === CLOSEUP_TARGET) return closeupZoomTap();
+  // Pinch on nothing, or on the musician already zoomed in: zoom back out.
+  const d = (target >= 0 && target !== xrZoomStem) ? engine?.getStemDirection(target) : null;
+  if (!d) {
+    xrZoomStem = -1;
+    if (xrZoomDist > 0 || xrZoomGoal) xrZoomTo(0);
+    return;
+  }
+  xrZoomStem = target;
+  xrSpotStem = target;
+  // Only a crop close-up (or ?vrzoom=move) moves the sphere; see xrZoomMoves.
+  // Switching musicians mid-zoom keeps what the first pinch chose, so the
+  // sphere never jumps.
+  if (xrZoomDist <= 0 && !xrZoomGoal)
+    xrZoomMoves = VR_ZOOM_MOVE || !!closeupCropByRep[closeupRepByStem[target]];
+  xrZoomDirGoal[0] = d[0]; xrZoomDirGoal[1] = d[1]; xrZoomDirGoal[2] = d[2];
+  // Start from where the zoom already is: along the head if it came from the
+  // stick, or the previous musician — so it swings rather than jumps.
+  if (!xrZoomDir) {
+    xrZoomDir = xrZoomDist > 0 ? camera.getWorldDirection(new THREE.Vector3())
+                               : new THREE.Vector3(d[0], d[1], d[2]);
+  }
+  xrZoomTo(VR_PINCH_ZOOM);
+}
+
+// ── ?stemmarks=1 — where each musician's selection falls, and moving it ─────
+// A calibration aid. Each musician gets a ring on the 360 at the direction the
+// player uses for them (azimuthDeg/elevationDeg from the editor), as wide as
+// the cone that selects them (hitDeg, or the pointer's default), with their
+// name and angles. A ring that does not sit on its musician in the video can
+// be moved and resized right there:
+//   PC:      drag the ring with the mouse; wheel over it changes its size.
+//   Headset: long pinch on the ring grabs it, move the hand, let go; while
+//            holding, the controller stick changes its size.
+// Every change is saved on release to scene.json through /api/scene/stems,
+// which touches only those three fields; the editor notices and reloads them,
+// so its next save does not undo them.
+// Also switched on for every client by the editor's debug mode (scene.debug).
+// Colours: yellow = idle, cyan = under the ray/mouse, green = zoomed / grabbed.
+let STEM_MARKS = new URLSearchParams(location.search).get('stemmarks') === '1';
+const STEM_MARK_R = 98;              // just inside the 100 m sphere
+const HIT_MIN = 2, HIT_MAX = 30;     // selection half-angle limits (deg)
+let stemMarks = null, stemMarksEngine = null;
+let markGrab = -1;                   // musician being dragged (PC or headset), or -1
+let markHover = -1;                  // musician under the mouse on the PC
+const _mo = new THREE.Vector3(), _md = new THREE.Vector3();
+
+// The point of the PICTURE a ray is on, as a direction from the sphere's
+// centre. This is what a musician's direction means; with the sphere centred
+// on the head it is the ray's own direction, but the zoom pushes the sphere
+// off-centre and then the two differ. In AR there is no sphere: the ray as is.
+function sphereDir(o, d) {
+  if (!sphere || !sphere.visible) return d;
+  const c = sphere.position, R = 100;
+  const ox = o[0] - c.x, oy = o[1] - c.y, oz = o[2] - c.z;
+  const b = ox * d[0] + oy * d[1] + oz * d[2];
+  const t = -b + Math.sqrt(Math.max(0, b * b - (ox * ox + oy * oy + oz * oz - R * R)));
+  const px = ox + d[0] * t, py = oy + d[1] * t, pz = oz + d[2] * t;
+  const n = Math.hypot(px, py, pz) || 1;
+  return [px / n, py / n, pz / n];
+}
+
+const _cuHitPos = [0, 0, 0];
+function pickStem(o, d) {
+  // The close-up is in front of the musicians: a ray on it is on it.
+  const h = closeupHit(o, d);
+  if (h) { _cuHitPos[0] = h.x; _cuHitPos[1] = h.y; _cuHitPos[2] = h.z; return CLOSEUP_TARGET; }
+  return engine ? engine.getStemAlong(o, sphereDir(o, d), { ...RAY_CONE, perStem: true }) : -1;
+}
+
+function stemHitDeg(i) { return (engine && engine.getStemHitDeg(i)) || RAY_CONE.coneDeg; }
+
+function buildStemMarks() {
+  if (stemMarks) { scene.remove(stemMarks); stemMarks.traverse(o => { o.geometry?.dispose(); o.material?.map?.dispose(); o.material?.dispose(); }); }
+  stemMarks = new THREE.Group();
+  stemMarks.userData.items = [];
+  for (let i = 0; i < engine.stemCount; i++) {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffd24a, transparent: true, opacity: 0.9,
+                                              depthTest: false, side: THREE.DoubleSide });
+    // Unit ring, scaled to the cone in placeStemMark().
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.93, 1, 64), mat);
+    const dot  = new THREE.Mesh(new THREE.CircleGeometry(1, 16), mat);
+    ring.renderOrder = dot.renderOrder = 998;
+    const c = document.createElement('canvas'); c.width = 512; c.height = 128;
+    const tex = MeshFit.srgb(new THREE.CanvasTexture(c));
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    label.renderOrder = 999;
+    g.add(ring, dot, label);
+    stemMarks.add(g);
+    stemMarks.userData.items[i] = { g, mat, ring, dot, label, c, tex };
+    placeStemMark(i);
+  }
+  scene.add(stemMarks);
+  stemMarksEngine = engine;
+}
+
+// Put mark `i` where the engine has musician `i` now, at its cone size, and
+// redraw its label. Called on build and on every drag/resize step.
+function placeStemMark(i) {
+  const it = stemMarks && stemMarks.userData.items[i];
+  const d = engine.getStemDirection(i);
+  if (!it || !d) return;
+  const hit = stemHitDeg(i);
+  const rr = STEM_MARK_R * Math.tan(hit * Math.PI / 180);
+  it.g.position.set(d[0] * STEM_MARK_R, d[1] * STEM_MARK_R, d[2] * STEM_MARK_R);
+  it.g.lookAt(0, 0, 0);
+  it.ring.scale.setScalar(rr);
+  it.dot.scale.setScalar(STEM_MARK_R * Math.tan(8 * Math.PI / 180) * 0.06);   // fixed size
+  const def = (stemDefs && stemDefs[i]) || {};
+  const cx = it.c.getContext('2d');
+  cx.clearRect(0, 0, 512, 128);
+  cx.fillStyle = 'rgba(0,0,0,0.6)'; cx.fillRect(0, 0, 512, 128);
+  cx.fillStyle = '#fff'; cx.font = 'bold 52px sans-serif'; cx.textAlign = 'center';
+  cx.fillText(`${i + 1} · ${def.name || 'stem ' + (i + 1)}`, 256, 56);
+  cx.font = '34px monospace'; cx.fillStyle = '#ffd24a';
+  cx.fillText(`az ${(+def.azimuthDeg || 0).toFixed(1)}  el ${(+def.elevationDeg || 0).toFixed(1)}  ⌀ ${hit.toFixed(1)}°`, 256, 108);
+  it.tex.needsUpdate = true;
+  const lw = STEM_MARK_R * Math.tan(8 * Math.PI / 180);
+  it.label.scale.set(lw * 1.6, lw * 0.4, 1);
+  it.label.position.set(0, -(rr + lw * 0.35), 0);
+}
+
+function updateStemMarks() {
+  if (!STEM_MARKS || !engine || !sphere) return;
+  // Built once the engine knows the directions (they exist after attach), and
+  // again if a new source brought a new engine.
+  if (stemMarksEngine !== engine) {
+    if (!engine.stemCount || !engine.getStemDirection(0)) return;
+    buildStemMarks();
+  }
+  // In the 360 the musicians are directions from the head: the marks ride with
+  // the sphere (head-centred, pushed by the zoom). AR hides the sphere, and them.
+  stemMarks.visible = sphere.visible;
+  stemMarks.position.copy(sphere.position);
+  const hov = (xrSession && pointer) ? pointer.hovered : markHover;
+  stemMarks.userData.items.forEach((it, i) => {
+    if (it) it.mat.color.setHex(i === markGrab || i === xrZoomStem ? 0x5dff8f : i === hov ? 0x00d4ff : 0xffd24a);
+  });
+}
+
+// Move musician `i` to the picture point direction `d` (unit, from the sphere
+// centre): the engine (selection + sound), the scene definition (labels, AR)
+// and the mark.
+function setStemFromDir(i, d) {
+  const az = Math.round(Math.atan2(-d[0], -d[2]) * 180 / Math.PI * 2) / 2;
+  const el = Math.round(Math.asin(Math.max(-1, Math.min(1, d[1]))) * 180 / Math.PI * 2) / 2;
+  engine.setStemAngles(i, az, el);
+  if (stemDefs[i]) { stemDefs[i].azimuthDeg = az; stemDefs[i].elevationDeg = el; }
+  placeStemMark(i);
+}
+
+function setStemHit(i, deg) {
+  const h = Math.round(Math.max(HIT_MIN, Math.min(HIT_MAX, deg)) * 2) / 2;
+  engine.setStemHitDeg(i, h);
+  if (stemDefs[i]) stemDefs[i].hitDeg = h;
+  placeStemMark(i);
+}
+
+// Saved one musician at a time, and only the three fields this tool edits.
+function saveStem(i) {
+  const s = stemDefs[i];
+  if (!s) return;
+  fetch('/api/scene/stems', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stems: [{ i, name: s.name, azimuthDeg: s.azimuthDeg, elevationDeg: s.elevationDeg,
+                                     hitDeg: stemHitDeg(i) }] }),
+  }).then(r => r.ok ? r.json() : r.json().then(j => Promise.reject(new Error(j.error || r.status))))
+    .then(() => arNotice(`${s.name || 'stem ' + (i + 1)} saved`))
+    // A server older than this endpoint answers 404: that one needs a restart.
+    .catch(e => arNotice(`NOT saved: ${s.name || 'stem ' + (i + 1)} (${e.message}) - restart server`));
+}
+
+// Headset: long pinch on a ring (see RayPointer's grab).
+const markGrabXR = {
+  can: i => STEM_MARKS && !!xrSession && engine && i < engine.stemCount,
+  start: (i) => { markGrab = i; },
+  move: (i, o, d, src) => {
+    setStemFromDir(i, sphereDir(o, d));
+    const gp = src.gamepad;
+    if (gp && gp.axes.length >= 4 && Math.abs(gp.axes[3]) > 0.15)
+      setStemHit(i, stemHitDeg(i) - gp.axes[3] * 0.25);      // stick forward = bigger
+  },
+  end: (i) => { markGrab = -1; saveStem(i); },
+};
+
+// PC: the mouse. Registered in the capture phase so that, on a ring, it
+// claims the event before the view-drag and FOV-wheel handlers see it.
+function setupStemMarkMouse() {
+  const c = renderer.domElement;
+  const rc = new THREE.Raycaster(), ndc = new THREE.Vector2();
+  const dirAt = e => {
+    const r = c.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    rc.setFromCamera(ndc, camera);
+    _mo.copy(rc.ray.origin); _md.copy(rc.ray.direction);
+    return sphereDir([_mo.x, _mo.y, _mo.z], [_md.x, _md.y, _md.z]);
+  };
+  const active = () => STEM_MARKS && engine && stemMarks && !renderer.xr.isPresenting;
+  c.addEventListener('mousedown', e => {
+    if (!active()) return;
+    const i = engine.getStemAlong([0, 0, 0], dirAt(e), { ...RAY_CONE, perStem: true });
+    if (i < 0) return;
+    markGrab = i;
+    e.stopImmediatePropagation();
+  }, { capture: true });
+  window.addEventListener('mousemove', e => {
+    if (!active()) return;
+    if (markGrab >= 0) { setStemFromDir(markGrab, dirAt(e)); return; }
+    if (e.target !== c) return;
+    markHover = engine.getStemAlong([0, 0, 0], dirAt(e), { ...RAY_CONE, perStem: true });
+    c.style.cursor = markHover >= 0 ? 'grab' : '';
+  });
+  window.addEventListener('mouseup', () => {
+    if (markGrab < 0) return;
+    const i = markGrab; markGrab = -1; saveStem(i);
+  });
+  let wheelSave = null;
+  c.addEventListener('wheel', e => {
+    if (!active() || markHover < 0) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    const i = markHover;
+    setStemHit(i, stemHitDeg(i) - Math.sign(e.deltaY) * 0.5);
+    clearTimeout(wheelSave);
+    wheelSave = setTimeout(() => saveStem(i), 600);
+  }, { capture: true, passive: false });
+}
+
+// PC: a click (not a drag) on the close-up zooms it a bit more; another, back.
+function setupCloseupClick() {
+  const c = renderer.domElement;
+  const rc = new THREE.Raycaster(), ndc = new THREE.Vector2();
+  let down = null;
+  c.addEventListener('mousedown', e => { down = { x: e.clientX, y: e.clientY }; });
+  c.addEventListener('click', e => {
+    if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5 || renderer.xr.isPresenting) return;
+    const r = c.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    rc.setFromCamera(ndc, camera);
+    const o = rc.ray.origin, d = rc.ray.direction;
+    if (closeupHit([o.x, o.y, o.z], [d.x, d.y, d.z])) closeupZoomTap();
+  });
+}
+
+// The editor's debug mode (scene.debug = true): what ?stemmarks=1&arperf=1 do,
+// for every client that loads while it is on.
+function enableDebugMode() {
+  STEM_MARKS = true;
+  ARPERF = true;
+  toast('Debug mode (from the editor): musician marks + performance');
+}
+
+// World position of musician `i` when it is a point of the room (AR), so the
+// ray can end on them. In the 360 they are at infinity: null.
+const _stemPos = [0, 0, 0];
+const _stemV = new THREE.Vector3();
+function xrStemWorldPos(i) {
+  if (i === CLOSEUP_TARGET) return _cuHitPos;      // the ray ends on the close-up
+  if (!arSession || !arSources[i]) return null;
+  arSources[i].getWorldPosition(_stemV);
+  _stemPos[0] = _stemV.x; _stemPos[1] = _stemV.y; _stemPos[2] = _stemV.z;
+  return _stemPos;
+}
+
+// Direction from `o` to musician `i` on the 360 sphere (moved by the zoom), for
+// the head-aim glow; null for anything targetPos already places.
+const _stemDir = [0, 0, 0];
+function xrStemDirFrom(i, o) {
+  if (!engine || i < 0 || i === CLOSEUP_TARGET) return null;
+  const d = engine.getStemDirection(i);
+  if (!d) return null;
+  const c = sphere && sphere.visible ? sphere.position : { x: 0, y: 0, z: 0 }, R = 100;
+  const x = c.x + d[0] * R - o[0], y = c.y + d[1] * R - o[1], z = c.z + d[2] * R - o[2];
+  const n = Math.hypot(x, y, z) || 1;
+  _stemDir[0] = x / n; _stemDir[1] = y / n; _stemDir[2] = z / n;
+  return _stemDir;
+}
+
+// ── XR menu (long pinch on nothing) ─────────────────────────────────────────
+function xrOpenMenu() {
+  if (!xrLastPose) return;
+  const inVR = !!xrSession, inAR = !!arSession;
+  xrMenu.show([
+    { id: 'vr',   label: 'VR · 360°',        active: inVR, note: inVR ? 'now' : '', disabled: !vrOk },
+    { id: 'ar',   label: 'AR · passthrough', active: inAR, note: inAR ? 'now' : arOk ? '' : 'not available', disabled: !arOk },
+    { id: 'exit', label: 'Exit immersive' },
+  ], xrLastPose);
+}
+
+function xrMenuChoose(id) {
+  xrMenu.close();
+  if (id === 'exit') { (xrSession || arSession)?.end(); return; }
+  if ((id === 'vr' && xrSession) || (id === 'ar' && arSession)) return;   // already there
+  xrPending = id;
+  (xrSession || arSession)?.end();
+}
+
+// Switching mode is ending one session and requesting the other: WebXR has no
+// way to turn a VR session into an AR one. requestSession() needs a user
+// gesture, and the pinch that chose the option is one — select events are user
+// activation in the Quest browser — as long as the new request comes soon
+// after it, which it does: the old session ends in a few frames. If the
+// browser refuses anyway, the user lands on the page with a toast saying which
+// button to press, rather than stuck in a mode they did not pick.
+function xrResumePending() {
+  const m = xrPending;
+  xrPending = null;
+  if (!m) return;
+  const go = m === 'ar' ? enterAR : enterXR;
+  go().catch(e => toast(`No se pudo entrar en ${m.toUpperCase()}: pulsa el botón ${m.toUpperCase()} (${e.message})`));
 }
 
 // ══════════════════════════════════════════════════════
@@ -3049,8 +4031,8 @@ async function enterAR() {
       // se cae a la calibración a mano, que sigue entera.
       optionalFeatures: SHAREDSPACE
         // 'unbounded' porque el ejemplo que funciona lo pide junto a 'shared'.
-        ? ['hand-tracking', 'anchors', 'shared', 'unbounded']
-        : ['hand-tracking', 'anchors'],
+        ? [...HAND_FEATS, 'anchors', 'shared', 'unbounded']
+        : [...HAND_FEATS, 'anchors'],
     });
     // Lo primero a descartar cuando la sala no vuelve a su sitio: sin 'anchors'
     // concedida no hay nada que persistir, y como va en optionalFeatures la
@@ -3058,7 +4040,9 @@ async function enterAR() {
     const arFeats = arSession.enabledFeatures ? Array.from(arSession.enabledFeatures) : null;
     console.log('[ar] features:', arFeats ? arFeats.join(' ') : 'no expuestas');
     renderer.xr.setReferenceSpaceType('local-floor');
+    xrHeadroomBefore();
     await renderer.xr.setSession(arSession);
+    xrHeadroomAfter(arSession);
 
     // El marco común se pide en el primer frame, no aquí: ver requestSharedSpace.
     sharedActive = false; arSharedSpace = null; arViewerSpace = null;
@@ -3072,6 +4056,7 @@ async function enterAR() {
     voice?.mark('enter-ar');
     renderer.setClearAlpha(0);                    // deja ver el passthrough
     document.getElementById('ar-btn').textContent = 'EXIT AR';
+    introShow(false);
 
     if (sphere) sphere.visible = false;           // el mundo real sustituye al 360
     resetCloseup();                               // sin close-ups en AR
@@ -3104,6 +4089,7 @@ async function enterAR() {
     // y restaurarla gasta tiempo y toca el cupo de 8 para nada.
     if (!SHAREDSPACE) restoreRoomAnchor(arSession);
     buildARSources();
+    pointer.attach(arSession);
 
     arSession.addEventListener('end', () => {
       // ?arperf=1: el resumen se enseña aquí, que es cuando vuelve a haber pantalla.
@@ -3117,6 +4103,8 @@ async function enterAR() {
       }
       telemetryLeaveXR();
       voice?.mark('exit-ar');
+      pointer.detach();
+      xrMenu.close();
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
       if (AR_CUT_VIDEO) setVideoDisabled(false).catch(e => console.warn('[ar] restaurar vídeo:', e));
       // salir con el grip apretado (en marco común no se persiste: ver updateARCalib)
@@ -3140,6 +4128,8 @@ async function enterAR() {
       document.getElementById('ar-btn').textContent = 'AR';
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
+      introShow(true);
+      xrResumePending();
     });
 
     renderer.setAnimationLoop((time, frame) => {
@@ -3153,11 +4143,12 @@ async function enterAR() {
       // fuera del `if (frame)`: es la escena la que tiene que estar al día,
       // haya pose de visor o no.
       updateMeshAnims();
-      const _p0 = ARPERF ? performance.now() : 0;
+      const _p0 = ARPERF ? perfFrameStart(time) : 0;
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
         const pose = refSpace && frame.getViewerPose(refSpace);
         if (pose) {
+          xrLastPose = pose;
           engine?.setRotationFromMatrix4(pose.transform.matrix);  // orientación + posición de cabeza
           if (SHAREDSPACE && !sharedRequested) requestSharedSpace(frame.session);
           if (sharedActive) updateSharedFrame(frame, refSpace, pose);  // S: el marco común, este frame
@@ -3180,6 +4171,7 @@ async function enterAR() {
           // al consumidor sobre en qué rango leer `z`.
           const [tp, tq] = arTelemetryPose(pose);
           telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
+          pointer.update(frame, refSpace);
           if (ARPERF) {
             _perf.audio += _p1 - _p0; _perf.focus += performance.now() - _p1;
           }
@@ -3201,18 +4193,10 @@ async function enterAR() {
       // analyser y un bucle sobre el buffer entero (getDominantDirection) en cada
       // frame, en el hilo principal, para no dibujar nada. Al salir de AR vuelve
       // el bucle de escritorio y se repinta solo.
-      const _p2 = ARPERF ? performance.now() : 0;
+      updateStemMarks();
+      const _p2 = ARPERF ? perfRenderBegin() : 0;
       renderer.render(scene, camera);
-      if (ARPERF) {
-        const end = performance.now(), total = end - _p0;
-        _perf.render += end - _p2; _perf.sum += total; _perf.n++;
-        if (total > _perf.worst) {
-          _perf.worst = total;
-          // El reparto del PEOR frame es lo que dice dónde se fue el tiempo.
-          _perf.worstAt = `audio ${(_p2 - _p0).toFixed(1)} / render ${(end - _p2).toFixed(1)}`;
-        }
-        arPerfReport(end);
-      }
+      if (ARPERF) perfFrameEnd(_p0, _p2, time);
     });
 
     if (videoEl) videoEl.play();
@@ -3221,7 +4205,7 @@ async function enterAR() {
     toast(`AR · ${arSources.length} fuentes · grip + joystick para alinear la sala`);
     // El panel no tiene nada que enseñar hasta cerrar la primera ventana de 2 s.
     // Sin este cartel, esos dos segundos se leen como "?arperf=1 no funciona".
-    if (ARPERF) { arPerfPanelDraw(['[arperf] measuring…', '', 'first window in 2 s', '']); }
+    if (ARPERF) { _perf.t0 = _perf.lastT = 0; perfTraceStart(); arPerfPanelDraw(['[arperf] measuring…', '', 'first window in 2 s', '']); }
     // Después de arrancar la sesión: la recarga corta el audio un instante y es
     // menos molesta con el passthrough ya puesto que retrasando la entrada.
     if (AR_CUT_VIDEO) {
@@ -3283,9 +4267,7 @@ window.addEventListener('keydown', e => {
   }
 });
 
-document.addEventListener('click', () => {
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-});
+document.addEventListener('click', resumeAudio);
 
 // ══════════════════════════════════════════════════════
 // EXPONER HANDLERS AL HTML
@@ -3295,6 +4277,7 @@ document.addEventListener('click', () => {
 Object.assign(window, {
   loadFromURL, loadFile, seekTo, togglePlay, skipBack, skipFwd,
   toggleMute, setVolume, resetView, toggleFS, enterXR, enterAR, toggleVoice,
+  introGo, introWeb,
 });
 
 // ══════════════════════════════════════════════════════

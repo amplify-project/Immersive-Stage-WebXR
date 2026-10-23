@@ -264,3 +264,98 @@ storm, and `?maxh` picking a close-up.
 - **Aim at what you see.** The focus comes from the stem's `azimuthDeg`, so the
   panel appears where the musician *sounds*, which in the current take is not
   always where they are visible.
+
+---
+
+## 10. Crops of the 360
+
+A close-up does not have to be a separate video. In the editor, a musician's
+close-up selector offers **✂ crop from the 360** (`"closeup": "crop"` in
+`scene.json`; a checkbox in live mode). The encode then cuts a flat view of that
+musician out of the 360 itself and packages it as one more close-up track.
+
+**Encoding** (`stream.sh`). Server-side each crop becomes a `CLOSEUPS` entry
+`crop:AZ:EL:HFOV`: the stem's calibrated `azimuthDeg`/`elevationDeg`, and a
+width of `cropFovDeg`, or `4 × hitDeg` (8° by default → 32°), clamped to
+20–90°. `stream.sh` splits the already-decoded video input and runs
+`v360=input=e:output=flat` on each branch (`yaw = −azimuthDeg`,
+`pitch = elevationDeg`, height from the output aspect), then `cas` (sharpening,
+`CROP_SHARPEN`, default 0.5). Nothing is opened twice, so crops also work in
+**live capture**, where file close-ups are dropped. Interpolation is
+`CROP_INTERP`: `lanc` for files, `line` for capture, to spare the CPU.
+
+Next to the manifest it writes **`closeups.json`**: which track
+(RepresentationID) is whose (by stem name) and, for a crop, where it came from.
+The player maps tracks by name with it, so it no longer depends on stem order —
+which matters in live, where only the crops are encoded. Encodes from before
+the file fall back to the old order rule. `upload-s3.sh` publishes it uncached.
+
+**Display** (`placeCloseup()` in `player.js`). A crop is not shown on the
+floating panel: it is laid **on the sphere, over the exact patch it was cut
+from**: a plane tangent at that direction, `2·D·tan(fov/2)` across at
+`D = 99` m, a child of the sphere so the zoom pushes both alike. Because the
+picture under it is the same, the fade (`CROP_FADE_S`, 0.6 s, no scale-in)
+reads as the image coming into focus, not as something appearing. The crop
+keeps the angles of **its encode**: recalibrating a musician in the editor moves
+the ring and the selection at once, but the crop only follows after re-encoding.
+
+**Zoom.** A pinch zoom (in or out) is now a fixed-duration tween
+(`VR_ZOOM_S`, 0.8 s) on a smootherstep curve, distance and direction together,
+instead of an exponential ease that lurched off and then crept.
+
+**Limits.** A crop cannot hold more detail than the 360 it comes from: a 4K
+equirect has ~10.7 px per degree, so a 32° crop is ~340 source pixels across,
+upscaled to the 1280×720 track. It beats zooming the sphere (more bits per
+pixel than the full 360 stream, no texture stretching on the GPU), but real
+detail needs a sharper source (an 8K export, or a dedicated camera).
+
+---
+
+## 11. WebCodecs: the close-up follows the 360's clock
+
+With a second `<video>` (and a second Shaka) the close-up has **its own
+clock**, and the only levers on it are `currentTime` (a seek: the decoder is
+flushed and the picture freezes) and `playbackRate`. So it was always chasing
+the 360: late when it appeared, drifting on every stall of either element,
+starting over on every seek. The sync loop (`CLOSEUP_SYNC`) narrows that, it
+cannot remove it.
+
+`src/app/closeup-wc.js` (`CloseupWC`) removes the second clock. It reads the
+same manifest, fetches the close-up track's segments itself, demuxes them with
+mp4box.js (loaded on demand from jsDelivr) and decodes them with
+`VideoDecoder` — by hardware when offered. Frames come out with their own
+timestamps. On every rendered frame the player asks for **the frame due at the
+360's media time** (`closeupClock()`: the `mediaTime` of the 360's last frame
+from its rVFC, carried forward at most one 360 frame), and that frame goes into
+the close-up texture (`texImage2D` takes a `VideoFrame`). A lookup, not a chase:
+when the 360 stalls the close-up holds the same frame; when it seeks, the close-up
+is rebuilt from the segment holding the new time.
+
+- **Buffering:** segments `AHEAD_S` (2.5 s) past the clock; at most `MAX_AHEAD`
+  (4) decoded frames ahead of it — hardware decoders have small output pools and
+  stall if all their frames are held. After a jump it decodes from the segment's
+  keyframe and feeds the decoder harder until caught up.
+- **Entry:** `hasFrame()` is true only once the current frame is within ~80 ms
+  of the clock, so the fade (`fresh` in `updateCloseupAnim`) never starts on one
+  of the stale frames passed through while catching up.
+- **Frames are owned by `CloseupWC`:** `update()` keeps the current frame open
+  until it hands out the next one, then closes it.
+- **Live:** a dynamic manifest is re-read every 2 s; segments are tracked by
+  number, which survives the window sliding.
+- **Fallback:** without `VideoDecoder`, if the codec is not supported, or with
+  `?cuwc=0`, the second Shaka and the sync loop are used as before. `?cuoffset=ms`
+  trims a constant offset (e.g. different encoder delays).
+- **Trace:** with `?arperf=1`, `cuErr` is the current frame against the clock.
+
+Measured: on the Quest 3 (`test.html`): VideoDecoder present, H.264 by hardware,
+well above 60 fps for a 720p track while the 4K 360 plays, WebGL accepts the
+frames. On desktop Chrome (software decode) with `tools/closeup-wc.harness.html`:
+ready 4–13 rendered frames after a jump, then never more than 4 ms off.
+
+**Panel placement and zoom.** The panel no longer hangs off the camera: it is
+placed in the world when it appears — in the musician's direction, 2.5 m from
+the head at that moment, facing it — and stays there while the head turns. It is
+placed again the next time it appears, and on entering or leaving VR. A tap on
+the close-up (pinch with the ray on it, or a mouse click) zooms a bit more: a
+panel grows ×1.6; a crop on the sphere takes the VR zoom from 40 to 62 (or the
+desktop FOV ÷1.6). A second tap goes back; hiding the close-up resets it.

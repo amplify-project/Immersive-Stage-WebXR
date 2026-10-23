@@ -102,6 +102,11 @@ export class ImmersiveAudioEngine {
       // que se grabó 6 dB por debajo nunca llega a despegarse del bed, por más
       // que se le mire. Es una propiedad de la TOMA, así que vive en scene.json.
       trimDb: s.gainDb || 0,
+      // Half-angle (deg) of the cone that selects this musician by pointing or
+      // gazing. Per musician because they are not all the same size in the
+      // picture: a drummer spans more of the 360 than a sax. null = the
+      // caller's default.
+      hitDeg: +s.hitDeg > 0 ? +s.hitDeg : null,
       trim: null,
       gain: null, panner: null, dir: null,
       pos: null,          // posición mundo [x,y,z] (anclada) o derivada de dir
@@ -127,6 +132,7 @@ export class ImmersiveAudioEngine {
     // —un índice— y se le pone ganancia. Factores, no dB, para multiplicar en el
     // bucle sin convertir; los dB son la unidad de la API pública.
     this._focusIdx   = -1;   // stem enfocado, o -1
+    this._spotIdx    = -1;   // stem al que va TODO el spotlight (pinch en VR), o -1
     this._focusBoost = 1;    // factor sobre el enfocado  (1 = sin realce)
     this._focusDuck  = 1;    // factor sobre los demás    (1 = no se les toca)
     this._bedGain   = null;  // GainNode del bed, escrito por el duck (creado en attach)
@@ -698,7 +704,10 @@ export class ImmersiveAudioEngine {
         [dx, dy, dz] = s.dir;                         // ya unitario
       }
       const dot = dx * f[0] + dy * f[1] + dz * f[2];
-      const aim = Math.max(0, dot);                  // 1 = mirándola de frente
+      // A chosen stem (setSpotlightStem) takes the whole spotlight wherever the
+      // head turns; the rest stay at rest.
+      const aim = this._spotIdx >= 0 ? (s === this._stems[this._spotIdx] ? 1 : 0)
+                                     : Math.max(0, dot);   // 1 = mirándola de frente
       const focus = Math.pow(aim, this._focusExp);
       s._weight = focus * zN;                         // 0..1: cuán "enfocada" está
       if (s._weight > maxW) maxW = s._weight;
@@ -770,9 +779,28 @@ export class ImmersiveAudioEngine {
    * @returns {number} índice de stem, o -1 si ninguno cae en el cono
    */
   getGazedStem({ coneDeg = 12, tieAim = 0.01 } = {}) {
-    if (!this._stems.length) return -1;
-    const f = this._lookForward, lp = this._listenerPos;
-    if (!f) return -1;
+    if (!this._lookForward) return -1;
+    return this.getStemAlong(this._listenerPos, this._lookForward, { coneDeg, tieAim });
+  }
+
+  /**
+   * Stem along an arbitrary ray: getGazedStem with the ray given instead of the
+   * head's. The player uses it for a finger pointing at a musician (the ray from
+   * the eye through the fingertip), where the head may be looking elsewhere.
+   *
+   * Anchored stems are measured from `origin`, so where the ray starts matters.
+   * Head-locked ones (the 360) are directions at infinity as far as the eye can
+   * tell, so only `dir` counts for them: a ray starting a hand's length away
+   * from the head still points at the same spot of the sphere.
+   *
+   * @param {number[]} origin  [x,y,z] in world (the XR reference space)
+   * @param {number[]} dir     [x,y,z] unit vector in world
+   * @param {object} [o]       same options as getGazedStem, plus perStem (use each stem's hitDeg)
+   * @returns {number} stem index, or -1 if none falls inside the cone
+   */
+  getStemAlong(origin, dir, { coneDeg = 12, tieAim = 0.01, perStem = false } = {}) {
+    if (!this._stems.length || !origin || !dir) return -1;
+    const f = dir, lp = origin;
     const minAim = Math.cos(coneDeg * Math.PI / 180);
     let bi = -1, bAim = -1, bDist = Infinity;
     for (let i = 0; i < this._stems.length; i++) {
@@ -789,12 +817,50 @@ export class ImmersiveAudioEngine {
         dist = this._stemRadius;           // igual para todas: el desempate no entra
       }
       const aim = dx * f[0] + dy * f[1] + dz * f[2];
-      if (aim < minAim) continue;
+      // perStem: the pointer honours each musician's own cone (hitDeg). The
+      // gaze focus keeps its enter/keep pair, whose hysteresis a single
+      // per-musician angle would erase.
+      if (aim < ((perStem && s.hitDeg) ? Math.cos(s.hitDeg * Math.PI / 180) : minAim)) continue;
       if (bi < 0 || aim > bAim + tieAim || (Math.abs(aim - bAim) <= tieAim && dist < bDist)) {
         bi = i; bAim = aim; bDist = dist;
       }
     }
     return bi;
+  }
+
+  /**
+   * World direction of stem `i` as placed on the 360 sphere (front = −Z, left =
+   * −X, up = +Y), or null. The player zooms the sphere along it when a musician
+   * is pointed at, so the zoom goes to them and not wherever the head turns.
+   */
+  getStemDirection(i) {
+    const s = this._stems[i];
+    return s && s.dir ? s.dir : null;
+  }
+
+  /** Selection half-angle of stem `i` in degrees, or null for the default. */
+  getStemHitDeg(i) {
+    const s = this._stems[i];
+    return s ? s.hitDeg : null;
+  }
+
+  setStemHitDeg(i, deg) {
+    const s = this._stems[i];
+    if (s) s.hitDeg = +deg > 0 ? +deg : null;
+  }
+
+  /**
+   * Move stem `i` on the 360 sphere, live: its direction (what pointing and
+   * gazing test against) and, unless it is anchored in the room, its panner.
+   * The player's calibration marks drag musicians with this.
+   */
+  setStemAngles(i, azimuthDeg, elevationDeg) {
+    const s = this._stems[i];
+    if (!s) return;
+    s.az = azimuthDeg * Math.PI / 180; s.el = elevationDeg * Math.PI / 180;
+    const ce = Math.cos(s.el), se = Math.sin(s.el);
+    s.dir = [-ce * Math.sin(s.az), se, -ce * Math.cos(s.az)];
+    if (!s.anchored && s.panner) { s.pos = this._staticPos(s); this._setPannerPos(s, s.pos); }
   }
 
   /**
@@ -813,6 +879,19 @@ export class ImmersiveAudioEngine {
     const idx = (typeof i === 'number' && i >= 0 && i < this._stems.length) ? i : -1;
     if (idx === this._focusIdx) return;
     this._focusIdx = idx;
+    this._updateSpotlight();
+  }
+
+  /**
+   * Gives the zoom spotlight to stem `i` regardless of where the head looks
+   * (the VR pinch: "this one"), or back to the gaze with -1. The zoom amount
+   * still comes from setZoomNormalized. Idempotent.
+   * @param {number} i  stem index, or -1
+   */
+  setSpotlightStem(i) {
+    const idx = (typeof i === 'number' && i >= 0 && i < this._stems.length) ? i : -1;
+    if (idx === this._spotIdx) return;
+    this._spotIdx = idx;
     this._updateSpotlight();
   }
 

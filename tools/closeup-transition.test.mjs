@@ -32,6 +32,15 @@ const harness = `
   let closeupArmCand = -1, closeupArmSince = 0;
   let closeupReady = true, closeupTexture = {}, arSession = null;
   let closeupRepByStem = { 0: '1', 3: '2' };   // only stems 0 and 3 have a close-up
+  // Video close-ups (panel), not crops of the 360: crops only change where the
+  // mesh goes and how long the fade takes, not the state machine tested here.
+  // Second-Shaka path (closeupWC null): the WebCodecs one swaps the frame
+  // source, not the state machine tested here.
+  let closeupCropByRep = {}, closeupPlaced = null, xrZoomStem = -1, closeupWC = null;
+  let closeupZoom = 1, closeupZoomGoal = 1;
+  const closeupZoomReset = () => { closeupZoomGoal = 1; closeupZoom = 1; };
+  const CROP_FADE_S = 0.6;
+  const placeCloseup = (stem, c, key) => { closeupPlaced = key; };
   const HAS_RVFC = true;
   ${real}
   return {
