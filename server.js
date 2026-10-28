@@ -554,9 +554,9 @@ async function handleAPI(req, res, pathname) {
       return sendJSON(res, 200, { ok: true });
     }
 
-    // ── Musician positions edited from a player (?stemmarks / debug mode) ───
+    // ── Musician positions edited from a player (debug mode / Adjust scene) ─
     // scene.json belongs to the editor, which saves its whole in-memory copy.
-    // So a player only patches three fields of a stem here, and bumps a
+    // So a player only patches a stem's az/el/hitDeg or its AR point here, and bumps a
     // counter the editor polls (GET /api/scene/rev): when it moves, the editor
     // reloads those fields, and its next save keeps them instead of undoing
     // them. The name is checked so an index from a stale page cannot write
@@ -576,10 +576,16 @@ async function handleAPI(req, res, pathname) {
         if (num(p.azimuthDeg) !== undefined)   s.azimuthDeg = p.azimuthDeg;
         if (num(p.elevationDeg) !== undefined) s.elevationDeg = p.elevationDeg;
         if (num(p.hitDeg) !== undefined)       s.hitDeg = p.hitDeg;
+        // AR room position (metres), moved with "Adjust scene" in the headset.
+        // Merged: stem.ar may carry more than the point.
+        if (p.ar && ['x', 'y', 'z'].every(k => num(p.ar[k]) !== undefined))
+          s.ar = Object.assign({}, s.ar, { x: p.ar.x, y: p.ar.y, z: p.ar.z });
       }
       fs.writeFileSync(SCENE_FILE, JSON.stringify(scene, null, 2));
       sceneStemsRev++;
-      console.log(`[scene] stems patched from a player: ${stems.map(p => `${p.name ?? p.i} az ${p.azimuthDeg} el ${p.elevationDeg} hit ${p.hitDeg}`).join(', ')}`);
+      console.log(`[scene] stems patched from a player: ${stems.map(p => p.ar
+        ? `${p.name ?? p.i} ar ${p.ar.x}/${p.ar.y}/${p.ar.z}`
+        : `${p.name ?? p.i} az ${p.azimuthDeg} el ${p.elevationDeg} hit ${p.hitDeg}`).join(', ')}`);
       return sendJSON(res, 200, { ok: true, rev: sceneStemsRev });
     }
     if (pathname === '/api/scene/rev' && req.method === 'GET') {

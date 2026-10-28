@@ -569,11 +569,12 @@ async function init() {
 }
 
 // ── Musician positions changed from a player ─────────────────────────────────
-// A player in debug mode moves/resizes a musician's ring and the server
-// patches azimuth/elevation/hit area into scene.json. This editor keeps the
-// whole scene in memory and saves it whole, so without reloading those fields
-// its next save would undo what was done in the headset. Only those three
-// fields are taken, matched by name; everything else stays as edited here.
+// A player in debug mode or "Adjust scene" moves/resizes a musician's ring
+// (azimuth/elevation/hit area) or, in AR, moves the musician in the room
+// (stem.ar x/y/z), and the server patches that into scene.json. This editor
+// keeps the whole scene in memory and saves it whole, so without reloading
+// those fields its next save would undo what was done in the headset. Only
+// those fields are taken, matched by name; everything else stays as edited here.
 let sceneRev = null;
 async function pollSceneRev() {
   let rev;
@@ -587,11 +588,16 @@ async function pollSceneRev() {
   for (const f of (file.stems || [])) {
     const s = scene.stems.find(x => x.name === f.name);
     if (!s) continue;
-    const before = `${s.azimuthDeg}/${s.elevationDeg}/${s.hitDeg}`;
+    const key = x => `${x.azimuthDeg}/${x.elevationDeg}/${x.hitDeg}/${x.ar ? [x.ar.x, x.ar.y, x.ar.z].join(',') : ''}`;
+    const before = key(s);
     if (f.azimuthDeg != null) s.azimuthDeg = f.azimuthDeg;
     if (f.elevationDeg != null) s.elevationDeg = f.elevationDeg;
     if (f.hitDeg != null) s.hitDeg = f.hitDeg;
-    if (before !== `${s.azimuthDeg}/${s.elevationDeg}/${s.hitDeg}`) changed.push(s.name);
+    // AR room position, from "Adjust scene" in a headset (only the point: the
+    // rest of stem.ar stays as edited here).
+    if (f.ar && isFinite(f.ar.x) && isFinite(f.ar.y) && isFinite(f.ar.z))
+      s.ar = Object.assign({}, s.ar, { x: f.ar.x, y: f.ar.y, z: f.ar.z });
+    if (before !== key(s)) changed.push(s.name);
   }
   if (!changed.length) return;
   renderStems(); drawViews(); syncSelPanel();
