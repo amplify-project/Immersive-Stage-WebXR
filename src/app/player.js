@@ -789,7 +789,7 @@ function arLogAdd(msg, e) {
 
 // Any of the debug switches (the editor's debug mode, ?arperf, ?stemmarks,
 // ?synclog, ?sharedlog): the diagnostics a spectator should not get by default.
-function debugOn() { return ARPERF || STEM_MARKS || SYNCLOG || SHAREDLOG; }
+function debugOn() { return ARPERF || stemMarksBase || SYNCLOG || SHAREDLOG; }
 
 // A status line nobody asked for (e.g. how the room anchor was restored on
 // entering AR): logged always, on screen only in debug mode. Notices that answer
@@ -2140,6 +2140,16 @@ function updateAmbiViz() {
 // ══════════════════════════════════════════════════════
 // CONTROLS
 // ══════════════════════════════════════════════════════
+// Leaving VR/AR pauses the concert: with the headset off nobody is watching,
+// and it should not keep playing in the 2D page. Not when the session ended
+// only to switch VR ↔ AR from the menu (xrPending), and not when a ?sync=
+// session drives playback: there the shared clock decides, not this headset.
+const XR_EXIT_KEEPS_PLAYING = new URLSearchParams(location.search).has('sync');
+function pauseOnXRExit() {
+  if (xrPending || XR_EXIT_KEEPS_PLAYING || !videoEl || videoEl.paused) return;
+  togglePlay();
+}
+
 function togglePlay() {
   if (!videoEl) return;
   if (videoEl.paused) {
@@ -2609,6 +2619,7 @@ async function enterXR() {
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
       introShow(true);
+      pauseOnXRExit();
       xrResumePending();
     });
 
@@ -3198,6 +3209,9 @@ function xrSelect(target) {
 // Also switched on for every client by the editor's debug mode (scene.debug).
 // Colours: yellow = idle, cyan = under the ray/mouse, green = zoomed / grabbed.
 let STEM_MARKS = new URLSearchParams(location.search).get('stemmarks') === '1';
+// What STEM_MARKS is without "Adjust scene" (?stemmarks=1 or debug mode), to go
+// back to when it is turned off.
+let stemMarksBase = STEM_MARKS;
 const STEM_MARK_R = 98;              // just inside the 100 m sphere
 const HIT_MIN = 2, HIT_MAX = 30;     // selection half-angle limits (deg)
 let stemMarks = null, stemMarksEngine = null;
@@ -3282,7 +3296,8 @@ function placeStemMark(i) {
 }
 
 function updateStemMarks() {
-  if (!STEM_MARKS || !engine || !sphere) return;
+  if (!STEM_MARKS) { if (stemMarks) stemMarks.visible = false; return; }
+  if (!engine || !sphere) return;
   // Built once the engine knows the directions (they exist after attach), and
   // again if a new source brought a new engine.
   if (stemMarksEngine !== engine) {
@@ -3331,18 +3346,76 @@ function saveStem(i) {
     .catch(e => arNotice(`NOT saved: ${s.name || 'stem ' + (i + 1)} (${e.message}) - restart server`));
 }
 
-// Headset: long pinch on a ring (see RayPointer's grab).
+// Headset: long pinch on a ring (see RayPointer's grab) in the 360, or on a
+// musician in AR while "Adjust scene" is on.
 const markGrabXR = {
-  can: i => STEM_MARKS && !!xrSession && engine && i < engine.stemCount,
-  start: (i) => { markGrab = i; },
+  can: i => (STEM_MARKS && !!xrSession && engine && i < engine.stemCount) ||
+            (sceneAdjust && !!arSession && !!arSources[i]),
+  start: (i) => { markGrab = i; arGrabDist = null; },
   move: (i, o, d, src) => {
+    if (arSession) return arGrabMove(i, o, d, src);
     setStemFromDir(i, sphereDir(o, d));
     const gp = src.gamepad;
     if (gp && gp.axes.length >= 4 && Math.abs(gp.axes[3]) > 0.15)
       setStemHit(i, stemHitDeg(i) - gp.axes[3] * 0.25);      // stick forward = bigger
   },
-  end: (i) => { markGrab = -1; saveStem(i); },
+  end: (i) => { markGrab = -1; if (arSession) saveStemAR(i); else saveStem(i); },
 };
+
+// ── Adjust scene (XR menu) ──────────────────────────────────────────────────
+// A switch in the headset menu, offered only when there is a server to save to
+// (not on the static CDN demo). In the 360 it shows the calibration rings
+// (as ?stemmarks=1); in AR a long pinch on a musician grabs it and moves it
+// around the room. Either way the change goes to scene.json through
+// /api/scene/stems, and the editor reloads it.
+let sceneAdjust = false;
+let sceneEditable = false;           // /api/scene/rev answered: saving works here
+fetch('/api/scene/rev', { cache: 'no-store' }).then(r => { sceneEditable = r.ok; }).catch(() => {});
+
+function setSceneAdjust(on) {
+  sceneAdjust = on;
+  STEM_MARKS = on || stemMarksBase;
+  arNotice(!on ? 'Adjust scene: off'
+    : arSession ? 'Adjust scene: long pinch on a musician to move it, stick = nearer/farther'
+                : 'Adjust scene: long pinch on a ring to move it, stick = size');
+}
+
+// AR: the grabbed musician follows the aim across the room, at its own height
+// and at the horizontal distance it had when grabbed; the stick changes that
+// distance. Only the marker moves: the sound (bound to its matrixWorld) and
+// the mesh (its child) go with it.
+let arGrabDist = null;
+const _grabW = new THREE.Vector3();
+function arGrabMove(i, o, d, src) {
+  const m = arSources[i];
+  if (!m) return;
+  const hl = Math.hypot(d[0], d[2]);
+  if (hl < 1e-3) return;                      // looking straight up or down
+  m.getWorldPosition(_grabW);
+  if (arGrabDist == null) arGrabDist = Math.max(0.3, Math.hypot(_grabW.x - o[0], _grabW.z - o[2]));
+  const gp = src && src.gamepad;
+  if (gp && gp.axes.length >= 4 && Math.abs(gp.axes[3]) > 0.15)
+    arGrabDist = Math.max(0.3, Math.min(15, arGrabDist - gp.axes[3] * 0.03));   // forward = farther
+  _grabW.set(o[0] + d[0] / hl * arGrabDist, _grabW.y, o[2] + d[2] / hl * arGrabDist);
+  roomGroup.worldToLocal(_grabW);            // room metres: what stem.ar is in
+  m.position.x = _grabW.x;
+  m.position.z = _grabW.z;
+}
+
+// Saves musician `i`'s room position (stem.ar), the AR twin of saveStem().
+function saveStemAR(i) {
+  const s = stemDefs[i], m = arSources[i];
+  if (!s || !m) return;
+  const r = v => Math.round(v * 100) / 100;
+  const ar = { x: r(m.position.x), y: r(m.position.y), z: r(m.position.z) };
+  s.ar = Object.assign({}, s.ar, ar);
+  fetch('/api/scene/stems', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stems: [{ i, name: s.name, ar }] }),
+  }).then(r => r.ok ? r.json() : r.json().then(j => Promise.reject(new Error(j.error || r.status))))
+    .then(() => arNotice(`${s.name || 'stem ' + (i + 1)} placed at x ${ar.x} z ${ar.z}`))
+    .catch(e => arNotice(`NOT saved: ${s.name || 'stem ' + (i + 1)} (${e.message})`));
+}
 
 // PC: the mouse. Registered in the capture phase so that, on a ring, it
 // claims the event before the view-drag and FOV-wheel handlers see it.
@@ -3405,7 +3478,7 @@ function setupCloseupClick() {
 // The editor's debug mode (scene.debug = true): what ?stemmarks=1&arperf=1 do,
 // for every client that loads while it is on.
 function enableDebugMode() {
-  STEM_MARKS = true;
+  STEM_MARKS = stemMarksBase = true;
   ARPERF = true;
   toast('Debug mode (from the editor): musician marks + performance');
 }
@@ -3443,12 +3516,15 @@ function xrOpenMenu() {
   xrMenu.show([
     { id: 'vr',   label: 'VR · 360°',        active: inVR, note: inVR ? 'now' : '', disabled: !vrOk },
     { id: 'ar',   label: 'AR · passthrough', active: inAR, note: inAR ? 'now' : arOk ? '' : 'not available', disabled: !arOk },
+    ...(sceneEditable ? [{ id: 'adjust', label: 'Adjust scene', active: sceneAdjust,
+                           note: sceneAdjust ? 'on' : inAR ? 'move musicians' : 'calibrate' }] : []),
     { id: 'exit', label: 'Exit immersive' },
   ], xrLastPose);
 }
 
 function xrMenuChoose(id) {
   xrMenu.close();
+  if (id === 'adjust') { setSceneAdjust(!sceneAdjust); return; }
   if (id === 'exit') { (xrSession || arSession)?.end(); return; }
   if ((id === 'vr' && xrSession) || (id === 'ar' && arSession)) return;   // already there
   xrPending = id;
@@ -4329,6 +4405,7 @@ async function enterAR() {
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
       introShow(true);
+      pauseOnXRExit();
       xrResumePending();
     });
 
