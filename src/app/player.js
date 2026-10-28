@@ -260,6 +260,7 @@ function initThree() {
   closeupMesh.position.set(0, 0, -2.5);
   closeupMesh.renderOrder = 999;       // por encima de la esfera 360
   closeupMesh.visible = false;
+  sphere.add(makeCloseupSyncTag());
   camera.add(closeupMesh);
   scene.add(camera);                   // necesario para que los hijos se rendericen
 
@@ -784,6 +785,19 @@ function arLogAdd(msg, e) {
   const t = arSession ? (performance.now() / 1000).toFixed(1) + 's' : '—';
   arLog.push(`${t.padStart(7)}  ${msg}` +
     (e ? `\n         ${e.name || 'error'}: ${e.message || String(e)}` : ''));
+}
+
+// Any of the debug switches (the editor's debug mode, ?arperf, ?stemmarks,
+// ?synclog, ?sharedlog): the diagnostics a spectator should not get by default.
+function debugOn() { return ARPERF || STEM_MARKS || SYNCLOG || SHAREDLOG; }
+
+// A status line nobody asked for (e.g. how the room anchor was restored on
+// entering AR): logged always, on screen only in debug mode. Notices that answer
+// something the user just did (calibrate, save) keep using arNotice().
+function arNoticeQuiet(msg) {
+  if (debugOn()) return arNotice(msg);
+  console.log('[ar]', msg);
+  arLogAdd(msg);
 }
 
 function arNotice(msg) {
@@ -1842,6 +1856,7 @@ function updateCloseupAnim() {
   // un salto: mejor que la transición se coma un frame largo a que se salte.
   const dt = closeupLastT ? Math.min((now - closeupLastT) / 1000, 0.1) : 0;
   closeupLastT = now;
+  updateCloseupSyncTag(now);
 
   // La pista que queremos DECODIFICANDO no es la que queremos ver. Con el panel
   // fuera cargamos ya la del candidato —el que la mirada roza pero todavía no ha
@@ -1898,6 +1913,81 @@ function updateCloseupAnim() {
   closeupZoom += (closeupZoomGoal - closeupZoom) * Math.min(1, dt * 8);
   if (!crop) closeupMesh.scale.setScalar((CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e) * closeupZoom);
   if (!closeupWC && closeupTexture && !HAS_RVFC) closeupTexture.needsUpdate = true;
+}
+
+// ── Audio/sync tag ───────────────────────────────────────────────────────────
+// A small line fixed in the 360 (ahead and below the horizon, on the sphere so
+// it stays put in VR): "bed N% · sync ±N ms · audio out N ms".
+// "bed" is the ambisonic bed's real gain right now (spotlight duck × bed level,
+// read back from the AudioParams), to see whether it returns to 100% after a
+// zoom. "sync" (only while a close-up is shown) is how far its picture is from
+// the 360's (and so from the audio, which plays from the 360's own element).
+// + = close-up ahead. Averaged over 250 ms; with WebCodecs a 30 fps close-up
+// over a 24 fps 360 sits between 0 and -33 ms just from frame steps, so a few
+// tens of ms either way is normal. Shown in debug mode or with ?cusync=1.
+// Next to it, "audio out N ms": the AudioContext's own output latency
+// (baseLatency + outputLatency). The picture is drawn as soon as it decodes,
+// the sound comes out that much later, so this is how late the audio is heard
+// on this device. Not corrected anywhere; it is here to be measured.
+const CUSYNC = new URLSearchParams(location.search).get('cusync') === '1';
+const CUSYNC_OK_MS = 45, CUSYNC_BAD_MS = 100;
+let cuSyncTag = null, cuSyncCtx = null, cuSyncTex = null, cuSyncAt = 0, cuSyncTxt = '';
+const cuSyncAcc = [];
+
+function makeCloseupSyncTag() {
+  const c = document.createElement('canvas');
+  c.width = 640; c.height = 48;
+  cuSyncCtx = c.getContext('2d');
+  cuSyncTex = MeshFit.srgb(new THREE.CanvasTexture(c));
+  cuSyncTag = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.09),
+    new THREE.MeshBasicMaterial({ map: cuSyncTex, transparent: true, depthTest: false, opacity: 0 }));
+  // 2.5 m ahead, 1 m down, facing the sphere's centre (= the head).
+  cuSyncTag.position.set(0, -1.0, -2.5);
+  cuSyncTag.lookAt(0, 0, 0);
+  cuSyncTag.renderOrder = 1000;
+  cuSyncTag.visible = false;
+  return cuSyncTag;
+}
+
+// Close-up vs 360 right now, in ms (+ = close-up ahead), or null if unknown.
+function closeupSyncMs() {
+  if (closeupStem < 0) return null;
+  if (closeupWC) return closeupWC.lagMs;
+  if (closeupEl.paused || videoEl.paused) return null;
+  return (closeupEl.currentTime - videoEl.currentTime) * 1000;
+}
+
+function updateCloseupSyncTag(now) {
+  if (!cuSyncTag) return;
+  const on = (CUSYNC || debugOn()) && !arSession;
+  cuSyncTag.visible = on;
+  if (!on) { cuSyncAcc.length = 0; return; }
+  cuSyncTag.material.opacity = 1;
+  const cuOn = closeupMesh.visible && closeupStem >= 0;
+  const e = cuOn ? closeupSyncMs() : null;
+  if (e != null) cuSyncAcc.push(e);
+  if (now - cuSyncAt < 250) return;
+  cuSyncAt = now;
+  const v = cuSyncAcc.length ? Math.round(cuSyncAcc.reduce((a, b) => a + b, 0) / cuSyncAcc.length) : null;
+  cuSyncAcc.length = 0;
+  const ctx = engine && engine.audioContext;
+  const out = ctx ? Math.round(((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000) : null;
+  const bg = engine && engine._bedGain, bl = engine && engine._bedLevel;
+  const bed = bg && bl ? Math.round(bg.gain.value * bl.gain.value * 100) : null;
+  const txt = [bed != null ? `bed ${bed}%` : null,
+               cuOn ? (v == null ? 'sync —' : `sync ${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v)} ms`) : null,
+               out != null ? `audio out ${out} ms` : null].filter(Boolean).join(' · ');
+  if (txt === cuSyncTxt) return;
+  cuSyncTxt = txt;
+  const g = cuSyncCtx, a = v == null ? 0 : Math.abs(v);
+  g.clearRect(0, 0, 640, 48);
+  g.fillStyle = 'rgba(0,0,0,0.6)';
+  g.fillRect(0, 0, Math.min(640, 24 + txt.length * 18.5), 48);
+  g.fillStyle = !cuOn || v == null ? '#ddd' : a < CUSYNC_OK_MS ? '#7dff9a' : a < CUSYNC_BAD_MS ? '#ffd24a' : '#ff6b6b';
+  g.font = 'bold 30px monospace';
+  g.textBaseline = 'middle';
+  g.fillText(txt, 12, 25);
+  cuSyncTex.needsUpdate = true;
 }
 
 // The 360's media time for the frame on screen, from its rVFC (exact), carried
@@ -3854,7 +3944,7 @@ async function restoreRoomAnchor(session) {
   // PARTE, que desde dentro de las gafas se lee igual en los cuatro casos. Sin
   // decir cuál ha sido no hay forma de distinguir "no se guardó" de "no se
   // recuperó", así que ninguna se va callando.
-  if (!session.restorePersistentAnchor) return arNotice('No anchors on this headset: align every session');
+  if (!session.restorePersistentAnchor) return arNoticeQuiet('No anchors on this headset: align every session');
   // La pregunta de fondo cuando nada de esto funciona, y no hay consola dentro de
   // las gafas para responderla: ¿concedió el runtime 'anchors'?
   const feats = session.enabledFeatures ? Array.from(session.enabledFeatures) : null;
@@ -3868,11 +3958,11 @@ async function restoreRoomAnchor(session) {
            ` delete=${typeof session.deletePersistentAnchor}`);
   arLogSend();      // el entorno ya está: que llegue sin esperar a salir de AR
   if (feats && !feats.includes('anchors'))
-    return arNotice(`'anchors' not granted: the room cannot be saved`);
+    return arNoticeQuiet(`'anchors' not granted: the room cannot be saved`);
   if (AR_RESET_ANCHORS) {
     const { ok, fail, why, err } = await pruneOrphanAnchors(session, null);
     try { localStorage.removeItem(arAnchorKey()); } catch (_) { /* modo privado */ }
-    return arNotice(why ? `Cannot delete the anchors: ${why}`
+    return arNoticeQuiet(why ? `Cannot delete the anchors: ${why}`
                         : `${ok} deleted${fail ? `, ${fail} failed: ${err}` : ''}`);
   }
   let id = null;
@@ -3890,14 +3980,14 @@ async function restoreRoomAnchor(session) {
     pruneOwnAnchors(session, id).then(({ ok }) => ok && console.log('[ar] anclas propias borradas:', ok));
   else if (session.persistentAnchors && session.persistentAnchors.length > (id ? 1 : 0))
     pruneOrphanAnchors(session, id).then(({ ok }) => ok && console.log('[ar] anclas huérfanas borradas:', ok));
-  if (!id) return arNotice(`No anchor saved (${n} on this site): align and release the grip`);
+  if (!id) return arNoticeQuiet(`No anchor saved (${n} on this site): align and release the grip`);
   let a = null;
   try { a = await session.restorePersistentAnchor(id); }
-  catch (e) { arLogAdd('restorePersistentAnchor', e); console.warn('[ar] ancla no restaurada:', e); return arNotice(`Headset does not recognise the anchor · ${n} on this site`); }
+  catch (e) { arLogAdd('restorePersistentAnchor', e); console.warn('[ar] ancla no restaurada:', e); return arNoticeQuiet(`Headset does not recognise the anchor · ${n} on this site`); }
   // Puede resolverse tarde, cuando el usuario ya ha recalibrado a mano y puesto
   // un ancla nueva: entonces la vieja ya no manda.
   loadRoomOffset();
-  if (session === arSession && !arAnchor && !arCalibrating) { arAnchor = a; arNotice(`Room restored from its anchor · ${n} on this site`); }
+  if (session === arSession && !arAnchor && !arCalibrating) { arAnchor = a; arNoticeQuiet(`Room restored from its anchor · ${n} on this site`); }
 }
 
 // Coloca `roomGroup` sobre el ancla, en cada frame. Hacerlo por frame sale gratis
@@ -4204,7 +4294,9 @@ async function enterAR() {
       // Salir con un aviso en pantalla dejaría el sprite colgado en el 360.
       arNoticeUntil = 0;
       arPerfPanelClear();
-      arLogDump();       // sin depender de ?arperf=1: esto es lo que hay que leer
+      // The anchor log over the page on exit: a diagnostic, so debug mode only
+      // (it is posted to /api/arlog either way).
+      if (debugOn()) arLogDump();
       if (ARPERF) {
         arPerfDump();
         console.log('[arperf] ventanas:', window.__arperf);
