@@ -2140,6 +2140,16 @@ function updateAmbiViz() {
 // ══════════════════════════════════════════════════════
 // CONTROLS
 // ══════════════════════════════════════════════════════
+// Leaving VR/AR pauses the concert: with the headset off nobody is watching,
+// and it should not keep playing in the 2D page. Not when the session ended
+// only to switch VR ↔ AR from the menu (xrPending), and not when a ?sync=
+// session drives playback: there the shared clock decides, not this headset.
+const XR_EXIT_KEEPS_PLAYING = new URLSearchParams(location.search).has('sync');
+function pauseOnXRExit() {
+  if (xrPending || XR_EXIT_KEEPS_PLAYING || !videoEl || videoEl.paused) return;
+  togglePlay();
+}
+
 function togglePlay() {
   if (!videoEl) return;
   if (videoEl.paused) {
@@ -2609,6 +2619,7 @@ async function enterXR() {
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
       introShow(true);
+      pauseOnXRExit();
       xrResumePending();
     });
 
@@ -4394,6 +4405,7 @@ async function enterAR() {
       renderer.setAnimationLoop(null);
       requestAnimationFrame(renderLoop);
       introShow(true);
+      pauseOnXRExit();
       xrResumePending();
     });
 
