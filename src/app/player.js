@@ -3336,6 +3336,8 @@ function setStemHit(i, deg) {
 function saveStem(i) {
   const s = stemDefs[i];
   if (!s) return;
+  // No server (CDN demo): the new angles stay in this session only.
+  if (!sceneEditable) return arNotice(`${s.name || 'stem ' + (i + 1)} moved (this session only)`);
   fetch('/api/scene/stems', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ stems: [{ i, name: s.name, azimuthDeg: s.azimuthDeg, elevationDeg: s.elevationDeg,
@@ -3363,21 +3365,23 @@ const markGrabXR = {
 };
 
 // ── Adjust scene (XR menu) ──────────────────────────────────────────────────
-// A switch in the headset menu, offered only when there is a server to save to
-// (not on the static CDN demo). In the 360 it shows the calibration rings
+// A switch in the headset menu. In the 360 it shows the calibration rings
 // (as ?stemmarks=1); in AR a long pinch on a musician grabs it and moves it
-// around the room. Either way the change goes to scene.json through
-// /api/scene/stems, and the editor reloads it.
+// around the room. Served by server.js, the change goes to scene.json through
+// /api/scene/stems and the editor reloads it. Without a server (the static CDN
+// demo) it is for this session only: the change lives in memory, survives a
+// VR <-> AR switch, and a reload brings the scene back as published.
 let sceneAdjust = false;
-let sceneEditable = false;           // /api/scene/rev answered: saving works here
+let sceneEditable = false;           // /api/scene/rev answered: saving works here (else session only)
 fetch('/api/scene/rev', { cache: 'no-store' }).then(r => { sceneEditable = r.ok; }).catch(() => {});
 
 function setSceneAdjust(on) {
   sceneAdjust = on;
   STEM_MARKS = on || stemMarksBase;
+  const temp = sceneEditable ? '' : ' (this session only, not saved)';
   arNotice(!on ? 'Adjust scene: off'
-    : arSession ? 'Adjust scene: long pinch on a musician to move it, stick = nearer/farther'
-                : 'Adjust scene: long pinch on a ring to move it, stick = size');
+    : arSession ? 'Adjust scene: long pinch on a musician to move it, stick = nearer/farther' + temp
+                : 'Adjust scene: long pinch on a ring to move it, stick = size' + temp);
 }
 
 // AR: the grabbed musician follows the aim across the room, at its own height
@@ -3409,6 +3413,9 @@ function saveStemAR(i) {
   const r = v => Math.round(v * 100) / 100;
   const ar = { x: r(m.position.x), y: r(m.position.y), z: r(m.position.z) };
   s.ar = Object.assign({}, s.ar, ar);
+  // No server: the move stays in stemDefs for this session (buildARSources
+  // reads it again on the next AR entry), nothing is written anywhere.
+  if (!sceneEditable) return arNotice(`${s.name || 'stem ' + (i + 1)} moved (this session only)`);
   fetch('/api/scene/stems', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ stems: [{ i, name: s.name, ar }] }),
@@ -3516,8 +3523,8 @@ function xrOpenMenu() {
   xrMenu.show([
     { id: 'vr',   label: 'VR · 360°',        active: inVR, note: inVR ? 'now' : '', disabled: !vrOk },
     { id: 'ar',   label: 'AR · passthrough', active: inAR, note: inAR ? 'now' : arOk ? '' : 'not available', disabled: !arOk },
-    ...(sceneEditable ? [{ id: 'adjust', label: 'Adjust scene', active: sceneAdjust,
-                           note: sceneAdjust ? 'on' : inAR ? 'move musicians' : 'calibrate' }] : []),
+    { id: 'adjust', label: 'Adjust scene', active: sceneAdjust,
+      note: sceneAdjust ? (sceneEditable ? 'on' : 'on · not saved') : inAR ? 'move musicians' : 'calibrate' },
     { id: 'exit', label: 'Exit immersive' },
   ], xrLastPose);
 }
