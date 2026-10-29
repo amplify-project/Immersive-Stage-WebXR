@@ -23,7 +23,7 @@ const grab = (name) => {
   }
 };
 const consts = src.match(/const CLOSEUP_FADE_S[\s\S]*?const CLOSEUP_ARM_DWELL_S\s*=\s*[-\d.]+;/)[0];
-const real = [consts, grab('closeupCanShow'), grab('showCloseup'), grab('selectCloseupTrack'),
+const real = [consts, grab('closeupCanShow'), grab('showCloseup'), grab('closeupCanShowAR'), grab('selectCloseupTrack'),
               grab('updateCloseupAnim'), grab('resetCloseup'), grab('updateCloseupFocus')].join('\n\n');
 
 // The module-level state the lifted functions close over.
@@ -42,6 +42,9 @@ const harness = `
   const CROP_FADE_S = 0.6;
   const placeCloseup = (stem, c, key) => { closeupPlaced = key; };
   const HAS_RVFC = true;
+  const updateCloseupSyncTag = () => {};
+  let closeupBase = 1, arLocked = -1;
+  const placeCloseupAR = () => {};
   ${real}
   return {
     showCloseup, updateCloseupAnim, resetCloseup, updateCloseupFocus,
@@ -50,6 +53,8 @@ const harness = `
                  op: +closeupMesh.material.opacity.toFixed(3), sc: +closeupMesh.scale.v.toFixed(3) }),
     map: () => ({ ...closeupRepByStem }),
     setAR: v => arSession = v,
+    setLocked: i => arLocked = i,
+    setCrop: (rep, c) => { if (c) closeupCropByRep[rep] = c; else delete closeupCropByRep[rep]; },
   };`;
 
 // ── Stubs ──────────────────────────────────────────────────────────────────
@@ -180,11 +185,25 @@ ok(P.map()[3] === undefined, 'stem 3 leaves the map');
 ok(switches === 0 && !P.st().vis, 'no switches, no panel');
 tracks.push({ originalVideoId: '2', active: false });
 
-console.log('\n13) Entering AR kills it outright and it does not come back');
+console.log('\n13) Entering AR kills it outright, and the gaze does not bring it back');
 P.resetCloseup(); weights = [0.9, 0, 0, 0]; run(40); ok(P.st().op === 1, 'panel up before AR');
 P.setAR({}); P.resetCloseup();
 ok(!P.st().vis && P.st().op === 0 && P.st().armed === -1, 'AR: straight to zero, nothing armed');
-run(30); ok(!P.st().vis, 'and it stays out however high the weight');
+ok(closeupEl.paused, 'and its track is let go, not left decoding unseen');
+run(30); ok(!P.st().vis && P.st().armed === -1, 'gaze alone: no panel, nothing preloaded');
+
+console.log('\n13b) AR: a pinch on a musician brings their close-up, unpinning takes it away');
+P.setLocked(0); run(40);
+ok(P.st().stem === 0 && P.st().op === 1, 'pinned stem 0 → its panel');
+weights = [0, 0, 0, 0.9]; run(40);
+ok(P.st().stem === 0 && P.st().op === 1, 'looking elsewhere does not move it');
+P.setLocked(1); run(40);
+ok(!P.st().vis, 'stem 1 has no close-up → no panel');
+P.setCrop('1', { azimuthDeg: 0 }); P.setLocked(0); run(40);
+ok(!P.st().vis, 'a CROP close-up is not shown in AR (no 360 there)');
+P.setCrop('1', null); P.setLocked(-1); run(40);
+ok(!P.st().vis && closeupEl.paused, 'unpinned → gone, track paused');
+P.resetCloseup();
 
 console.log('\n14) A very long frame (background tab) does not skip the transition');
 P.setAR(null); weights = [0, 0, 0, 0]; run(40); weights = [0.9, 0, 0, 0];
