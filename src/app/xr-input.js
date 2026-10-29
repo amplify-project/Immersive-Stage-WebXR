@@ -2,8 +2,8 @@
  *  Ray and pinch: the hands-free input of the XR player (Pilot 3, T2).
  *
  *  Look at a musician and pinch (either hand, or a controller's trigger): in VR
- *  it zooms in on them, in AR it pins them. Pinch with the ray on nothing to
- *  undo (zoom back out / unpin). Hold the pinch on nothing to open the menu
+ *  it zooms in on them, in AR it pins them and shows their close-up video
+ *  beside them. Pinch with the ray on nothing to undo (zoom back out / unpin). Hold the pinch on nothing to open the menu
  *  (switch VR ↔ AR, leave). It is the Quest's own system interaction —the home
  *  menu works the same way— so there is nothing new to learn.
  *

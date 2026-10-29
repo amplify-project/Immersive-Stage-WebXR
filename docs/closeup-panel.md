@@ -40,9 +40,9 @@ reconciles them.
 
 That last point matters more than it looks. The animation lives in **both render
 loops** (desktop and XR) rather than hanging off the focus code, because
-`updateCloseupFocus()` returns early in AR and only runs when there is a pose. If
-the fade depended on it, entering passthrough would leave the panel frozen at
-half opacity in front of your face.
+`updateCloseupFocus()` only runs when there is a pose, and in AR it answers to
+the pin rather than the gaze (§12). If the fade depended on it, losing tracking
+would leave the panel frozen at half opacity in front of your face.
 
 ---
 
@@ -238,7 +238,7 @@ Two harnesses extract the **real functions out of `player.js`** (by text, so the
 cannot drift from what ships) and run them against stubs:
 
 ```bash
-node tools/closeup-transition.test.mjs   # 38 checks: fade, hysteresis, preload, AR, thrash
+node tools/closeup-transition.test.mjs   # 44 checks: fade, hysteresis, preload, AR, thrash
 node tools/sphere-track.test.mjs         # 7 checks, against the real encoded/manifest.mpd
 ```
 
@@ -255,8 +255,8 @@ storm, and `?maxh` picking a close-up.
 
 - **Live capture.** `stream.sh` ignores `CLOSEUPS` when capturing; close-ups are
   file mode only.
-- **Anything in AR.** The panel is hidden in passthrough, where you walk up to
-  the real object instead.
+- **Crops in AR.** A crop is a patch of the 360, and in AR the 360 is neither
+  drawn nor decoded. Only musicians with a close-up *video* get a panel there.
 - **Segment size.** 6 s segments dominate switch latency. Shorter helps, but
   segment length has nothing to do with A/V sync — audio and video share the
   timeline — and shorter segments mean more keyframes, more bitrate for the same
@@ -359,3 +359,45 @@ placed again the next time it appears, and on entering or leaving VR. A tap on
 the close-up (pinch with the ray on it, or a mouse click) zooms a bit more: a
 panel grows ×1.6; a crop on the sphere takes the VR zoom from 40 to 62 (or the
 desktop FOV ÷1.6). A second tap goes back; hiding the close-up resets it.
+
+---
+
+## 12. In AR: pinch a musician, their close-up appears beside them
+
+In passthrough the musicians are 3D figures standing in the room, and the gaze
+plus zoom of VR does not exist: there is no zoom, and the focus is the AR focus
+(gaze dwell, or a pinch that pins it). So the close-up follows the **pin**:
+
+- Pinch a musician → they are pinned (spotlight, as before) **and** their
+  close-up video fades in. Pinch another one → the panel fades out and comes
+  back with theirs. Pinch nothing, or the pinned one again → both go.
+- Pinch the panel itself → it grows ×1.6; again → back. (`CLOSEUP_TARGET` is
+  999, so `xrSelect` handles it before the lock: otherwise it would pin
+  "musician 999".)
+- The gaze alone shows nothing and **preloads nothing**. Arming a track keeps
+  it decoding unseen, which is the very cost that made AR drop frames; the price
+  is that the panel takes a segment fetch plus a keyframe (≈1–2 s with 6 s
+  segments) to arrive. The `fresh` gate of §2 still holds it until there is a
+  picture.
+
+**Where it goes.** `placeCloseupAR()` stands the panel beside the musician — to
+their right as the viewer sees them, `AR_CU_GAP` (0.35 m) from their centre to
+the panel's edge — at the height of their sound (the source's `ar.y`), turned
+about Y to face the viewer, with no tilt. It is recomputed every frame, so as you
+walk round it keeps to the side facing you, and it follows the room while it is
+being calibrated. It is `AR_CU_W` (0.8 m) wide, or wider for a far musician: it
+never drops below `AR_CU_MIN_DEG` (16°) of view. The geometry stays the 2 m
+plane; the size is `closeupBase`, multiplied into the fade's scale.
+
+**The clock.** In AR the 360 has no video track (`setVideoDisabled`), so its
+rVFC stops and `__mt` freezes at the last frame before AR. `closeupClock()`
+falls back to `videoEl.currentTime` while `videoDisabled`, which is the clock
+the audio plays from. The second-Shaka path already compared `currentTime`s.
+
+**Entering and leaving.** `resetCloseup()` runs on both, and now also lets the
+track go (`selectCloseupTrack(-1)`): clearing the variables alone left the
+transition with nothing to switch, and the last close-up decoding unseen.
+
+**Not yet verified on the headset:** frame rate with a 720p close-up decoding
+over passthrough (watch `?arperf=1`), whether the panel's side and size read
+well, and the sync tag (`?cusync=1`) in AR.

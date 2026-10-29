@@ -1813,6 +1813,12 @@ function showCloseup(idx) {
   closeupWant = closeupCanShow(idx) ? idx : -1;
 }
 
+// In AR only a close-up VIDEO can be shown: a crop is a patch of the 360, and
+// the 360 is neither drawn nor decoded there (see setVideoDisabled).
+function closeupCanShowAR(idx) {
+  return closeupCanShow(idx) && !closeupCropByRep[closeupRepByStem[idx]];
+}
+
 // Conmuta la pista de vídeo de shakaCloseup al stem `idx`; al ser el mismo
 // manifest que el 360, sigue sincronizado. Solo se llama con el panel a cero:
 // cambiar el contenido a media opacidad se vería como un corte.
@@ -1904,14 +1910,15 @@ function updateCloseupAnim() {
     if (closeupZoomGoal !== 1) closeupZoomReset();
     return;
   }
-  const key = closeupStem + (crop ? ':crop' : ':panel');
+  const key = closeupStem + (arSession ? ':ar' : crop ? ':crop' : ':panel');
   if (key !== closeupPlaced) placeCloseup(closeupStem, crop, key);
+  else if (arSession) placeCloseupAR(closeupStem);
   const e = closeupFade * closeupFade * (3 - 2 * closeupFade);   // smoothstep
   closeupMesh.material.opacity = e;
   // A crop must sit exactly on its patch of the sphere: no scale-in, only the
   // fade — the picture underneath is the same, so it reads as sharpening.
   closeupZoom += (closeupZoomGoal - closeupZoom) * Math.min(1, dt * 8);
-  if (!crop) closeupMesh.scale.setScalar((CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e) * closeupZoom);
+  if (!crop) closeupMesh.scale.setScalar((CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e) * closeupZoom * closeupBase);
   if (!closeupWC && closeupTexture && !HAS_RVFC) closeupTexture.needsUpdate = true;
 }
 
@@ -1995,7 +2002,10 @@ function updateCloseupSyncTag(now) {
 // its own pace — never more than one 360 frame ahead of what is shown.
 function closeupClock() {
   const v = videoEl;
-  if (v.__mtAt == null) return v.currentTime;
+  // In AR the 360 has no picture (setVideoDisabled), so its rVFC has stopped
+  // and __mt is the last frame before AR: the element's own clock, which the
+  // audio plays from, is the one to follow then.
+  if (v.__mtAt == null || videoDisabled) return v.currentTime;
   if (v.paused || v.seeking) return v.__mt;
   return v.__mt + Math.min(1 / 24, (performance.now() - v.__mtAt) / 1000 * v.playbackRate);
 }
@@ -2040,6 +2050,12 @@ const CLOSEUP_DIST = 2.5;             // m from the head to the panel
 const _cuHead = new THREE.Vector3(), _cuDir = new THREE.Vector3();
 function placeCloseup(stem, crop, key) {
   closeupPlaced = key;
+  closeupBase = 1;
+  if (arSession) {
+    scene.add(closeupMesh);
+    placeCloseupAR(stem);
+    return;
+  }
   if (!crop) {
     // The panel stays where it appeared — in the musician's direction, 2.5 m
     // from the head at that moment — instead of hanging off the camera and
@@ -2065,19 +2081,60 @@ function placeCloseup(stem, crop, key) {
   closeupMesh.lookAt(sphere.getWorldPosition(_cropC));
 }
 
+// AR: the panel stands BESIDE the musician, to their right as the viewer sees
+// them, at the height of their sound and turned to face the viewer — so the
+// picture, the voice and the figure come from the same place, and the
+// passthrough in front of you stays clear. Recomputed every frame (cheap): as
+// you walk round the room it keeps to the musician's side facing you, and it
+// follows the room while it is being calibrated.
+// It is AR_CU_W wide, or wider when the musician is far: never under
+// AR_CU_MIN_DEG of view, or a 720p close-up would be a stamp at 6 m.
+const AR_CU_W = 0.8;                 // m
+const AR_CU_MIN_DEG = 16;
+const AR_CU_GAP = 0.35;              // m between the musician's centre and the panel's edge
+const _cuMus = new THREE.Vector3();
+let closeupBase = 1;                 // panel scale before the fade/zoom: 1 except in AR
+function placeCloseupAR(stem) {
+  camera.getWorldPosition(_cuHead);
+  const m = stem >= 0 ? arSources[stem] : null;
+  if (m) m.getWorldPosition(_cuMus);
+  else _cuMus.copy(_cuHead).addScaledVector(camera.getWorldDirection(_cuDir), CLOSEUP_DIST);
+  _cuDir.set(_cuMus.x - _cuHead.x, 0, _cuMus.z - _cuHead.z);
+  const dist = Math.max(0.5, _cuDir.length());
+  _cuDir.multiplyScalar(1 / dist);
+  const w = Math.max(AR_CU_W, 2 * dist * Math.tan(AR_CU_MIN_DEG * Math.PI / 360));
+  // Right of forward (fx, 0, fz) is (-fz, 0, fx).
+  const off = AR_CU_GAP + w / 2;
+  closeupMesh.position.set(_cuMus.x - _cuDir.z * off, _cuMus.y, _cuMus.z + _cuDir.x * off);
+  // The plane faces +Z: turn it about Y towards the head, no tilt.
+  closeupMesh.rotation.set(0, Math.atan2(_cuHead.x - closeupMesh.position.x,
+                                         _cuHead.z - closeupMesh.position.z), 0);
+  closeupBase = w / 2;               // the geometry is 2 m wide
+}
+
 // Deja el close-up a cero de golpe, sin transición: cambio de manifest o entrada
 // en AR, donde no hay nada que fundir porque la escena entera desaparece.
 function resetCloseup() {
+  // Release the track too: with only the variables cleared the transition sees
+  // nothing to switch, and the last close-up would go on decoding unseen.
+  if (closeupReady && closeupStem >= 0) selectCloseupTrack(-1);
   closeupStem = -1; closeupWant = -1; closeupFade = 0;
   closeupArmed = closeupArmCand = -1; closeupArmSince = 0;
   if (closeupMesh) { closeupMesh.visible = false; closeupMesh.material.opacity = 0; }
 }
 
-// Selecciona el close-up del músico enfocado (mirada × zoom) o lo oculta. No
-// actúa en AR (allí ya te acercas al objeto 3D real). Barato: dos barridos de
+// Selecciona el close-up del músico enfocado (mirada × zoom) o lo oculta. En AR
+// solo el músico fijado con un pinch (ver placeCloseupAR). Barato: dos barridos de
 // los stems y una asignación; el trabajo de verdad lo hace la transición.
 function updateCloseupFocus() {
-  if (!closeupReady || arSession || !engine) { closeupArmed = -1; return showCloseup(-1); }
+  if (!closeupReady || !engine) { closeupArmed = -1; return showCloseup(-1); }
+  // AR: only the pinned musician, and nothing is preloaded. A track decoding
+  // in the background is exactly the cost that made AR drop frames, and the
+  // gaze in passthrough sweeps across musicians far more than it means to.
+  if (arSession) {
+    closeupArmed = -1;
+    return showCloseup(closeupCanShowAR(arLocked) ? arLocked : -1);
+  }
   // Pinched: that musician's close-up, whatever the head is looking at.
   if (xrZoomStem >= 0) { closeupArmed = -1; return showCloseup(xrZoomStem); }
   const enter = engine.getFocusedStem(CLOSEUP_ENTER);   // quién se lo gana de sobra
@@ -3161,9 +3218,14 @@ function lockARFocus(i) {
 // nothing (-1):
 //   VR: on a musician → zoom in to them (close-up and spotlight follow); on
 //       another one while zoomed → the zoom swings across; on nothing → out.
-//   AR: on a musician → pin them; on the pinned one or on nothing → unpin.
+//   AR: on a musician → pin them, and their close-up video (if they have one)
+//       appears beside them; on the pinned one or on nothing → unpin, and it
+//       goes. On the close-up → it grows / shrinks back.
 function xrSelect(target) {
   if (arSession) {
+    // A tap on the close-up grows it (a second one back): it must not reach
+    // the lock below, where CLOSEUP_TARGET would read as musician 999.
+    if (target === CLOSEUP_TARGET) return closeupZoomTap();
     if (target >= 0 && target !== arLocked) lockARFocus(target);
     else if (arLocked >= 0) lockARFocus(-1);
     return;
@@ -4340,7 +4402,7 @@ async function enterAR() {
     introShow(false);
 
     if (sphere) sphere.visible = false;           // el mundo real sustituye al 360
-    resetCloseup();                               // sin close-ups en AR
+    resetCloseup();                               // el de VR/escritorio no sigue: en AR sale con el pinch
 
     // En AR cada fuente debe oírse desde su sitio (no solo al "mirar + zoom"):
     // subimos restGain a tope y anulamos el boost por zoom; la espacialización y
@@ -4386,6 +4448,7 @@ async function enterAR() {
       }
       telemetryLeaveXR();
       voice?.mark('exit-ar');
+      resetCloseup();             // the AR panel does not carry over to the 360
       pointer.detach();
       xrMenu.close();
       // Vuelve la esfera, así que vuelve a hacer falta la imagen.
