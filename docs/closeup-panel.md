@@ -38,8 +38,8 @@ down a destination; `selectCloseupTrack()` performs the switch; and
 `updateCloseupAnim()`, which runs once per rendered frame, is the only place that
 reconciles them.
 
-That last point matters more than it looks. The animation lives in **both render
-loops** (desktop and XR) rather than hanging off the focus code, because
+That last point matters more than it looks. The animation lives in **every render
+loop** (desktop, VR and AR, which has its own) rather than hanging off the focus code, because
 `updateCloseupFocus()` only runs when there is a pose, and in AR it answers to
 the pin rather than the gaze (§12). If the fade depended on it, losing tracking
 would leave the panel frozen at half opacity in front of your face.
@@ -393,6 +393,10 @@ plane; the size is `closeupBase`, multiplied into the fade's scale.
 rVFC stops and `__mt` freezes at the last frame before AR. `closeupClock()`
 falls back to `videoEl.currentTime` while `videoDisabled`, which is the clock
 the audio plays from. The second-Shaka path already compared `currentTime`s.
+
+**AR has its own render loop** (`enterAR`'s `setAnimationLoop`), not the VR one:
+`updateCloseupAnim()` and `updateCloseupFocus()` are called there too. The first
+version forgot, and the pinch pinned the musician but no panel ever came.
 
 **Entering and leaving.** `resetCloseup()` runs on both, and now also lets the
 track go (`selectCloseupTrack(-1)`): clearing the variables alone left the

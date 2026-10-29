@@ -4490,6 +4490,10 @@ async function enterAR() {
       // fuera del `if (frame)`: es la escena la que tiene que estar al día,
       // haya pose de visor o no.
       updateMeshAnims();
+      // The close-up pinned with a pinch: its fade, track switch and place
+      // beside the musician. Outside `if (frame)` for the same reason as in the
+      // VR loop: the panel must finish leaving even without a pose.
+      updateCloseupAnim();
       const _p0 = ARPERF ? perfFrameStart(time) : 0;
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
@@ -4519,6 +4523,7 @@ async function enterAR() {
           const [tp, tq] = arTelemetryPose(pose);
           telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
           pointer.update(frame, refSpace);
+          updateCloseupFocus();                                   // the pinned musician's close-up
           if (ARPERF) {
             _perf.audio += _p1 - _p0; _perf.focus += performance.now() - _p1;
           }
