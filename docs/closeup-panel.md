@@ -253,10 +253,8 @@ storm, and `?maxh` picking a close-up.
 
 ## 9. What this does not do
 
-- **Live capture.** `stream.sh` ignores `CLOSEUPS` when capturing; close-ups are
-  file mode only.
-- **Crops in AR.** A crop is a patch of the 360, and in AR the 360 is neither
-  drawn nor decoded. Only musicians with a close-up *video* get a panel there.
+- **Close-up files in live capture.** `stream.sh` drops file close-ups when
+  capturing; a live concert only gets crops of the 360 (§10).
 - **Segment size.** 6 s segments dominate switch latency. Shorter helps, but
   segment length has nothing to do with A/V sync — audio and video share the
   timeline — and shorter segments mean more keyframes, more bitrate for the same
@@ -371,6 +369,9 @@ plus zoom of VR does not exist: there is no zoom, and the focus is the AR focus
 - Pinch a musician → they are pinned (spotlight, as before) **and** their
   close-up video fades in. Pinch another one → the panel fades out and comes
   back with theirs. Pinch nothing, or the pinned one again → both go.
+- A pinch with the **left hand** always closes: it unpins whatever it points
+  at, so there is no need to aim at empty space. The right hand does all of the
+  above.
 - Pinch the panel itself → it grows ×1.6; again → back. (`CLOSEUP_TARGET` is
   999, so `xrSelect` handles it before the lock: otherwise it would pin
   "musician 999".)
@@ -401,6 +402,18 @@ version forgot, and the pinch pinned the musician but no panel ever came.
 **Entering and leaving.** `resetCloseup()` runs on both, and now also lets the
 track go (`selectCloseupTrack(-1)`): clearing the variables alone left the
 transition with nothing to switch, and the last close-up decoding unseen.
+
+**Crops in AR.** A crop is shown on the same panel beside the musician, not on
+the sphere (there is none in AR): `closeupCropOf()` returns null in AR, so the
+fade, the scale-in and the tap zoom treat it as any close-up. It needs nothing
+from the 360 — `stream.sh` cuts it server-side into a track of its own — so it
+works even though AR does not decode the 360, and it is what gives a **live**
+concert close-ups in AR, where file close-ups do not exist. Its sharpness is
+the 360's: at 3072×1536 a 32° crop is ~270 source pixels across (§10, *Limits*).
+
+**Sync tag in AR.** `?cusync=1` (or debug mode) normally hangs on the sphere,
+which AR hides; there it sits just under the panel, as wide as it and turned
+like it, and only while the panel is up (`placeCloseupSyncTag()`).
 
 **Not yet verified on the headset:** frame rate with a 720p close-up decoding
 over passthrough (watch `?arperf=1`), whether the panel's side and size read
