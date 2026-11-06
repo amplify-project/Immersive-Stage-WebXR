@@ -1907,8 +1907,17 @@ function bindSettings() {
     if (v) tel()[key] = v; else delete tel()[key];
     saveSettings();
   };
-  // Pasting the https:// address of the gateway is the obvious mistake: fix it.
-  text('telUrl', 'url', v => v.replace(/^http(s?):\/\//i, (_, s) => `ws${s}://`));
+  // The obvious mistakes, fixed: the https:// address of the gateway, and its
+  // base (…/telemetry) instead of the ingest endpoint — /health answers on the
+  // base, but the socket only opens on …/ingest.
+  text('telUrl', 'url', v => {
+    v = v.replace(/^http(s?):\/\//i, (_, s) => `ws${s}://`);
+    try {
+      const u = new URL(v);
+      if (!/\/ingest\/?$/.test(u.pathname)) u.pathname = u.pathname.replace(/\/?$/, '/ingest');
+      return u.toString();
+    } catch (_) { return v; }
+  });
   text('telToken', 'token');
   text('telSession', 'session', v => v.replace(/[^\w.-]+/g, '-'));
   $('voiceOn').onchange = e => {
