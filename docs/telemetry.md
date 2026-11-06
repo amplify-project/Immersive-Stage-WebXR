@@ -113,26 +113,47 @@ verbatim instead of deriving. No consumer change needed.
 
 ## Client config
 
-`scene.json`:
+The editor's **Settings · players** card (right column, above Status) sets all
+of this; each control saves `scene.json` at once and players pick it up when
+they reload. What it writes:
 
 ```json
 "telemetry": {
   "enabled": true,
-  "url": "",
+  "target": "remote",
+  "url": "wss://d4hqc94t82nq1.cloudfront.net/telemetry/ingest",
+  "token": "<INGEST_TOKEN>",
+  "session": "",
   "rateHz": 20,
-  "flushMs": 100
+  "flushMs": 100,
+  "screen": true
 }
 ```
 
-An empty `url` means `/ingest` on the origin serving the player, which `server.js`
-proxies to the relay (see below) — the usual setup, and the one that avoids a
-second certificate prompt on the headset. Set `url` only when the relay lives on
-another machine.
+| key | meaning |
+|---|---|
+| `enabled` | `false` = no telemetry at all (the card's **Off**) |
+| `target` | `"local"`: `/ingest` on the origin serving the player, which `server.js` proxies to the built-in relay (see below) — the usual LAN setup, and the one that avoids a second certificate prompt on the headset. `url` is ignored but kept, so switching back does not lose it. `"remote"`: `url`, an [XR-telemetry](https://github.com/amplify-project/XR-telemetry) gateway or a relay on another machine. Absent (older scenes): `url` if set, else same origin. |
+| `url` | the **ingest endpoint**, ending in `/ingest` — not the gateway base (`…/telemetry`): `/health` answers on the base, the socket only on `/ingest`. The editor adds `/ingest` and turns `https://` into `wss://`. |
+| `token` | the gateway's `INGEST_TOKEN`, sent as `?token=`. It is in the public `scene.json`: it keeps bots out, it is not a secret. Never put the consume token here. |
+| `session` | sent as `?session=`; empty = the session the operator starts with `xrtel start` |
+| `rateHz` | samples per second (10/20/30/60 in the editor) |
+| `screen` | `false` = only in VR/AR, not on desktop/tablet |
+
+`token` and `session` only apply to a remote target, and are not added if the
+URL already carries them.
+
+**Test connection** in the card checks `/health` of the destination (local
+relay: players and consumers connected; gateway: Redis, producers, consumers,
+archiving, whether it wants a token) and, for a gateway, opens the ingest socket
+with the token — the only way to know the token is accepted. The card also links
+the gateway's operator console (`…/telemetry/ui/`).
 
 URL overrides (handy for testing without editing the scene):
 
 - `?telemetry=wss://host/ingest` — enable + point at a relay
 - `?player=NAME` — set a stable, human-readable player id
+- `?session=NAME` — session for this page, over the scene's
 
 The client (`src/telemetry/Telemetry.js`) is fully decoupled: it starts when a
 stream loads (screen mode) and on VR/AR session enter, samples the pose already

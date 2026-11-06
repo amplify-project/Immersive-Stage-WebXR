@@ -1109,9 +1109,9 @@ server.on('upgrade', (req, socket) => {
 // entre ningún casco). `telemetry.enabled` de scene.json es cosa del PLAYER: si
 // está a false nadie enviará poses, así que lo decimos aquí en vez de anunciar
 // un endpoint que parece listo y nunca recibe nada.
-function sceneTelemetryEnabled() {
-  try { return !!JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')).telemetry?.enabled; }
-  catch (_) { return false; }
+function sceneTelemetry() {
+  try { return JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')).telemetry || {}; }
+  catch (_) { return {}; }
 }
 
 // This machine's LAN addresses, for the startup banner: the headset and the
@@ -1134,9 +1134,14 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`  editor → ${scheme}://${host}:${PORT}/editor.html`);
   if (ips.length > 1) console.log(`           also on: ${ips.slice(1).join(', ')}`);
   if (relay) {
-    const note = sceneTelemetryEnabled()
-      ? 'scene.json: enabled'
-      : 'scene.json: enabled=false → ningún player enviará (usa ?telemetry=… para probar)';
+    // The editor's Settings card can point the players at an XR-telemetry
+    // gateway instead: then this relay stays up but nobody sends here.
+    const t = sceneTelemetry();
+    const remote = t.enabled && t.target !== 'local' && t.url;
+    const note = !t.enabled
+      ? 'scene.json: enabled=false → ningún player enviará (usa ?telemetry=… para probar)'
+      : remote ? `scene.json: players send to the gateway ${t.url}, not here`
+      : 'scene.json: enabled';
     console.log(`  telemetry → ${relay.scheme}://${host}:${PORT}/ingest · consume=/consume · health=/telemetry/health`);
     console.log(`              ${note}`);
   }

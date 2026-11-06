@@ -449,6 +449,82 @@
     <button class="alt" style="margin-top:10px" onclick="makeProxy()">Create proxy</button>
   </div>
 
+  <!-- Player settings: what every player does when it loads, as opposed to what
+       it plays. Each control saves scene.json at once (like debug mode always
+       did); players that are already open pick it up when they reload. -->
+  <div class="card" id="settingsCard">
+    <h2>Settings · players</h2>
+
+    <details class="fold" id="telFold" open>
+      <summary>Telemetry<span class="who small" id="telWho"></span></summary>
+      <p class="hint">Head pose (and view on desktop/tablet) of every player, at the chosen rate, for the
+        Unity render and the session logs.</p>
+      <div class="row" style="margin-top:8px">
+        <div>
+          <label>Send to</label>
+          <select id="telTarget">
+            <option value="off">Off</option>
+            <option value="local">This server (LAN relay)</option>
+            <option value="remote">XR-telemetry gateway</option>
+          </select>
+        </div>
+        <div style="flex:0 0 110px">
+          <label>Rate</label>
+          <select id="telRate">
+            <option value="10">10 Hz</option><option value="20">20 Hz</option>
+            <option value="30">30 Hz</option><option value="60">60 Hz</option>
+          </select>
+        </div>
+      </div>
+      <div id="telRemote" style="display:none">
+        <label>Gateway ingest URL</label>
+        <input type="text" id="telUrl" placeholder="wss://d4hqc94t82nq1.cloudfront.net/telemetry/ingest" spellcheck="false">
+        <div class="row">
+          <div>
+            <label>Ingest token</label>
+            <input type="text" id="telToken" placeholder="INGEST_TOKEN of the gateway" spellcheck="false" autocomplete="off">
+          </div>
+          <div>
+            <label>Session (optional)</label>
+            <input type="text" id="telSession" placeholder="empty = the one started with xrtel start" spellcheck="false">
+          </div>
+        </div>
+        <p class="hint">The ingest token ends up in the public <code>scene.json</code>: it keeps bots out, it is
+          not a secret (the consume token is — never put it here).</p>
+      </div>
+      <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:10px;cursor:pointer">
+        <input type="checkbox" id="telScreen" style="width:auto"> Also on desktop / tablet (not only in VR/AR)
+      </label>
+      <div class="row" style="margin-top:12px;align-items:center">
+        <button class="ghost" style="flex:0 0 auto" id="telTest" onclick="telemetryTest()">Test connection</button>
+        <span class="small" id="telStatus" style="flex:1;font-family:var(--mono)"></span>
+      </div>
+      <div class="small" id="telLinks" style="margin-top:6px"></div>
+    </details>
+
+    <details class="fold" id="voiceFold">
+      <summary>Voice recording<span class="who small" id="voiceWho"></span></summary>
+      <p class="hint">Records what each participant says while inside (think-aloud), on this server, in Opus
+        chunks stamped with the media time so it lines up with the pose. The headset asks for the microphone
+        when it enters. See <code>docs/voice-recording.md</code>.</p>
+      <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:8px;cursor:pointer">
+        <input type="checkbox" id="voiceOn" style="width:auto"> Record participants' voice
+      </label>
+      <div class="row" style="margin-top:10px;align-items:center">
+        <button class="ghost" style="flex:0 0 auto" onclick="voiceTest()">Check recorder</button>
+        <span class="small" id="voiceStatus" style="flex:1;font-family:var(--mono)"></span>
+      </div>
+    </details>
+
+    <!-- Every player that loads while this is on starts with the musician
+         rings (movable: drag / long pinch, saved back here) and the
+         performance trace. -->
+    <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:14px;cursor:pointer">
+      <input type="checkbox" id="debugMode" style="width:auto"> Debug mode on players (musician rings + performance)
+    </label>
+    <p class="hint">Saved as you change it; open players pick it up when they reload.</p>
+  </div>
+
   <div class="card">
     <h2>Status · <span id="statusBadge" class="badge b-idle">idle</span></h2>
     <div class="small" id="statusLine" style="margin-bottom:8px"></div>
@@ -459,12 +535,6 @@
       <button onclick="saveScene(true)">Save scene</button>
       <button class="ghost" onclick="openPlayer()">Open player</button>
     </div>
-    <!-- Every player that loads while this is on starts with the musician
-         rings (movable: drag / long pinch, saved back here) and the
-         performance trace. Saved at once; open players pick it up on reload. -->
-    <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:10px;cursor:pointer">
-      <input type="checkbox" id="debugMode" style="width:auto"> Debug mode on players (musician rings + performance)
-    </label>
   </div>
 </div>
 
@@ -861,6 +931,7 @@ function bindControls() {
     await saveScene(false);
     toast(scene.debug ? 'Debug mode ON — players pick it up when they load' : 'Debug mode off');
   };
+  bindSettings();
   $('selGain').oninput = e => { if(selected>=0){ scene.stems[selected].gainDb=+e.target.value;
     if (mon) { mon.setStemGainDb(selected, +e.target.value); const g=$('mg'+selected); if (g) g.value=e.target.value; } } };
 
@@ -1747,6 +1818,153 @@ function renderBedReport(r) {
     `<table style="width:100%;font-size:12px;border-collapse:collapse">` +
     `<tr style="text-align:left;opacity:.6"><th>stem</th><th>heard at</th><th>elev</th><th>scene</th><th></th></tr>${rows}</table>` +
     align;
+}
+
+// ── Settings · players ───────────────────────────────────────────────────────
+// scene.telemetry, as the player reads it:
+//   enabled  false → no telemetry at all
+//   target   'local'  → this server's relay (same origin /ingest; url is kept
+//                       but ignored, so switching back does not lose it)
+//            'remote' → url (an XR-telemetry gateway), plus ?token= / ?session=
+//            absent   → old scenes: url if set, else same origin
+//   rateHz, screen (false = only in VR/AR), url, token, session
+function telTarget() {
+  const t = scene.telemetry || {};
+  if (!t.enabled) return 'off';
+  return t.target || (t.url ? 'remote' : 'local');
+}
+// The URL a player will open, token masked: what the summary line shows.
+function telEffectiveUrl(mask) {
+  const t = scene.telemetry || {}, target = telTarget();
+  if (target === 'off') return '';
+  if (target === 'local') return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ingest`;
+  try {
+    const u = new URL(t.url);
+    if (t.session) u.searchParams.set('session', t.session);
+    if (t.token) u.searchParams.set('token', mask ? 'MASK' : t.token);
+    return mask ? u.toString().replace('token=MASK', 'token=…') : u.toString();
+  } catch (_) { return ''; }
+}
+// wss://host/base/ingest → https://host/base  (where /health and /ui/ live)
+function telGatewayBase() {
+  try {
+    const u = new URL((scene.telemetry || {}).url);
+    u.protocol = u.protocol === 'ws:' ? 'http:' : 'https:';
+    u.search = ''; u.pathname = u.pathname.replace(/\/ingest\/?$/, '');
+    return u.toString().replace(/\/$/, '');
+  } catch (_) { return null; }
+}
+function renderSettings() {
+  const t = scene.telemetry || {}, target = telTarget();
+  $('telTarget').value = target;
+  $('telRate').value = String(t.rateHz || 20);
+  $('telUrl').value = t.url || '';
+  $('telToken').value = t.token || '';
+  $('telSession').value = t.session || '';
+  $('telScreen').checked = t.screen !== false;
+  $('telRemote').style.display = target === 'remote' ? '' : 'none';
+  for (const id of ['telRate', 'telScreen', 'telTest']) $(id).disabled = target === 'off';
+  $('telWho').textContent = target === 'off' ? 'off' : target === 'local' ? 'this server' : 'gateway';
+  const base = target === 'remote' ? telGatewayBase() : null;
+  const eff = telEffectiveUrl(true);
+  let links = eff ? `Players send to <code>${esc(eff)}</code>` : '';
+  if (target === 'local') links += ` · <a href="/telemetry/health" target="_blank" rel="noopener">health ↗</a>`;
+  if (base) links += ` · <a href="${esc(base)}/ui/" target="_blank" rel="noopener">operator console ↗</a>`
+                   + ` · <a href="${esc(base)}/health" target="_blank" rel="noopener">health ↗</a>`;
+  if (target === 'remote' && t.url && !/^wss?:\/\//i.test(t.url))
+    links += ` · <span style="color:var(--bad)">the URL must start with wss://</span>`;
+  else if (target === 'remote' && location.protocol === 'https:' && /^ws:\/\//i.test(t.url || ''))
+    links += ` · <span style="color:var(--warn)">ws:// from an https page: the browser will block it, use wss://</span>`;
+  $('telLinks').innerHTML = links;
+  $('voiceOn').checked = !!(scene.voice && scene.voice.enabled);
+  $('voiceWho').textContent = $('voiceOn').checked ? 'on' : 'off';
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c])); }
+
+async function saveSettings(msg) {
+  renderSettings();
+  $('telStatus').textContent = '';
+  const ok = await saveScene(false);
+  if (msg || !ok) toast(ok ? msg : 'Error saving');
+}
+function bindSettings() {
+  renderSettings();
+  const tel = () => (scene.telemetry = scene.telemetry || {});
+  $('telTarget').onchange = e => {
+    const v = e.target.value, t = tel();
+    t.enabled = v !== 'off';
+    if (v !== 'off') t.target = v;
+    if (t.rateHz == null) t.rateHz = 20;
+    saveSettings(v === 'off' ? 'Telemetry off' : v === 'local' ? 'Telemetry → this server'
+      : (t.url ? 'Telemetry → gateway' : 'Telemetry → gateway: now fill in its URL'));
+    if (v === 'remote' && !t.url) $('telUrl').focus();
+  };
+  $('telRate').onchange = e => { tel().rateHz = +e.target.value; saveSettings('Telemetry rate: ' + e.target.value + ' Hz'); };
+  $('telScreen').onchange = e => { tel().screen = e.target.checked; saveSettings(); };
+  // Text fields: saved when the field is left, not on every key.
+  const text = (id, key, fix = v => v) => $(id).onchange = e => {
+    const v = fix(e.target.value.trim());
+    if (v) tel()[key] = v; else delete tel()[key];
+    saveSettings();
+  };
+  // The obvious mistakes, fixed: the https:// address of the gateway, and its
+  // base (…/telemetry) instead of the ingest endpoint — /health answers on the
+  // base, but the socket only opens on …/ingest.
+  text('telUrl', 'url', v => {
+    v = v.replace(/^http(s?):\/\//i, (_, s) => `ws${s}://`);
+    try {
+      const u = new URL(v);
+      if (!/\/ingest\/?$/.test(u.pathname)) u.pathname = u.pathname.replace(/\/?$/, '/ingest');
+      return u.toString();
+    } catch (_) { return v; }
+  });
+  text('telToken', 'token');
+  text('telSession', 'session', v => v.replace(/[^\w.-]+/g, '-'));
+  $('voiceOn').onchange = e => {
+    scene.voice = Object.assign({}, scene.voice, { enabled: e.target.checked });
+    saveSettings(e.target.checked ? 'Voice recording ON — players ask for the mic when they enter' : 'Voice recording off');
+  };
+}
+
+// Health of the destination, then (gateway) an ingest WebSocket with the token:
+// /health says the gateway is up, only the socket says the token is accepted.
+async function telemetryTest() {
+  const st = $('telStatus'), target = telTarget();
+  const say = (m, c) => { st.textContent = m; st.style.color = c ? `var(--${c})` : ''; };
+  say('checking…');
+  const base = target === 'local' ? '/telemetry' : telGatewayBase();
+  if (!base) return say('no gateway URL', 'bad');
+  let h;
+  try {
+    const r = await fetch(base + '/health', { cache: 'no-store' });
+    h = await r.json().catch(() => ({}));
+    if (!r.ok && !h.redis) return say(`health → HTTP ${r.status}`, 'bad');
+  } catch (e) { return say(`cannot reach ${base}/health (${e.message})`, 'bad'); }
+  if (target === 'local') {
+    if (!h.ok) return say(h.reason || 'relay not running on this server', 'bad');
+    return say(`relay up · ${h.players} player(s) sending · ${h.consumers} consumer(s)`, 'ok');
+  }
+  const info = `redis ${h.redis} · ${h.producers ?? '?'} producer(s) · ${h.consumers ?? '?'} consumer(s)`
+             + (h.archive ? ' · archiving' : ' · NOT archiving');
+  if (!h.ok) return say('gateway up but unhealthy: ' + info, 'bad');
+  if (h.auth?.ingest && !(scene.telemetry || {}).token) return say('the gateway wants an ingest token · ' + info, 'warn');
+  say('gateway up · ' + info + ' · trying the ingest socket…');
+  const okSock = await new Promise(res => {
+    let ws; const done = v => { clearTimeout(to); try { ws.close(); } catch (_) {} res(v); };
+    const to = setTimeout(() => done(false), 6000);
+    try { ws = new WebSocket(telEffectiveUrl(false)); } catch (_) { return done(false); }
+    ws.onopen = () => done(true); ws.onerror = () => done(false);
+  });
+  if (okSock) say('✓ ingest accepted · ' + info, 'ok');
+  else say('ingest socket refused (wrong token? URL?) · ' + info, 'bad');
+}
+async function voiceTest() {
+  const st = $('voiceStatus');
+  try {
+    const h = await (await fetch('/voice/health', { cache: 'no-store' })).json();
+    st.textContent = h.ok ? `recorder up · ${h.recording} recording now · files → ${h.dir}` : (h.reason || 'recorder not running');
+    st.style.color = h.ok ? 'var(--ok)' : 'var(--bad)';
+  } catch (e) { st.textContent = 'cannot reach /voice/health'; st.style.color = 'var(--bad)'; }
 }
 
 async function saveScene(notify) {
