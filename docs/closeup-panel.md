@@ -253,10 +253,8 @@ storm, and `?maxh` picking a close-up.
 
 ## 9. What this does not do
 
-- **Live capture.** `stream.sh` ignores `CLOSEUPS` when capturing; close-ups are
-  file mode only.
-- **Crops in AR.** A crop is a patch of the 360, and in AR the 360 is neither
-  drawn nor decoded. Only musicians with a close-up *video* get a panel there.
+- **Close-up files in live capture.** `stream.sh` drops file close-ups when
+  capturing; a live concert only gets crops of the 360 (§10).
 - **Segment size.** 6 s segments dominate switch latency. Shorter helps, but
   segment length has nothing to do with A/V sync — audio and video share the
   timeline — and shorter segments mean more keyframes, more bitrate for the same
@@ -371,6 +369,9 @@ plus zoom of VR does not exist: there is no zoom, and the focus is the AR focus
 - Pinch a musician → they are pinned (spotlight, as before) **and** their
   close-up video fades in. Pinch another one → the panel fades out and comes
   back with theirs. Pinch nothing, or the pinned one again → both go.
+- A pinch with the **left hand** always closes: it unpins whatever it points
+  at, so there is no need to aim at empty space. The right hand does all of the
+  above.
 - Pinch the panel itself → it grows ×1.6; again → back. (`CLOSEUP_TARGET` is
   999, so `xrSelect` handles it before the lock: otherwise it would pin
   "musician 999".)
@@ -402,6 +403,71 @@ version forgot, and the pinch pinned the musician but no panel ever came.
 track go (`selectCloseupTrack(-1)`): clearing the variables alone left the
 transition with nothing to switch, and the last close-up decoding unseen.
 
+**Crops in AR.** A crop is shown on the same panel beside the musician, not on
+the sphere (there is none in AR): `closeupCropOf()` returns null in AR, so the
+fade, the scale-in and the tap zoom treat it as any close-up. It needs nothing
+from the 360 — `stream.sh` cuts it server-side into a track of its own — so it
+works even though AR does not decode the 360, and it is what gives a **live**
+concert close-ups in AR, where file close-ups do not exist. Its sharpness is
+the 360's: at 3072×1536 a 32° crop is ~270 source pixels across (§10, *Limits*).
+
+**Sync tag in AR.** `?cusync=1` (or debug mode) normally hangs on the sphere,
+which AR hides; there it sits just under the panel, as wide as it and turned
+like it, and only while the panel is up (`placeCloseupSyncTag()`).
+
 **Not yet verified on the headset:** frame rate with a 720p close-up decoding
 over passthrough (watch `?arperf=1`), whether the panel's side and size read
 well, and the sync tag (`?cusync=1`) in AR.
+
+---
+
+## 13. Live crops: what they cost, and what is next
+
+The crops of §10 are the only close-ups a live concert has, and §12 shows them
+in AR. Measured on 2026-10-30, live from the X4 bridge (2880×1440, 30 fps,
+NVENC) with crops for two musicians (62° wide, `interp=line`, `cas=0.5`):
+
+| | |
+|---|---|
+| Panel shows up after a pinch in AR | ~1–2 s (one 2 s segment plus a keyframe; no preload in AR) |
+| `?cusync=1` on the Quest | `sync −11 ms` (green: under one frame) |
+| `ffmpeg` on the encode box | ~626 % CPU, load 10–14 on 12 threads |
+| NVENC | 24 %, 3 sessions |
+| `aws` uploader | ~123 % CPU (one sync per second) |
+
+**The limit is the CPU, not the GPU.** `v360` and `cas` run on the CPU for every
+crop, while NVENC has plenty of room (an RTX "A" card has no session cap). Two
+crops already put our laptop at its limit; a full band would not fit on it.
+
+**How to test it.** In the editor (live mode), tick ✂ on a few musicians and
+start the live. `closeups.json` must appear next to the manifest with `"crop"`
+entries. On the headset, open the player with `?cusync=1`, enter AR and pinch a
+musician with the right hand: the panel comes beside them with the tag under
+it. A left-hand pinch closes it. On desktop and in VR a crop is laid over the
+same pixels of the sphere, so it barely shows. To see that it is active there,
+watch for `chunk_*_<rep>_*.m4s` requests in DevTools while zoomed in on the
+musician.
+
+**Open items**
+
+- **Crops on the GPU (`CROP_MODE=rect`, not implemented).** Upload the 360 to
+  CUDA once, then `crop` + `scale_cuda` per musician, straight into NVENC.
+  `crop` on CUDA frames followed by `scale_cuda` was checked to work in our
+  ffmpeg 8. A rectangular crop of the equirect skips the reprojection: near the
+  horizon the edges stretch by ~4 % at 40° and ~11 % at 62°. That is invisible
+  in AR. In VR, where the crop is laid on the sphere, the edges would not match
+  exactly, so mark these crops in `closeups.json` and let the player place them
+  accordingly. Keep `v360` for musicians far above or below the horizon. On the
+  client's machine, check the X5's UVC pixel format first: MJPEG or YUYV still
+  costs CPU before the upload.
+- **Cheap savings to try first:** `CROP_SHARPEN=0`; do not run the player on
+  the encode box; upload every 2 s instead of every 1 s.
+- **Frame rate in AR with the panel open:** not yet measured (`?arperf=1`).
+- **Real audio latency on the Quest:** unknown. The tag's `audio out` reads
+  ~2 ms there, so the browser does not report `outputLatency`. `sync` compares
+  the crop with the 360's clock, so it shows that the crop matches the 360, not
+  that the 360 matches the sound. That alignment is `AUDIO_DELAY`, calibrated
+  on a PC.
+- **Faster appearance:** shorter segments for the crop tracks only, or
+  preloading the gazed-at musician's crop in AR (720p, not the 4K that caused
+  the AR frame drops, but unmeasured).

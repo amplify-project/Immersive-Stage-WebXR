@@ -1813,10 +1813,14 @@ function showCloseup(idx) {
   closeupWant = closeupCanShow(idx) ? idx : -1;
 }
 
-// In AR only a close-up VIDEO can be shown: a crop is a patch of the 360, and
-// the 360 is neither drawn nor decoded there (see setVideoDisabled).
-function closeupCanShowAR(idx) {
-  return closeupCanShow(idx) && !closeupCropByRep[closeupRepByStem[idx]];
+// The crop a close-up track was cut from, or null for a close-up video. In AR
+// it is always null: there is no sphere to lay it on, so a crop is shown on the
+// panel beside the musician like any close-up. It is its own track (stream.sh
+// cuts it server-side), so it needs nothing from the 360, which AR does not
+// decode — this is what gives a LIVE concert close-ups in AR.
+function closeupCropOf(stem) {
+  if (arSession || stem < 0) return null;
+  return closeupCropByRep[closeupRepByStem[stem]] || null;
 }
 
 // Conmuta la pista de vídeo de shakaCloseup al stem `idx`; al ser el mismo
@@ -1895,7 +1899,7 @@ function updateCloseupAnim() {
                             : closeupEl.readyState >= 3 && !closeupEl.seeking && !closeupEl.paused;
   const want   = closeupStem >= 0 && closeupStem === closeupWant;
   const target = (want && (closeupFade > 0 || fresh)) ? 1 : 0;
-  const crop   = closeupStem >= 0 ? (closeupCropByRep[closeupRepByStem[closeupStem]] || null) : null;
+  const crop   = closeupCropOf(closeupStem);
   // A crop fades slower than the panel: it lands during the zoom (it rides the
   // sphere), and over the same picture a long fade just reads as focusing.
   const step   = dt / (crop ? CROP_FADE_S : CLOSEUP_FADE_S);
@@ -1953,7 +1957,27 @@ function makeCloseupSyncTag() {
   cuSyncTag.lookAt(0, 0, 0);
   cuSyncTag.renderOrder = 1000;
   cuSyncTag.visible = false;
+  cuSyncTag.userData.home = { p: cuSyncTag.position.clone(), q: cuSyncTag.quaternion.clone() };
   return cuSyncTag;
+}
+
+// VR/desktop: fixed on the sphere, ahead and below. AR: just under the panel,
+// as wide as it and turned like it (the panel is 2 × 1.125 scaled uniformly).
+function placeCloseupSyncTag() {
+  const parent = arSession ? scene : sphere;
+  if (cuSyncTag.parent !== parent) {
+    parent.add(cuSyncTag);
+    if (!arSession) {
+      const h = cuSyncTag.userData.home;
+      cuSyncTag.position.copy(h.p); cuSyncTag.quaternion.copy(h.q); cuSyncTag.scale.setScalar(1);
+    }
+  }
+  if (!arSession) return;
+  const s = closeupMesh.scale.x, k = 2 * s / 1.2;
+  cuSyncTag.quaternion.copy(closeupMesh.quaternion);
+  cuSyncTag.scale.setScalar(k);
+  cuSyncTag.position.copy(closeupMesh.position);
+  cuSyncTag.position.y -= 1.125 * s / 2 + 0.09 * k / 2 + 0.02;
 }
 
 // Close-up vs 360 right now, in ms (+ = close-up ahead), or null if unknown.
@@ -1966,9 +1990,12 @@ function closeupSyncMs() {
 
 function updateCloseupSyncTag(now) {
   if (!cuSyncTag) return;
-  const on = (CUSYNC || debugOn()) && !arSession;
+  // In AR the sphere (its home) is hidden, so the tag goes under the panel, and
+  // only while there is a panel: what it is for there is the close-up's sync.
+  const on = (CUSYNC || debugOn()) && (!arSession || closeupMesh.visible);
   cuSyncTag.visible = on;
   if (!on) { cuSyncAcc.length = 0; return; }
+  placeCloseupSyncTag();
   cuSyncTag.material.opacity = 1;
   const cuOn = closeupMesh.visible && closeupStem >= 0;
   const e = cuOn ? closeupSyncMs() : null;
@@ -2012,7 +2039,7 @@ function closeupClock() {
 
 // A tap on the close-up: a bit more zoom, a second tap back.
 function closeupZoomTap() {
-  const crop = closeupStem >= 0 ? closeupCropByRep[closeupRepByStem[closeupStem]] : null;
+  const crop = closeupCropOf(closeupStem);
   const more = closeupZoomGoal === 1;
   closeupZoomGoal = more ? CLOSEUP_MORE : 1;
   if (!crop) return;                       // a panel just grows
@@ -2133,7 +2160,7 @@ function updateCloseupFocus() {
   // gaze in passthrough sweeps across musicians far more than it means to.
   if (arSession) {
     closeupArmed = -1;
-    return showCloseup(closeupCanShowAR(arLocked) ? arLocked : -1);
+    return showCloseup(closeupCanShow(arLocked) ? arLocked : -1);
   }
   // Pinched: that musician's close-up, whatever the head is looking at.
   if (xrZoomStem >= 0) { closeupArmed = -1; return showCloseup(xrZoomStem); }
@@ -3220,9 +3247,11 @@ function lockARFocus(i) {
 //       another one while zoomed → the zoom swings across; on nothing → out.
 //   AR: on a musician → pin them, and their close-up video (if they have one)
 //       appears beside them; on the pinned one or on nothing → unpin, and it
-//       goes. On the close-up → it grows / shrinks back.
-function xrSelect(target) {
+//       goes. On the close-up → it grows / shrinks back. A LEFT-hand pinch
+//       always closes (unpins), wherever it points: no aiming at empty space.
+function xrSelect(target, src) {
   if (arSession) {
+    if (src && src.handedness === 'left') { if (arLocked >= 0) lockARFocus(-1); return; }
     // A tap on the close-up grows it (a second one back): it must not reach
     // the lock below, where CLOSEUP_TARGET would read as musician 999.
     if (target === CLOSEUP_TARGET) return closeupZoomTap();

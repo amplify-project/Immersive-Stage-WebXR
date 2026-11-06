@@ -23,7 +23,7 @@ const grab = (name) => {
   }
 };
 const consts = src.match(/const CLOSEUP_FADE_S[\s\S]*?const CLOSEUP_ARM_DWELL_S\s*=\s*[-\d.]+;/)[0];
-const real = [consts, grab('closeupCanShow'), grab('showCloseup'), grab('closeupCanShowAR'), grab('selectCloseupTrack'),
+const real = [consts, grab('closeupCanShow'), grab('showCloseup'), grab('closeupCropOf'), grab('selectCloseupTrack'),
               grab('updateCloseupAnim'), grab('resetCloseup'), grab('updateCloseupFocus')].join('\n\n');
 
 // The module-level state the lifted functions close over.
@@ -200,7 +200,7 @@ ok(P.st().stem === 0 && P.st().op === 1, 'looking elsewhere does not move it');
 P.setLocked(1); run(40);
 ok(!P.st().vis, 'stem 1 has no close-up → no panel');
 P.setCrop('1', { azimuthDeg: 0 }); P.setLocked(0); run(40);
-ok(!P.st().vis, 'a CROP close-up is not shown in AR (no 360 there)');
+ok(P.st().stem === 0 && P.st().op === 1, 'a CROP close-up is shown in AR too (its own track, on the panel)');
 P.setCrop('1', null); P.setLocked(-1); run(40);
 ok(!P.st().vis && closeupEl.paused, 'unpinned → gone, track paused');
 P.resetCloseup();
