@@ -1587,12 +1587,33 @@ async function setupFOA() {
     // reenvía al relay: mismo host, puerto y certificado que el player, así que
     // en el casco no hay que aceptar un segundo autofirmado. Pon "url" solo si
     // el relay vive en otra máquina.
-    // Overrides por URL:  ?telemetry=wss://host/ingest   ?player=NOMBRE
+    // Overrides por URL:  ?telemetry=wss://host/ingest   ?player=NOMBRE   ?session=NOMBRE
+    //
+    // The editor's Settings card writes "target": "local" (this server, url
+    // ignored but kept) or "remote" (an XR-telemetry gateway at "url"). For a
+    // gateway, "token" is its INGEST_TOKEN and "session" pins every player to one
+    // session (empty = the one the operator starts with `xrtel start`); both go
+    // into the URL as ?token= / ?session= unless it already carries them, and
+    // ?session= on the page wins over the scene. Scenes without "target" keep
+    // the old rule: url if set, else same origin.
+    //   "telemetry": { "enabled": true, "target": "remote",
+    //                  "url": "wss://gw.example.org/telemetry/ingest", "token": "…" }
     {
       const _tq = new URLSearchParams(location.search);
       const _sameOrigin = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ingest`;
-      const _tcfg = (telemetryCfg && telemetryCfg.enabled) ? (telemetryCfg.url || _sameOrigin) : null;
-      const _turl = _tq.get('telemetry') || _tcfg || null;
+      const _remote = telemetryCfg?.target === 'local' ? null : telemetryCfg?.url;
+      const _tcfg = (telemetryCfg && telemetryCfg.enabled) ? (_remote || _sameOrigin) : null;
+      let _turl = _tq.get('telemetry') || _tcfg || null;
+      if (_turl) {
+        try {
+          const u = new URL(_turl);
+          const session = _tq.get('session') || (_remote && telemetryCfg.session);
+          const token   = _remote && telemetryCfg.token;
+          if (session && !u.searchParams.has('session')) u.searchParams.set('session', session);
+          if (token   && !u.searchParams.has('token'))   u.searchParams.set('token', token);
+          _turl = u.toString();
+        } catch (_) { /* not a URL: leave it to Telemetry to fail loudly */ }
+      }
       if (_turl) {
         telemetry = new Telemetry({
           url: _turl,
@@ -1602,7 +1623,7 @@ async function setupFOA() {
           meta: { ua: navigator.userAgent },
         });
         window.telemetry = telemetry;   // inspección desde consola
-        toast('Telemetría lista → ' + _turl);
+        toast('Telemetría lista → ' + _turl.replace(/([?&]token=)[^&]*/, '$1…'));
         // Desktop / tablet: report the view too, unless the scene opts out with
         // "screen": false. VR/AR switch the mode on session enter and back here on exit.
         if (telemetryCfg?.screen !== false || _tq.get('telemetry')) telemetrySetMode('screen');
