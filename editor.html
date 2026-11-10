@@ -295,6 +295,17 @@
              grabado por debajo del bed nunca se despega de él bajo el spotlight. -->
         <div style="flex:0 0 110px"><label>Gain dB</label><input type="number" id="selGain" step="0.5"></div>
       </div>
+      <!-- Only for a live close-up from a camera of its own (cam:…). Empty = what
+           the camera gives by default, and no delay. -->
+      <div class="row" id="selCamRow" style="display:none;margin-top:8px">
+        <div><label>Close-up camera</label><input type="text" id="selCamDev" disabled></div>
+        <div style="flex:0 0 120px"><label>Size</label><input type="text" id="selCamSize" placeholder="1280x720"
+             title="Size asked of the camera (v4l2). Empty = its default"></div>
+        <div style="flex:0 0 110px"><label>Format</label><select id="selCamFmt" title="Pixel format asked of the camera (v4l2)">
+          <option value="">default</option><option value="mjpeg">mjpeg</option><option value="yuyv422">yuyv422</option><option value="h264">h264</option></select></div>
+        <div style="flex:0 0 110px"><label>Delay ms</label><input type="number" id="selCamDelay" step="10" placeholder="0"
+             title="Holds the close-up back to match the 360, which arrives later (stitching): ≈220 ms for the X4/X5"></div>
+      </div>
     </div>
     <p class="hint">Up = front of the video (0°). Left = +90°. Right = −90°. What a musician
       <em>looks</em> like is not here: the 3D model is only seen in passthrough, so it lives with
@@ -863,8 +874,9 @@ function liveSrcToggle() {
 
 function bindLiveControls() {
   const V = scene.live.video, A = scene.live.audio;
-  $('lvSrc').onchange = e => { V.src = e.target.value; liveSrcToggle(); };
-  $('lvDevice').onchange = e => V.device = e.target.value;
+  // Both change which cameras the close-up selectors may offer (not the 360's own).
+  $('lvSrc').onchange = e => { V.src = e.target.value; liveSrcToggle(); renderStems(); };
+  $('lvDevice').onchange = e => { V.device = e.target.value; renderStems(); };
   $('lvUrl').oninput = e => V.url = e.target.value.trim();
   $('lvSize').oninput = e => V.size = e.target.value.trim();
   $('lvFr').oninput = e => V.fr = +e.target.value || 30;
@@ -925,6 +937,15 @@ function bindControls() {
                                                 renderStems(); drawViews(); $('selEl').value=el; } };
   $('selHit').oninput  = e => { if(selected>=0){ const v=+e.target.value;
                                                 if (v > 0) scene.stems[selected].hitDeg = v; else delete scene.stems[selected].hitDeg; } };
+  // Close-up camera options: absent from the scene unless set, like hitDeg.
+  const camField = (id, key, conv) => $(id).oninput = $(id).onchange = e => {
+    if (selected < 0) return;
+    const v = conv(e.target.value.trim());
+    if (v === '' || v == null) delete scene.stems[selected][key]; else scene.stems[selected][key] = v;
+  };
+  camField('selCamSize', 'camSize', v => /^\d+x\d+$/.test(v) ? v : '');
+  camField('selCamFmt', 'camFormat', v => v);
+  camField('selCamDelay', 'camDelayMs', v => v === '' || isNaN(+v) || +v === 0 ? '' : Math.round(+v));
   $('debugMode').checked = !!scene.debug;
   $('debugMode').onchange = async e => {
     scene.debug = e.target.checked;
@@ -1006,6 +1027,36 @@ function videoOptionsHTML(sel) {
   return '<option value="">— no close-up —</option>' +
     `<option value="crop" ${sel==='crop'?'selected':''}>✂ crop from the 360</option>` +
     vids.map(m=>`<option value="${m.file}" ${m.file===sel?'selected':''}>${m.name}</option>`).join('');
+}
+
+// <option> list of the live close-up selector: a crop of the 360, or a live
+// camera of its own (`cam:/dev/videoN` or `cam:<url>`), opened by the same
+// ffmpeg as the 360 so both share one clock. The 360's own camera is not
+// offered: v4l2 has one reader per device, and it would be the whole scene.
+function liveCloseupOptionsHTML(sel) {
+  const V = (scene.live && scene.live.video) || {};
+  const own = V.src === 'udp' ? '' : V.device;
+  const cams = devices.video.filter(d => d.device !== own);
+  const esc = t => String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  let o = '<option value="">— no close-up —</option>' +
+    `<option value="crop" ${sel==='crop'?'selected':''}>✂ crop from the 360</option>` +
+    cams.map(d => `<option value="cam:${esc(d.device)}" ${sel==='cam:'+d.device?'selected':''}>📷 ${esc(d.label)} · ${esc(d.device)}</option>`).join('');
+  // A camera that is not plugged in now (or a network one) still shows, so
+  // opening the editor never drops it from the scene without anyone noticing.
+  if (sel && sel.startsWith('cam:') && !cams.some(d => 'cam:'+d.device === sel))
+    o += `<option value="${esc(sel)}" selected>📷 ${esc(sel.slice(4))}</option>`;
+  return o + '<option value="cam:?">📷 network camera (URL)…</option>';
+}
+
+function setLiveCloseup(i, v) {
+  const s = scene.stems[i];
+  if (v === 'cam:?') {
+    const cur = s.closeup && s.closeup.includes('://') ? s.closeup.slice(4) : 'udp://0.0.0.0:5011';
+    const url = prompt('Camera URL (udp://, srt://, rtsp://)', cur);
+    v = url && url.includes('://') ? 'cam:' + url.trim() : s.closeup;
+  }
+  s.closeup = v || undefined;
+  renderStems(); syncSelPanel();
 }
 
 // ── Mallas ───────────────────────────────────────────────────────────────────
@@ -1330,9 +1381,9 @@ function renderStems() {
       ${live ? `<span class="small" style="flex:none">ch</span>
       <input type="number" class="az" style="width:54px" min="0" value="${s.channel!=null?s.channel:''}"
              onclick="event.stopPropagation()" oninput="scene.stems[${i}].channel=this.value===''?null:+this.value" placeholder="—" title="Device channel for this musician. Empty = silent in live">` : ''}
-      ${live ? `<label class="small" style="flex:none;display:flex;gap:4px;align-items:center" title="Close-up cut from the live 360 at this musician's angles"
-             onclick="event.stopPropagation()"><input type="checkbox" style="width:auto" ${s.closeup==='crop'?'checked':''}
-             onchange="scene.stems[${i}].closeup=this.checked?'crop':undefined">✂</label>` : ''}
+      ${live ? `<select title="Live close-up: a crop of the 360 at this musician's angles, or a camera of its own" style="flex:0 0 130px"
+             onclick="event.stopPropagation()"
+             onchange="setLiveCloseup(${i},this.value)">${liveCloseupOptionsHTML(s.closeup)}</select>` : ''}
       ${!live ? `<select title="Close-up (Case B): a video, or a crop of the 360 at this musician's angles" style="flex:0 0 130px"
              onclick="event.stopPropagation()"
              onchange="scene.stems[${i}].closeup=this.value||undefined">${videoOptionsHTML(s.closeup)}</select>
@@ -1355,6 +1406,14 @@ function syncSelPanel() {
   $('selH').value = hOfEl(s.elevationDeg||0).toFixed(2);
   $('selHit').value = s.hitDeg || '';
   $('selGain').value = s.gainDb || 0;
+  const cam = mode === 'live' && typeof s.closeup === 'string' && s.closeup.startsWith('cam:');
+  $('selCamRow').style.display = cam ? 'flex' : 'none';
+  if (cam) {
+    $('selCamDev').value = s.closeup.slice(4);
+    $('selCamSize').value = s.camSize || '';
+    $('selCamFmt').value = s.camFormat || '';
+    $('selCamDelay').value = s.camDelayMs || '';
+  }
 }
 
 // Los campos de la malla viven en la tarjeta de AR, fuera de #selPanel, así que no
