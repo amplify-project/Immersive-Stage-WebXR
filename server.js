@@ -383,6 +383,15 @@ function closeupList(scene) {
     .filter(s => s.closeup && s.closeup !== scene.video)
     .map(s => {
       const name = String(s.name || '').replace(/[;"\\]/g, '');
+      // A live camera of its own: options from the scene, in stream.sh's syntax.
+      if (typeof s.closeup === 'string' && s.closeup.startsWith('cam:')) {
+        const dev = s.closeup.slice(4).replace(/[;,]/g, '');
+        const opt = [];
+        if (/^\d+x\d+$/.test(s.camSize || '')) opt.push(`size=${s.camSize}`);
+        if (/^[a-z0-9_]+$/.test(s.camFormat || '')) opt.push(`fmt=${s.camFormat}`);
+        if (Number.isInteger(s.camDelayMs) && s.camDelayMs) opt.push(`delay=${s.camDelayMs}`);
+        return { src: ['cam:' + dev, ...opt].join(','), name };
+      }
       if (s.closeup !== 'crop') return { src: s.closeup, name };
       const fov = +s.cropFovDeg > 0 ? +s.cropFovDeg : Math.max(20, Math.min(90, 4 * (+s.hitDeg || 8)));
       return { src: `crop:${+s.azimuthDeg || 0}:${+s.elevationDeg || 0}:${fov}`, name };
@@ -643,9 +652,10 @@ async function handleAPI(req, res, pathname) {
           // '-' = no live channel: stream.sh outputs silence there. Never '', or bash drops
           // the trailing empties and the stem count no longer matches scene.stems.
           STEM_CH: (scene.stems || []).map(s => (Number.isInteger(s.channel) ? s.channel : '-')).join(','),
-          // Live has no close-up files, but it can crop them from the 360 itself.
-          CLOSEUPS: closeupList(scene).filter(c => c.src.startsWith('crop:')).map(c => c.src).join(';'),
-          CLOSEUP_NAMES: closeupList(scene).filter(c => c.src.startsWith('crop:')).map(c => c.name).join(';'),
+          // Live has no close-up files, but it can crop them from the 360 itself,
+          // or take them from a live camera of their own ('cam:/dev/videoN,…').
+          CLOSEUPS: closeupList(scene).filter(c => /^(crop|cam):/.test(c.src)).map(c => c.src).join(';'),
+          CLOSEUP_NAMES: closeupList(scene).filter(c => /^(crop|cam):/.test(c.src)).map(c => c.name).join(';'),
         };
       } else {
         // ── VOD (o live de bucle de archivos) desde archivos ────────────────

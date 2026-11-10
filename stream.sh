@@ -165,6 +165,16 @@ fi
 #                       (mismo orden). Va a closeups.json, junto al manifest, y
 #                       con él el player sabe qué pista es de quién sin depender
 #                       del orden (en LIVE solo quedan los recortes).
+#  Or come from a LIVE CAMERA of its own (a webcam, a second UVC camera, or a
+#  network feed), opened by the same ffmpeg as the 360: one process, one clock.
+#     cam:DEV[,size=WxH][,fmt=mjpeg][,fps=N][,delay=MS]
+#                       DEV = /dev/videoN (v4l2) or a URL (udp://, srt://, rtsp://).
+#                       size/fmt/fps are asked of the v4l2 device (fps defaults
+#                       to the 360's, and the track is always re-timed to it so
+#                       keyframes land on segment boundaries).
+#                       delay = ms the close-up is held back to match the 360,
+#                       which arrives later (stitching): ≈220 ms for the X4/X5.
+#                       Works in LIVE (capture or file loop); not in vod.
 #     CROP_INTERP=lanc|line|cube   interpolación de v360 (vod lanc, captura line)
 #     CROP_SHARPEN=0.5             cas tras el recorte (0 = sin enfoque)
 CLOSEUPS="${CLOSEUPS:-}"
@@ -191,16 +201,34 @@ if [[ -n "$CLOSEUPS" ]]; then
     CLOSE_ARR+=("$c"); CLOSE_NAME+=("${_rawn[_ci]:-}")
   done
 fi
-# En captura no hay ficheros que abrir: se quedan solo los recortes del 360.
-if [[ "$CAPTURE" == "1" ]]; then
+# En captura no hay ficheros que abrir: se quedan los recortes del 360 y las
+# cámaras en vivo. Una cámara en vod no acabaría nunca: fuera también.
+if [[ "$CAPTURE" == "1" || "$MODE" == "vod" ]]; then
   _keep=(); _keepn=()
   for ((k=0; k<${#CLOSE_ARR[@]}; k++)); do
     c="${CLOSE_ARR[k]}"
-    if [[ "$c" == crop:* ]]; then _keep+=("$c"); _keepn+=("${CLOSE_NAME[k]}")
-    else echo "  WARNING: close-up '$c' es un fichero; en captura LIVE solo valen recortes (crop:) → ignorado."; fi
+    if [[ "$c" == crop:* ]] || [[ "$c" == cam:* && "$MODE" != "vod" ]]; then _keep+=("$c"); _keepn+=("${CLOSE_NAME[k]}")
+    elif [[ "$c" == cam:* ]]; then echo "  WARNING: close-up '$c' is a live camera; vod cannot record one → ignored."
+    else echo "  WARNING: close-up '$c' es un fichero; en captura LIVE solo valen recortes (crop:) y cámaras (cam:) → ignorado."; fi
   done
   CLOSE_ARR=("${_keep[@]}"); CLOSE_NAME=("${_keepn[@]}")
 fi
+# Options of a cam: entry → globals CAM_DEV CAM_SIZE CAM_FMT CAM_FPS CAM_DELAY.
+parse_cam() {
+  local spec="${1#cam:}" kv
+  IFS=',' read -r -a _cp <<< "$spec"
+  CAM_DEV="${_cp[0]}"; CAM_SIZE=""; CAM_FMT=""; CAM_FPS=""; CAM_DELAY=0
+  for kv in "${_cp[@]:1}"; do
+    case "$kv" in
+      size=*)  CAM_SIZE="${kv#size=}" ;;
+      fmt=*)   CAM_FMT="${kv#fmt=}" ;;
+      fps=*)   CAM_FPS="${kv#fps=}" ;;
+      delay=*) CAM_DELAY="${kv#delay=}" ;;
+      *) echo "Unknown option '$kv' in close-up '$1' (size= fmt= fps= delay=)"; exit 1 ;;
+    esac
+  done
+  [[ "$CAM_DELAY" =~ ^-?[0-9]+$ ]] || { echo "delay= must be whole ms in '$1'"; exit 1; }
+}
 NCLOSE=${#CLOSE_ARR[@]}
 if [[ "$CAPTURE" == "1" ]]; then CROP_INTERP="${CROP_INTERP:-line}"; else CROP_INTERP="${CROP_INTERP:-lanc}"; fi
 
@@ -219,10 +247,18 @@ if [[ "$CAPTURE" != "1" ]]; then
     [[ -f "$s" ]] || { echo "No existe el stem: $s"; exit 1; }
   done
   for c in "${CLOSE_ARR[@]}"; do
-    [[ "$c" == crop:* ]] && continue
+    [[ "$c" == crop:* || "$c" == cam:* ]] && continue
     [[ -f "$c" ]] || { echo "No existe el close-up: $c"; exit 1; }
   done
 fi
+for c in "${CLOSE_ARR[@]}"; do
+  [[ "$c" == cam:* ]] || continue
+  parse_cam "$c"
+  [[ "$CAM_DEV" == *://* || -e "$CAM_DEV" ]] || { echo "No such camera for close-up '$c': $CAM_DEV"; exit 1; }
+  if [[ "$CAPTURE" == "1" && "$VIDEO_SRC" == "usb" && "$CAM_DEV" == "$VIDEO_DEVICE" ]]; then
+    echo "Close-up '$c' is the 360's own camera ($VIDEO_DEVICE): v4l2 has one reader per device."; exit 1
+  fi
+done
 
 mkdir -p "$OUT"
 # Pizarra limpia en cada arranque: fuera segmentos, inits, manifest y .tmp de la
@@ -331,10 +367,12 @@ _asid=1
 for ((i=0; i<NCLOSE; i++)); do AS_STR+=" id=${_asid},streams=$((i+1))"; ((_asid++)); done
 AS_STR+=" id=${_asid},streams=$((NCLOSE+1))"
 
-# Mapas de los close-ups: input (2+NSTEMS+i) en modo archivo (tras vídeo, FOA y stems).
+# Mapas de los close-ups: input (2+NSTEMS+i) en modo archivo (tras vídeo, FOA y
+#  stems); en captura (2+i), tras vídeo y audio multicanal (los stems son canales).
 #  Los recortes (crop:) salen de un -filter_complex propio sobre el vídeo 0; los
-#  ficheros, de sus inputs, numerados solo entre ficheros.
+#  ficheros y las cámaras, de sus inputs, numerados solo entre ellos.
 CLOSE_MAPS=(); CROP_FC=""; CROP_JSON=""; _nfile=0; _ncrop=0
+_inbase=$(( 2 + NSTEMS )); [[ "$CAPTURE" == "1" ]] && _inbase=2
 IFS=':' read -r _cw _ch <<< "${CLOSEUP_SCALE:-1280:720}"
 for ((i=0; i<NCLOSE; i++)); do
   c="${CLOSE_ARR[i]}"
@@ -350,7 +388,7 @@ for ((i=0; i<NCLOSE; i++)); do
     ((_ncrop++)) || true
   else
     CROP_JSON+="${CROP_JSON:+,}{\"rep\":\"$((i+1))\",\"name\":\"${CLOSE_NAME[i]}\"}"
-    CLOSE_MAPS+=(-map "$((2 + NSTEMS + _nfile)):v:0")
+    CLOSE_MAPS+=(-map "$((_inbase + _nfile)):v:0")
     ((_nfile++)) || true
   fi
 done
@@ -374,11 +412,49 @@ assemble_venc() {
     for ((i=0; i<NCLOSE; i++)); do
       # Un recorte ya sale escalado y en 4:2:0 de su filter_complex, y ffmpeg no
       # deja poner un -filter a un stream que viene de un grafo complejo.
-      [[ -n "$CLOSEUP_VF_CHAIN" && "${CLOSE_ARR[i]}" != crop:* ]] && VENC+=(-filter:v:$((i+1)) "$CLOSEUP_VF_CHAIN")
+      local c="${CLOSE_ARR[i]}" chain="$CLOSEUP_VF_CHAIN"
+      if [[ "$c" == cam:* ]]; then
+        # Re-timed to the 360's frame rate (a webcam drops frames in low light,
+        # and GOP counts frames: keyframes must land on segment boundaries), and
+        # held back by its delay so it shows the same instant as the 360.
+        parse_cam "$c"
+        chain="fps=${FPS}${chain:+,$chain}"
+        [[ "$CAM_DELAY" != 0 ]] && chain="setpts=PTS+${CAM_DELAY}/1000/TB,$chain"
+      fi
+      [[ -n "$chain" && "$c" != crop:* ]] && VENC+=(-filter:v:$((i+1)) "$chain")
       VENC+=(-b:v:$((i+1)) "$CLOSEUP_VBITRATE")
     done
   fi
   VENC+=("${_mode[@]}")
+}
+
+# ── UDP inputs: a big receive FIFO, and an overrun that drops packets instead of
+#  ending the input. ffmpeg opens its inputs one after another, and while it
+#  opens the mic and the cameras (seconds) nobody reads the UDP one: with the
+#  default FIFO it overran at startup and the 360 died for good ("Circular buffer
+#  overrun"), freezing every video track that came out of it. Options already in
+#  the URL win.
+udp_url() {
+  local u="$1"
+  [[ "$u" == udp://* ]] || { printf '%s' "$u"; return; }
+  [[ "$u" == *fifo_size=* ]]        || u+="$([[ "$u" == *\?* ]] && echo '&' || echo '?')fifo_size=${UDP_FIFO:-1000000}"
+  [[ "$u" == *overrun_nonfatal=* ]] || u+="&overrun_nonfatal=1"
+  printf '%s' "$u"
+}
+
+# ── Live cameras of the close-ups (cam:), appended to IN_ARGS in CLOSE_ARR order
+#  among the non-crop entries, which is what CLOSE_MAPS numbered them by.
+add_cam_input() {   # $1 = cam:… entry
+  parse_cam "$1"
+  local q=(-thread_queue_size 1024)
+  if [[ "$CAM_DEV" == *://* ]]; then
+    IN_ARGS+=("${q[@]}" -fflags nobuffer -i "$(udp_url "$CAM_DEV")")
+  else
+    IN_ARGS+=("${q[@]}" -f v4l2 -framerate "${CAM_FPS:-$FPS}")
+    [[ -n "$CAM_FMT" ]]  && IN_ARGS+=(-input_format "$CAM_FMT")
+    [[ -n "$CAM_SIZE" ]] && IN_ARGS+=(-video_size "$CAM_SIZE")
+    IN_ARGS+=(-i "$CAM_DEV")
+  fi
 }
 
 # ── Construcción de inputs y filtro de audio según haya stems o no ──────────
@@ -412,6 +488,7 @@ build_inputs() {   # $1 = "live" | "vod"  → rellena IN_ARGS y A_ARGS globales
   # recortes no abren nada: salen del vídeo 0.
   for c in "${CLOSE_ARR[@]}"; do
     [[ "$c" == crop:* ]] && continue
+    if [[ "$c" == cam:* ]]; then add_cam_input "$c"; continue; fi
     IN_ARGS+=("${loop[@]}" -i "$c")
   done
 
@@ -457,7 +534,7 @@ build_inputs_capture() {
       IN_ARGS+=(-i "$VIDEO_DEVICE") ;;
     udp)
       [[ -n "$VIDEO_URL" ]] || { echo "VIDEO_SRC=udp pero VIDEO_URL vacío"; exit 1; }
-      IN_ARGS+=("${q[@]}" -fflags nobuffer -i "$VIDEO_URL") ;;
+      IN_ARGS+=("${q[@]}" -fflags nobuffer -i "$(udp_url "$VIDEO_URL")") ;;
     *) echo "VIDEO_SRC desconocido: '$VIDEO_SRC' (usa 'usb' o 'udp')"; exit 1 ;;
   esac
 
@@ -469,9 +546,14 @@ build_inputs_capture() {
     usb) IN_ARGS+=("${q[@]}" -f alsa -acodec "${AUDIO_CODEC:-pcm_s32le}" -channels "$AUDIO_CHANNELS" -i "$AUDIO_DEVICE") ;;
     udp)
       [[ -n "$AUDIO_URL" ]] || { echo "AUDIO_SRC=udp pero AUDIO_URL vacío"; exit 1; }
-      IN_ARGS+=("${q[@]}" -fflags nobuffer -i "$AUDIO_URL") ;;
+      IN_ARGS+=("${q[@]}" -fflags nobuffer -i "$(udp_url "$AUDIO_URL")") ;;
     *) echo "AUDIO_SRC desconocido: '$AUDIO_SRC' (usa 'usb' o 'udp')"; exit 1 ;;
   esac
+
+  # — Close-up cameras (inputs 2..): crops need no input, files are not allowed here.
+  for c in "${CLOSE_ARR[@]}"; do
+    [[ "$c" == cam:* ]] && add_cam_input "$c"
+  done
 
   # — Extracción FOA por índice + conversión (A→B opcional, luego FuMa/AmbiX) —
   local f0="${FOA_CH_ARR[0]}" f1="${FOA_CH_ARR[1]}" f2="${FOA_CH_ARR[2]}" f3="${FOA_CH_ARR[3]}"
