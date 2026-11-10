@@ -3,7 +3,7 @@
 This repository's own code is GPLv3 (see [`LICENSE`](LICENSE)). The
 components below are not ours and keep their own terms. Nothing is bundled by a
 package manager: browser libraries are loaded from a CDN by `index.html`, and
-the two files under `src/vendor/` travel with the repository so the player still
+the files under `src/vendor/` travel with the repository so the player still
 works without network access to them.
 
 ## Loaded from a CDN at runtime
@@ -25,6 +25,7 @@ test on a headset, not a version bump.
 |---|---|---|
 | `omnitone.min.js` | [Omnitone](https://github.com/GoogleChrome/omnitone), Google Inc. — binaural FOA decoding, HRIRs embedded as base64 | Apache-2.0 (header kept in the file) |
 | `GLTFLoader.js` | three.js examples — `.glb` loading for the AR musician models | MIT (same as three.js) |
+| `xr-telemetry.js` | [XR-telemetry](https://github.com/amplify-project/XR-telemetry) JavaScript SDK (AMPLIFY) — pose and event telemetry. Refreshed with `tools/update-xr-telemetry.sh`; the commit is in the file's header | Apache-2.0 |
 
 `SkeletonUtils.js`, where present, is also a three.js example under the same
 terms.

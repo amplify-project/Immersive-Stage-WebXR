@@ -36,5 +36,5 @@ node recorder.js --url wss://<PC-IP>:60000/consume --out session.csv
 
 Full protocol, client config and a Unity/C# consumer: [`../docs/telemetry.md`](../docs/telemetry.md).
 
-The player client lives separately in `../src/telemetry/Telemetry.js` and is
+The player client is the XR-telemetry SDK, vendored in `../src/vendor/xr-telemetry.js`, and is
 wired into `../index.html` (opt-in via `scene.json` → `telemetry.enabled`).

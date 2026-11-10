@@ -89,8 +89,8 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
   server.on('upgrade', onUpgrade);
 
   wss.on('connection', (ws, req) => {
-    const pathname = (req.url || '/ingest').split('?')[0];
-    if (pathname === '/consume') return onConsumer(ws);
+    const [pathname, query = ''] = (req.url || '/ingest').split('?');
+    if (pathname === '/consume') return onConsumer(ws, new URLSearchParams(query));
     return onProducer(ws);                          // default: /ingest
   });
 
@@ -133,6 +133,27 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
       if (!id || !Array.isArray(msg.b)) return;     // data frames need a prior hello
 
       const now = Date.now();
+      // XR-telemetry spec batch {s, b} (the vendored SDK): poses are mapped onto
+      // the same record as the compact format below, so consumers see no
+      // difference; events go only to consumers that asked for them; any other
+      // signal has no meaning here and is dropped.
+      if (typeof msg.s === 'string') {
+        if (msg.s === 'pose') {
+          for (const s of msg.b) if (s && typeof s === 'object') {
+            const prev = players.get(id) || { meta: {} };
+            const rec = specPoseRecord(id, s, prev, clock);
+            players.set(id, { ...prev, ...rec, lastSeen: now });
+            broadcast({ type: 'update', ...rec });
+          }
+        } else if (msg.s === 'event') {
+          for (const s of msg.b) if (s && typeof s === 'object' && s.name) {
+            const { t, w, ...fields } = s;
+            broadcastEvent({ ...fields, type: 'event', id, t, w, srv: clock.toServer(t) });
+          }
+          const p = players.get(id); if (p) p.lastSeen = now;
+        }
+        return;
+      }
       for (const s of msg.b) {
         const prev = players.get(id) || { meta: {} };
         const rec = {
@@ -161,7 +182,11 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
   }
 
   // ── Consumers (external render, e.g. Unity) ─────────────────────────
-  function onConsumer(ws) {
+  // ?events=1 also gets {type:'event', id, name, value, srv…}. Off by default: a
+  // consumer written before events existed (the Unity render) only knows
+  // snapshot / update / leave, and nothing says it ignores a type it does not.
+  function onConsumer(ws, query = new URLSearchParams()) {
+    ws.wantsEvents = /^(1|true|on)$/i.test(query.get('events') || '');
     consumers.add(ws);
     const snapshot = [];
     for (const p of players.values()) if (p.p) snapshot.push(stripPresence(p));
@@ -173,6 +198,10 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
   function broadcast(obj) {
     const data = JSON.stringify(obj);
     for (const c of consumers) if (c.readyState === 1) c.send(data);
+  }
+  function broadcastEvent(obj) {
+    let data = null;
+    for (const c of consumers) if (c.wantsEvents && c.readyState === 1) c.send(data ??= JSON.stringify(obj));
   }
 
   // ── Presence sweep ──────────────────────────────────────────────────
@@ -198,6 +227,27 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
+
+// A spec `pose` sample (flat: px py pz, qx qy qz qw, gx gy gz, media_t…) as the
+// relay's own record, the one consumers have always received. `rec` and `frame`
+// may ride on the sample itself (the player's SDK path puts them there, because
+// the XR-telemetry gateway only copies `frame` from the hello); the hello's are
+// the fallback.
+function specPoseRecord(id, s, prev, clock) {
+  const num = (v) => (typeof v === 'number' && isFinite(v) ? v : null);
+  const vec = (...k) => (k.every((x) => num(s[x]) !== null) ? k.map((x) => s[x]) : null);
+  const q = vec('qx', 'qy', 'qz', 'qw');
+  return {
+    id, frame: s.frame || prev.frame || 'local-floor',
+    rec: s.rec !== undefined ? (s.rec || null) : (prev.rec || null),
+    t: s.t, w: s.w, mt: s.media_t,
+    srv: clock.toServer(s.t),
+    p: vec('px', 'py', 'pz'), q,
+    gaze: vec('gx', 'gy', 'gz') || forwardFromQuat(q),
+    z: s.z, f: s.f,
+  };
+}
+
 function stripPresence(p) { const { lastSeen, meta, ...rest } = p; return rest; }
 
 /**

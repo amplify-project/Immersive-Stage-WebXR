@@ -155,15 +155,28 @@ URL overrides (handy for testing without editing the scene):
 - `?player=NAME` — set a stable, human-readable player id
 - `?session=NAME` — session for this page, over the scene's
 
-The client (`src/telemetry/Telemetry.js`) is fully decoupled: it starts when a
-stream loads (screen mode) and on VR/AR session enter, samples the pose already
-read each frame (decimated to
-`rateHz`, allocation-free until a sample is taken), batches every `flushMs`,
-auto-reconnects with backoff, and drops the oldest samples while offline.
+The client is the [XR-telemetry](https://github.com/amplify-project/XR-telemetry)
+JavaScript SDK, vendored as `src/vendor/xr-telemetry.js` (never edited here:
+refresh it with `tools/update-xr-telemetry.sh [ref]`, which writes the commit it
+came from into the file's header). It is fully decoupled: it starts when a stream
+loads (screen mode) and on VR/AR session enter, samples the pose already read
+each frame (decimated to `rateHz` on a fixed grid), batches every `flushMs`,
+auto-reconnects with backoff, and drops the oldest samples while offline. The
+player feeds it through `telemetryPose()`, with one `extra` object refilled every
+frame so the render loop allocates nothing when a sample is not taken.
+
+Until 2026-11 the player had its own client, `src/telemetry/Telemetry.js`, which
+sent the compact format below. The SDK was ported from it and replaced it; the
+relay and the XR-telemetry gateway still accept both formats.
 
 ## Wire protocol
 
 ### Player → relay (`/ingest`)
+
+The player sends the **XR-telemetry spec format** (next section). The compact
+format here is what it sent before, and what `simulator.js`, `smoke-test.js` and
+any older client still send; the relay accepts both and gives consumers the same
+records either way.
 
 ```jsonc
 // once, on connect — and again whenever `meta` changes mid-session (the relay
@@ -226,6 +239,32 @@ commits. `f` therefore records more than attention in AR: it records what the
 listener was actually hearing louder, so a session can be read as the sequence of
 musicians each spectator chose to bring forward.
 
+### The spec format (what the player sends)
+
+Same `hello` and clock probe. Data frames name their signal, and samples are
+flat (XR-telemetry spec §4–§5):
+
+```jsonc
+{ "s": "pose", "b": [
+  { "t": 12345.6, "w": 1785500757720, "px": 0, "py": 1.6, "pz": 0,
+    "qx": 0, "qy": 0, "qz": 0, "qw": 1, "gx": 0, "gy": 0, "gz": -1, "gaze_src": "head",
+    "z": 0, "f": -1, "media_t": 5.62, "rec": null, "input": "xr" } ] }
+{ "s": "event", "b": [ { "t": 12346.1, "w": 1785500757721, "name": "closeup", "value": "DR", "stem": 0, "kind": "crop" } ] }
+```
+
+`rec` and `input` ride on every pose, not only in the hello: the XR-telemetry
+gateway copies just `frame` from the hello onto the samples, and its archive
+would otherwise lose which voice recording a pose belongs to. The relay maps a
+spec pose onto the record below (`px..pz` → `p`, `qx..qw` → `q`, `gx..gz` →
+`gaze`, `media_t` → `mt`).
+
+Events the player sends:
+
+| `name` | `value` | extra fields | when |
+|---|---|---|---|
+| `mode` | `screen` · `vr` · `ar` | — | telemetry (re)starts in that mode: page load, entering or leaving XR |
+| `closeup` | the musician's name, or `null` | `stem` (index, `-1` = closed), `kind` (`crop` = cut from the 360, `video` = a file or a live camera) | the close-up panel shows a musician, switches to another, or closes |
+
 ### Relay → consumer (`/consume`)
 
 ```jsonc
@@ -235,7 +274,15 @@ musicians each spectator chose to bring forward.
 // live stream
 { "type": "update", "id": "player-42", "frame": "room", "rec": "2026-09-21T07-40-29-861Z_player-42", "t": 12345.6, "w": 1785500757720, "srv": 1785500757719.4, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
 { "type": "leave",  "id": "player-42" }
+
+// only with /consume?events=1
+{ "type": "event", "id": "player-42", "name": "closeup", "value": "DR", "stem": 0, "kind": "crop", "t": 12346.1, "w": 1785500757721, "srv": 1785500757720.0 }
 ```
+
+Events are opt-in (`?events=1`): a consumer written before they existed, the
+Unity render among them, only knows `snapshot`, `update` and `leave`. The
+XR-telemetry gateway's `/consume?format=legacy` behaves the same way (poses
+only), and its plain `/consume` carries events as spec samples.
 
 The consumer keeps a `Dictionary<id, pose>`, applies `snapshot` then `update`s,
 removes on `leave`, and **interpolates** between updates for smooth avatars
@@ -268,7 +315,7 @@ WiFi). Drift is handled by construction, since the window keeps re-measuring.
 
 `srv` is `null` until the first probe completes — one round trip after `hello`,
 so in practice only if a player sends data before answering a ping. Every
-`/ingest` client should reply to `ping`; `Telemetry.js` and the simulator do.
+`/ingest` client should reply to `ping`; the SDK and the simulator do.
 
 That leaves four clocks in a recording, each with one job:
 

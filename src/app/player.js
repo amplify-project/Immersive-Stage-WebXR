@@ -1,5 +1,5 @@
 import { ImmersiveAudioEngine } from '../audio/ImmersiveAudioEngine.js';
-import { Telemetry } from '../telemetry/Telemetry.js';
+import { XRTelemetry } from '../vendor/xr-telemetry.js';   // XR-telemetry SDK, vendored (tools/update-xr-telemetry.sh)
 import { RayPointer, XRMenu, RAY_CONE } from './xr-input.js';
 import { CloseupWC } from './closeup-wc.js';
 
@@ -194,7 +194,7 @@ function xrHeadroomAfter(session) {
 }
 const VR_PINCH_ZOOM = 40;            // where a pinch zooms to: full spotlight boost (see zoomN)
 const VR_ZOOM_S     = 0.8;           // s: how long a pinch zoom (in or out) takes
-let telemetry    = null;             // Telemetry: pose de cabeza → relay externo (opt-in)
+let telemetry    = null;             // XRTelemetry: pose de cabeza → relay o gateway (opt-in)
 let telemetryCfg = null;             // bloque telemetry de scene.json
 let voice        = null;             // VoiceRecorder: micro del participante → /voice (opt-in)
 let voiceCfg     = null;             // bloque voice de scene.json
@@ -322,6 +322,43 @@ function telemetrySetMode(mode) {
     rec: voice?.recRef || null,   // en el hello, que es donde el relay lee el meta
   });
   telemetry.start();
+  telemetry.event('mode', mode);
+}
+
+// One pose sample, in the XR-telemetry spec's fields. `extra` is ONE object
+// refilled every frame: pose() is called from the render loop at 72–120 Hz and
+// drops most calls at its decimation gate, so a fresh literal per call would be
+// garbage for nothing (the SDK copies it when it does take a sample).
+// `rec` and `input` ride on every sample, not only in the hello: the
+// XR-telemetry gateway copies just `frame` from the hello onto the samples, and
+// without them its archive could not tell which voice recording a pose belongs
+// to, nor how the view was driven.
+const _telExtra = { z: 0, f: -1, media_t: 0, rec: null, input: 'xr' };
+function telemetryPose(position, orientation, zoom, focus) {
+  if (!telemetry) return;
+  _telExtra.z = Math.round(zoom * 100) / 100;
+  _telExtra.f = focus;
+  _telExtra.media_t = Math.round((videoEl?.currentTime || 0) * 1000) / 1000;
+  _telExtra.rec = telemetry.meta.rec || null;
+  _telExtra.input = telemetry.meta.input || 'xr';
+  telemetry.pose(position, orientation, _telExtra);
+  telemetryCloseup();
+}
+
+// A close-up appeared, changed or went away: an event, since a pose says what
+// the viewer attends to (f) but not what the panel shows. Checked from
+// telemetryPose(), once per frame, rather than inside selectCloseupTrack(): the
+// close-up state machine stays free of telemetry (and testable on its own).
+// `kind` is "crop" (cut from the 360) or "video" (a file, or a live camera of
+// its own: the manifest does not tell them apart).
+let _telCloseup = -1;
+function telemetryCloseup() {
+  const now = closeupStem;
+  if (now === _telCloseup) return;
+  _telCloseup = now;
+  if (now < 0) return telemetry.event('closeup', null, { stem: -1 });
+  telemetry.event('closeup', stemDefs[now]?.name || null,
+                  { stem: now, kind: closeupCropByRep[closeupRepByStem[now]] ? 'crop' : 'video' });
 }
 
 // Leaving VR/AR: back to the screen view if this page reports it, else silence.
@@ -336,8 +373,8 @@ function telemetryLeaveXR() {
 const _telScreenP = { x: 0, y: 0, z: 0 };
 function sampleScreenTelemetry() {
   if (!telemetry || telemetry.meta.mode !== 'screen') return;
-  telemetry.sample(_telScreenP, camera.quaternion, engine?.getZoomNormalized() ?? 0,
-                   engine?.getFocusedStem(0.3) ?? -1, videoEl?.currentTime || 0);
+  telemetryPose(_telScreenP, camera.quaternion, engine?.getZoomNormalized() ?? 0,
+                engine?.getFocusedStem(0.3) ?? -1);
 }
 
 // ══════════════════════════════════════════════════════
@@ -1615,9 +1652,10 @@ async function setupFOA() {
         } catch (_) { /* not a URL: leave it to Telemetry to fail loudly */ }
       }
       if (_turl) {
-        telemetry = new Telemetry({
+        telemetry = new XRTelemetry({
           url: _turl,
-          playerId: _tq.get('player') || (telemetryCfg && telemetryCfg.playerId) || undefined,
+          device: _tq.get('player') || (telemetryCfg && telemetryCfg.playerId) || undefined,
+          maxQueue: 120,
           rateHz:  (telemetryCfg && telemetryCfg.rateHz)  || 20,
           flushMs: (telemetryCfg && telemetryCfg.flushMs != null) ? telemetryCfg.flushMs : 100,
           meta: { ua: navigator.userAgent },
@@ -2517,7 +2555,7 @@ async function setupVoice(param) {
       // El MISMO id que la telemetría, que es lo que permite cruzar la voz con
       // las poses después. Sin telemetría no hay con qué cruzar, así que vale
       // cualquiera —pero que sea el de ?player si lo han puesto.
-      playerId: telemetry ? telemetry.playerId : (q.get('player') || undefined),
+      playerId: telemetry ? telemetry.device : (q.get('player') || undefined),
       timesliceMs:   (voiceCfg && voiceCfg.timesliceMs)   || 1000,
       bitsPerSecond: (voiceCfg && voiceCfg.bitsPerSecond) || 32000,
       constraints:   (voiceCfg && voiceCfg.constraints)   || undefined,
@@ -2831,9 +2869,8 @@ async function enterXR() {
             // setZoomNormalized() acaba de recalcular los pesos, así que el foco es
             // el de este frame.
             // A musician zoomed in by a pinch is the focus wherever the head is.
-            telemetry?.sample(pos, q, zoomN,
-                              xrZoomStem >= 0 ? xrZoomStem : (engine?.getFocusedStem(0.3) ?? -1),
-                              videoEl?.currentTime || 0);
+            telemetryPose(pos, q, zoomN,
+                          xrZoomStem >= 0 ? xrZoomStem : (engine?.getFocusedStem(0.3) ?? -1));
 
             // Centrar la esfera en la cabeza y desplazarla EN CONTRA de la vista
             // para "acercar" lo que miras (xrZoomDist = 0 → solo centrada).
@@ -4571,7 +4608,7 @@ async function enterAR() {
           // El zoom sigue siendo 0: en AR no existe, y mandar otra cosa mentiría
           // al consumidor sobre en qué rango leer `z`.
           const [tp, tq] = arTelemetryPose(pose);
-          telemetry?.sample(tp, tq, 0, updateARFocus(time), videoEl?.currentTime || 0);
+          telemetryPose(tp, tq, 0, updateARFocus(time));
           pointer.update(frame, refSpace);
           updateCloseupFocus();                                   // the pinned musician's close-up
           if (ARPERF) {
