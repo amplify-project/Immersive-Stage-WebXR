@@ -196,7 +196,7 @@ groups:
 sudo usermod -aG video,audio "$USER"   # then log out/in; check with `groups`
 ```
 
-If sudo is genuinely required (e.g. the X4 USB-bridge reset), preserve both the environment
+If sudo is genuinely required (e.g. a USB reset of the camera), preserve both the environment
 and the credentials home explicitly:
 
 ```bash
@@ -205,7 +205,7 @@ sudo -E env S3_BUCKET=s3://mi-360-streaming S3_REGION=eu-west-2 HOME="$HOME" ./s
 
 ## A/V sync — measuring the audio delay
 
-The camera/X4 bridge adds noticeable video latency, so the live audio arrives **earlier**
+The 360 camera's in-camera stitching adds noticeable video latency, so the live audio arrives **earlier**
 than the picture. The **A/V delay (ms)** field in the editor (`scene.json`
 `live.audio.delay`) delays the audio to line it up; the encode applies it with `adelay`.
 The question is only *how many milliseconds*.

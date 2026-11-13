@@ -424,7 +424,7 @@ well, and the sync tag (`?cusync=1`) in AR.
 ## 13. Live crops: what they cost, and what is next
 
 The crops of §10 are the only close-ups a live concert has, and §12 shows them
-in AR. Measured on 2026-10-30, live from the X4 bridge (2880×1440, 30 fps,
+in AR. Measured on 2026-10-30, live from an Insta360 X4 (2880×1440, 30 fps,
 NVENC) with crops for two musicians (62° wide, `interp=line`, `cas=0.5`):
 
 | | |
