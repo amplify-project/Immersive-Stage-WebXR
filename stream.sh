@@ -201,15 +201,22 @@ if [[ -n "$CLOSEUPS" ]]; then
     CLOSE_ARR+=("$c"); CLOSE_NAME+=("${_rawn[_ci]:-}")
   done
 fi
-# En captura no hay ficheros que abrir: se quedan los recortes del 360 y las
-# cámaras en vivo. Una cámara en vod no acabaría nunca: fuera también.
+# Each mode drops only what it cannot use, and nothing else:
+#   · LIVE capture: no files to open → crops of the 360 and live cameras stay.
+#   · vod: a live camera would never end → files and crops stay.
+# (One condition for both, as 7f71ce0 had it, dropped vod's files as well,
+# with the LIVE warning, on a vod run.)
 if [[ "$CAPTURE" == "1" || "$MODE" == "vod" ]]; then
   _keep=(); _keepn=()
   for ((k=0; k<${#CLOSE_ARR[@]}; k++)); do
     c="${CLOSE_ARR[k]}"
-    if [[ "$c" == crop:* ]] || [[ "$c" == cam:* && "$MODE" != "vod" ]]; then _keep+=("$c"); _keepn+=("${CLOSE_NAME[k]}")
-    elif [[ "$c" == cam:* ]]; then echo "  WARNING: close-up '$c' is a live camera; vod cannot record one → ignored."
-    else echo "  WARNING: close-up '$c' es un fichero; en captura LIVE solo valen recortes (crop:) y cámaras (cam:) → ignorado."; fi
+    if [[ "$c" == cam:* && "$MODE" == "vod" ]]; then
+      echo "  WARNING: close-up '$c' is a live camera; vod cannot record one → ignored."
+    elif [[ "$CAPTURE" == "1" && "$c" != crop:* && "$c" != cam:* ]]; then
+      echo "  WARNING: close-up '$c' is a file; LIVE capture takes only crops (crop:) and cameras (cam:) → ignored."
+    else
+      _keep+=("$c"); _keepn+=("${CLOSE_NAME[k]}")
+    fi
   done
   CLOSE_ARR=("${_keep[@]}"); CLOSE_NAME=("${_keepn[@]}")
 fi
