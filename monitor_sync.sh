@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 #  monitor_sync.sh — Monitor A/V FIEL y de baja latencia (<300ms) para AJUSTAR
-#  el delay audio/vídeo del directo. Reproduce /dev/video10 + audio con ffplay,
+#  el delay audio/vídeo del directo. Reproduce /dev/video0 + audio con ffplay,
 #  muxados (mjpeg + pcm: sin GOP ni encode → sin sesgo de latencia vídeo↔audio,
 #  a diferencia del preview MSE del navegador).
 #
@@ -17,7 +17,7 @@ set -euo pipefail
 
 DELAY_MS="${1:-0}"
 AUDIO="${2:-hw:1,0}"
-VIDEO="${3:-/dev/video10}"
+VIDEO="${3:-/dev/video0}"
 CH="${CH:-32}"            # canales que abre el dispositivo de audio (X32 = 32)
 WCH="${WCH:-0}"           # canal a monitorizar (por defecto el W del FOA = omni).
                           # OJO: -ac 2 no sabe bajar 32 canales discretos → silencio;
@@ -34,7 +34,7 @@ if [ "$DELAY_MS" -gt 0 ] 2>/dev/null; then
   AF="${AF},adelay=${DELAY_MS}|${DELAY_MS}"
 fi
 
-# Mata un monitor anterior: v4l2loopback no admite dos lectores de /dev/video10,
+# Mata un monitor anterior: un device v4l2 no admite dos lectores,
 # así que un monitor previo dejaría el device "busy". El ffmpeg del monitor es
 # único por "-f nut -"; al matarlo, su ffplay se cierra solo (EOF).
 pkill -f -- '-f nut -' 2>/dev/null || true

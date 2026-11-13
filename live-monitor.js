@@ -256,8 +256,7 @@ function createLiveMonitor({ server, isBusy = () => null, log = true } = {}) {
 // segments, so the picture is a frame or two behind the camera. Downscaled to
 // 1280 wide: it is for seeing the stage, not for judging the image.
 //
-// v4l2 devices — and the X4 bridge's /dev/video10 in particular — take ONE
-// reader, so this obeys the same rules as the audio: refused during an encode,
+// v4l2 devices take ONE reader, so this obeys the same rules as the audio: refused during an encode,
 // stopped by Start LIVE, the delay measurement and the ROI snapshot, and a new
 // preview replaces the previous one.
 function createVideoPreview({ isBusy = () => null, log = true } = {}) {

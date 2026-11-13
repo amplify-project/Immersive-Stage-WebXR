@@ -529,7 +529,7 @@ build_inputs_capture() {
 
   # — Vídeo — `-framerate` da timestamps regulares (CFR). NO usar
   #   -use_wallclock_as_timestamps: ataba el timing del MPD a la hora de LLEGADA
-  #   real de cada frame → con el bridge (entrega irregular) y el arranque
+  #   real de cada frame → con una captura de entrega irregular (el antiguo bridge de la X4) y el arranque
   #   desfasado de v4l2 vs ALSA, audio y vídeo quedaban desincronizados en el
   #   propio manifiesto → tirones/repeticiones en directo. El delay A/V se aplica
   #   abajo con el filtro adelay, no por timestamps.

@@ -17,7 +17,6 @@ media/video_1920.mp4
 # Build / profiling artifacts
 perf.data
 perf.data.old
-x4_bridge/insta360_v4l2_bridge
 
 # Editor swap / backup files
 *.sw[a-p]
