@@ -465,6 +465,16 @@ export class XRMenu {
     this.mesh.visible = true;
   }
 
+  /** Swap what an open menu shows, where it already is: a second page (e.g. the
+   *  reactions) must not jump to wherever the head points by then. */
+  setItems(items, status = '') {
+    if (!this.open) return;
+    this._items = items;
+    this._hover = -1;
+    this._status = status;
+    this._draw();
+  }
+
   close() { this.mesh.visible = false; this._hover = -1; }
 
   setStatus(text) { if (text !== this._status) { this._status = text; if (this.open) this._draw(); } }

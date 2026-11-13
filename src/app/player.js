@@ -3631,17 +3631,70 @@ function xrStemDirFrom(i, o) {
 // ── XR menu (long pinch on nothing) ─────────────────────────────────────────
 function xrOpenMenu() {
   if (!xrLastPose) return;
+  xrMenu.show(xrMainItems(), xrLastPose);
+}
+
+// Back from a second page: the main items, where the panel already is.
+function xrOpenMenuInPlace() { xrMenu.setItems(xrMainItems()); }
+
+function xrMainItems() {
   const inVR = !!xrSession, inAR = !!arSession;
-  xrMenu.show([
+  return [
     { id: 'vr',   label: 'VR · 360°',        active: inVR, note: inVR ? 'now' : '', disabled: !vrOk },
     { id: 'ar',   label: 'AR · passthrough', active: inAR, note: inAR ? 'now' : arOk ? '' : 'not available', disabled: !arOk },
     { id: 'adjust', label: 'Adjust scene', active: sceneAdjust,
       note: sceneAdjust ? (sceneEditable ? 'on' : 'on · not saved') : inAR ? 'move musicians' : 'calibrate' },
+    { id: 'react', label: 'Reactions  😊', disabled: !telemetry, note: telemetry ? '' : 'telemetry off' },
     { id: 'exit', label: 'Exit immersive' },
-  ], xrLastPose);
+  ];
+}
+
+// ── Reactions: an emoji on the telemetry, like zoom ─────────────────────────
+// A second page of the same menu, swapped in place. Choosing one puts its id
+// in the `r` field of the pose samples (beside `z` and `f`) for
+// `telemetry.reactionHoldMs` (3000 by default; 0 = until the next one), and
+// leaves the page open with "Sent 👏" on the status line: inside the headset a
+// toast is seen by nobody, and someone reacting to the music tends to send more
+// than one. Pinch off the panel to close it. scene.json `telemetry.reactions`
+// ([{id, emoji, label}]) replaces the default set; `id` is what goes on the
+// wire and what analysis groups by, the emoji is for people.
+const DEFAULT_REACTIONS = [
+  { id: 'clap',  emoji: '👏', label: 'Applause' },
+  { id: 'love',  emoji: '❤️', label: 'Love it' },
+  { id: 'wow',   emoji: '😮', label: 'Wow' },
+  { id: 'laugh', emoji: '😂', label: 'Funny' },
+  { id: 'fire',  emoji: '🔥', label: 'On fire' },
+  { id: 'sad',   emoji: '😢', label: 'Moving' },
+];
+
+function xrReactions() {
+  const r = telemetryCfg?.reactions;
+  return Array.isArray(r) && r.length
+    ? r.filter(x => x && x.id).map(x => ({ id: String(x.id), emoji: x.emoji || '', label: x.label || String(x.id) }))
+    : DEFAULT_REACTIONS;
+}
+
+function xrShowReactions(status = '') {
+  xrMenu.setItems([
+    ...xrReactions().map(x => ({ id: 'reaction:' + x.id, label: `${x.emoji}  ${x.label}` })),
+    { id: 'back', label: '‹ Back' },
+  ], status);
+}
+
+function xrSendReaction(rid) {
+  const r = xrReactions().find(x => x.id === rid);
+  if (!r) return;
+  if (!telemetry) { xrShowReactions('Not sent: telemetry is off'); return; }
+  const hold = telemetryCfg?.reactionHoldMs;
+  telemetry.setReaction(r.id, Number.isFinite(+hold) && hold !== '' && hold != null ? +hold : 3000);
+  voice?.mark('reaction:' + r.id);   // en la grabación de voz también, si la hay
+  xrShowReactions(`Sent ${r.emoji || r.label}`);
 }
 
 function xrMenuChoose(id) {
+  if (id === 'react') { xrShowReactions(); return; }
+  if (id === 'back')  { xrOpenMenuInPlace(); return; }
+  if (id.startsWith('reaction:')) { xrSendReaction(id.slice(9)); return; }
   xrMenu.close();
   if (id === 'adjust') { setSceneAdjust(!sceneAdjust); return; }
   if (id === 'exit') { (xrSession || arSession)?.end(); return; }

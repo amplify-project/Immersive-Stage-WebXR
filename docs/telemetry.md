@@ -139,6 +139,8 @@ they reload. What it writes:
 | `session` | sent as `?session=`; empty = the session the operator starts with `xrtel start` |
 | `rateHz` | samples per second (10/20/30/60 in the editor) |
 | `screen` | `false` = only in VR/AR, not on desktop/tablet |
+| `reactions` | *optional* `[{id, emoji, label}]` replacing the default reactions of the XR menu |
+| `reactionHoldMs` | *optional* how long a reaction stays in `r` (default `3000`; `0` = until the next one) |
 
 `token` and `session` only apply to a remote target, and are not added if the
 URL already carries them.
@@ -189,6 +191,7 @@ auto-reconnects with backoff, and drops the oldest samples while offline.
 | `q`   | head orientation quaternion `[x,y,z,w]`, same frame |
 | `z`   | zoom / attention depth, normalized `0..1`            |
 | `f`   | focused musician: index into `scene.json` → `stems` (`-1` = none) |
+| `r`   | emoji reaction chosen in the XR menu, as its id (`"clap"`), while it is held; else `null` — see [Reactions](#reactions-r) |
 | `g`   | *optional* real eye-gaze `[x,y,z]` (else omitted)   |
 
 `f` is derived differently in each mode, because attention is declared
@@ -230,10 +233,10 @@ musicians each spectator chose to bring forward.
 
 ```jsonc
 // on connect: current state of every live player
-{ "type": "snapshot", "players": [ { "id": "...", "frame": "room", "rec": null, "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "t": 0, "w": 0, "srv": 0, "mt": 0 } ] }
+{ "type": "snapshot", "players": [ { "id": "...", "frame": "room", "rec": null, "p": [...], "q": [...], "gaze": [...], "z": 0, "f": -1, "r": null, "t": 0, "w": 0, "srv": 0, "mt": 0 } ] }
 
 // live stream
-{ "type": "update", "id": "player-42", "frame": "room", "rec": "2026-09-21T07-40-29-861Z_player-42", "t": 12345.6, "w": 1785500757720, "srv": 1785500757719.4, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1 }
+{ "type": "update", "id": "player-42", "frame": "room", "rec": "2026-09-21T07-40-29-861Z_player-42", "t": 12345.6, "w": 1785500757720, "srv": 1785500757719.4, "mt": 5.62, "p": [x,y,z], "q": [x,y,z,w], "gaze": [x,y,z], "z": 0, "f": -1, "r": null }
 { "type": "leave",  "id": "player-42" }
 ```
 
@@ -241,6 +244,30 @@ The consumer keeps a `Dictionary<id, pose>`, applies `snapshot` then `update`s,
 removes on `leave`, and **interpolates** between updates for smooth avatars
 (updates arrive ~every 1000/`rateHz` ms). For a live render, drive it off arrival
 order: it is the freshest thing you have and one batch of lag does not show.
+
+## Reactions (`r`)
+
+The XR menu (long pinch on nothing) has a **Reactions** page: 👏 Applause,
+❤️ Love it, 😮 Wow, 😂 Funny, 🔥 On fire, 😢 Moving. Choosing one puts its id
+in the `r` field of the pose samples, the way `z` carries the zoom: no message
+of its own, so every consumer of poses (the Unity render, the recorder, the
+gateway's archive and its `format=legacy`) gets it with no change, on the same
+sample as where that head was and what it was hearing.
+
+`r` stays on the samples for `reactionHoldMs` (3 s by default) and then goes
+back to `null`; choosing again restarts the hold, so a render can show the emoji
+over that spectator while it is set. The sample that carries a new reaction is
+taken at once, not at the next rate tick. The page stays open after a choice,
+showing "Sent 👏", so several can be sent in a row; pinch off the panel to close
+it. The item is disabled when the page has no telemetry. With a voice recording
+running, the reaction is also marked in it (`reaction:<id>`).
+
+`r` is the id, not the emoji: analysis groups by it, and a render maps it to
+its own art. The set is `telemetry.reactions` in `scene.json`.
+
+Counting reactions from a CSV: a reaction starts where `r` changes from the
+previous sample of that player. The same reaction chosen twice inside its hold
+is one run, not two.
 
 ## Putting two headsets on one time axis
 
