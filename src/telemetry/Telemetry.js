@@ -14,7 +14,7 @@
 //
 // Wire protocol (client -> relay), one JSON frame per WebSocket message:
 //   hello : {"hello":"<playerId>","meta":{...}}                 // once per connection
-//   data  : {"b":[{t,w,mt,p:[x,y,z],q:[x,y,z,w],z,f[,g]}, ...]} // batched samples
+//   data  : {"b":[{t,w,mt,p:[x,y,z],q:[x,y,z,w],z,f,r[,g]}, ...]} // batched samples
 // The relay derives head-forward gaze from q (or uses g if real eye-tracking
 // is present) and re-emits to consumers. See docs/telemetry.md for that side.
 
@@ -43,6 +43,8 @@ export class Telemetry {
     this._ws = null;
     this._queue = [];
     this._nextSample = 0;
+    this._reaction = null;           // see setReaction()
+    this._reactionUntil = 0;
     this._flushTimer = null;
     this._reconnectTimer = null;
     this._backoff = 500;              // ms, doubles up to _backoffMax
@@ -108,12 +110,35 @@ export class Telemetry {
       q: [round4(orientation.x), round4(orientation.y), round4(orientation.z), round4(orientation.w)],
       z: round(zoom, 2),
       f: focus,
+      r: this._reactionAt(now),
     };
     if (gaze) s.g = [round4(gaze[0]), round4(gaze[1]), round4(gaze[2])];
 
     this._queue.push(s);
     if (this._queue.length > this._maxQueue) this._queue.shift();   // backpressure: keep newest
     if (this._flushMs <= 0) this._flush();
+  }
+
+  /**
+   * The spectator's reaction (an emoji id from the XR menu, e.g. "clap"). Like
+   * `z` and `f` it is a field of every pose sample, `r`, not a separate
+   * message: a consumer that reads poses (the Unity render, the CSV) gets it
+   * with no protocol of its own, in step with where that head was and what it
+   * was hearing. It stays on the samples for `holdMs` and then goes back to
+   * null; choosing again restarts the hold. holdMs = 0 keeps it until the next
+   * call. Pass null to clear it now.
+   * @param {?string} id
+   * @param {number} [holdMs=3000]
+   */
+  setReaction(id, holdMs = 3000) {
+    this._reaction = id == null || id === '' ? null : String(id);
+    this._reactionUntil = this._reaction && holdMs > 0 ? nowMs() + holdMs : 0;
+    this._nextSample = 0;            // the next sample() takes it, not the next grid beat
+  }
+
+  _reactionAt(now) {
+    if (this._reaction && this._reactionUntil && now >= this._reactionUntil) this._reaction = null;
+    return this._reaction;
   }
 
   /**

@@ -148,6 +148,7 @@ function createRelay({ server: hostServer = null, port = 8090, ttlMs = 5000, swe
           p: s.p, q: s.q,
           gaze: s.g || forwardFromQuat(s.q),        // real eye-gaze if sent, else head-forward
           z: s.z, f: s.f,
+          r: s.r ?? null,                           // reaction id from the XR menu, or null
         };
         players.set(id, { ...prev, ...rec, lastSeen: now });
         broadcast({ type: 'update', ...rec });
