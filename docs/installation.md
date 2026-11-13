@@ -8,7 +8,7 @@ development checkout the README's *Quick start* is enough.
 | Dependency | Needed for | Package (Ubuntu) |
 | --- | --- | --- |
 | **Node.js** (developed on v22) | `server.js` — player, editor, API. Built-in modules only. | `nodejs` (or nvm) |
-| `ws` (npm) | Pose telemetry and voice recording only. Without it the server warns once and runs with them disabled. | `cd telemetry && npm install` |
+| `ws` (npm) | Pose telemetry (the local relay), voice recording and the editor's live monitor. **Install it on every machine that runs `server.js`**: without it the server still starts, but those are off — players set to *Telemetry → this server* get nothing — and the startup banner and the editor's *Test* say why. | `cd telemetry && npm install` |
 | **ffmpeg** + **ffprobe** on `PATH`, with `libvpx-vp9`, `libopus`, `libx264` | Every encode (`stream.sh`, VOD and live) and media probing in the editor. | `ffmpeg` |
 | ffmpeg built with **NVENC** + NVIDIA driver ≥ 550 | Live 4K (`CODEC=h264_nvenc`). Software encoders cannot keep up at 4K. | below |
 | **git-lfs** | Media files (`*.mp4 / *.wav / *.mp3`) and the Insta360 SDK in `x4_bridge/libs/`. | `git-lfs` |
@@ -59,7 +59,7 @@ ffmpeg build with `--enable-nvenc` (a static build, or compile from source with
 git clone <repo-url> && cd Livestreamed_Immersive_Player
 git lfs install && git lfs pull
 ./gen-cert.sh                          # HTTPS cert with your LAN IPs
-cd telemetry && npm install && cd ..   # optional: telemetry + voice
+cd telemetry && npm install && cd ..   # needed for telemetry, voice and the live monitor
 ```
 
 **4. AWS CLI and credentials (S3 publishing only)**

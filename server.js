@@ -938,13 +938,13 @@ const handler = (req, res) => {
   // rápida de comprobar desde el propio Quest que la telemetría está llegando.
   if (req.url === '/telemetry/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(relay ? relay.health() : { ok: false, reason: 'relay disabled' }));
+    return res.end(JSON.stringify(relay ? relay.health() : { ok: false, reason: `relay disabled: ${relayOff}` }));
   }
 
   // Y si alguien está grabando voz ahora mismo, y dónde van los ficheros.
   if (req.url === '/voice/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(voice ? voice.health() : { ok: false, reason: 'voice disabled' }));
+    return res.end(JSON.stringify(voice ? voice.health() : { ok: false, reason: `voice recording disabled: ${voiceOff}` }));
   }
 
   let pathname;
@@ -1044,14 +1044,24 @@ if (fs.existsSync(KEY) && fs.existsSync(CRT)) {
 // `ws` es la ÚNICA dependencia npm del proyecto y vive en telemetry/. Si no se
 // ha hecho `npm install` ahí, el player debe seguir funcionando sin telemetría,
 // así que el require va protegido.
-let relay = null;
-if (!/^(0|off|false)$/i.test(process.env.RELAY || '')) {
+// Why a service is off, said where people look: the editor's Test button reads
+// it from /telemetry/health and /voice/health, and the startup banner repeats
+// it. A fresh clone without `npm install` in telemetry/ used to show only
+// "relay disabled" on another machine, and nobody knew what to do about it.
+function serviceOffReason(e) {
+  return e.code === 'MODULE_NOT_FOUND'
+    ? 'the `ws` package is missing: run `cd telemetry && npm install` on the server and restart it'
+    : e.message;
+}
+let relay = null, relayOff = null;
+if (/^(0|off|false)$/i.test(process.env.RELAY || '')) relayOff = 'turned off with RELAY=0 when the server was started';
+else {
   try {
     const { createRelay } = require('./telemetry/relay');
     relay = createRelay({ server, log: false });
   } catch (e) {
-    const why = e.code === 'MODULE_NOT_FOUND' ? 'falta `cd telemetry && npm install`' : e.message;
-    console.warn(`⚠  Telemetría desactivada (${why}). El player funciona igual.`);
+    relayOff = serviceOffReason(e);
+    console.warn(`⚠  Telemetry disabled (${relayOff}). The player works the same.`);
   }
 }
 
@@ -1075,14 +1085,15 @@ if (relay && !/^(0|off|false)$/i.test(process.env.TIMING || '')) {
 // origen, un solo certificado. Ver telemetry/voice.js y docs/voice-recording.md.
 // El player no manda nada si no se lo piden (?voice=1 o scene.json), así que
 // esto abierto no graba a nadie por su cuenta.
-let voice = null;
-if (!/^(0|off|false)$/i.test(process.env.VOICE || '')) {
+let voice = null, voiceOff = null;
+if (/^(0|off|false)$/i.test(process.env.VOICE || '')) voiceOff = 'turned off with VOICE=0 when the server was started';
+else {
   try {
     const { createVoiceService } = require('./telemetry/voice');
     voice = createVoiceService({ server, dir: RECORDINGS_DIR, log: false });
   } catch (e) {
-    const why = e.code === 'MODULE_NOT_FOUND' ? 'falta `cd telemetry && npm install`' : e.message;
-    console.warn(`⚠  Grabación de voz desactivada (${why}). El player funciona igual.`);
+    voiceOff = serviceOffReason(e);
+    console.warn(`⚠  Voice recording disabled (${voiceOff}). The player works the same.`);
   }
 }
 
@@ -1102,8 +1113,7 @@ try {
                  : measureProc ? 'Measuring the A/V delay: try again in a few seconds.' : null),
   });
 } catch (e) {
-  const why = e.code === 'MODULE_NOT_FOUND' ? 'falta `cd telemetry && npm install`' : e.message;
-  console.warn(`⚠  Live monitor disabled (${why}).`);
+  console.warn(`⚠  Live monitor disabled (${serviceOffReason(e)}).`);
 }
 
 // Ni el relay ni el timing cierran un upgrade que no sea suyo: cada uno se
@@ -1154,6 +1164,13 @@ server.listen(PORT, '0.0.0.0', () => {
       : 'scene.json: enabled';
     console.log(`  telemetry → ${relay.scheme}://${host}:${PORT}/ingest · consume=/consume · health=/telemetry/health`);
     console.log(`              ${note}`);
+  } else {
+    // Said loudly when it matters: players told to send to "this server" will
+    // find nothing listening on /ingest.
+    const t = sceneTelemetry();
+    const local = t.enabled && !(t.target !== 'local' && t.url);
+    console.warn(`⚠  telemetry → OFF: ${relayOff}`);
+    if (local) console.warn('              scene.json sends the players HERE (local): their telemetry will fail until this is fixed');
   }
   if (timing) {
     console.log(`  sync      → ${scheme === 'https' ? 'wss' : 'ws'}://${host}:${PORT}${timing.path}`);
@@ -1162,6 +1179,8 @@ server.listen(PORT, '0.0.0.0', () => {
   if (voice) {
     console.log(`  voz       → ${scheme === 'https' ? 'wss' : 'ws'}://${host}:${PORT}${voice.path} · health=/voice/health`);
     console.log(`              player=?voice=1 · graba en ${path.relative(ROOT, voice.dir)}/`);
+  } else if (!/^(0|off|false)$/i.test(process.env.VOICE || '')) {
+    console.warn(`⚠  voice     → OFF: ${voiceOff}`);
   }
   if (scheme === 'http') {
     console.warn('⚠  Sin certificados → HTTP. WebXR (VR) NO funciona por IP sin HTTPS.');

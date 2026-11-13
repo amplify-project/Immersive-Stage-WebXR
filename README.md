@@ -47,7 +47,7 @@ Requirements: **Node.js**, **ffmpeg/ffprobe** on `PATH` (with `libvpx-vp9`,
 ```bash
 git lfs install && git lfs pull       # fetch the sample media
 ./gen-cert.sh                         # self-signed cert: WebXR over IP needs HTTPS (once)
-cd telemetry && npm install && cd ..  # `ws`, only needed for pose telemetry
+cd telemetry && npm install && cd ..  # `ws`: telemetry, voice, live monitor — skip it and they are OFF
 node server.js                        # start the server (https if certs exist)
 ```
 
