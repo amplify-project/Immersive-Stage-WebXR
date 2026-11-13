@@ -68,7 +68,7 @@ There is no login step and nothing is mounted. The AWS CLI reads the keys from
 configure it once per machine and user:
 
 ```bash
-sudo apt install -y awscli     # or the official AWS CLI v2 installer
+sudo snap install aws-cli --classic   # any Ubuntu; 22.04 also has `apt install awscli`, 24.04 does not
 aws configure                  # Access Key ID · Secret Access Key · region · json
 aws sts get-caller-identity    # which AWS identity the keys belong to
 aws s3 ls s3://<bucket>        # the keys can reach the bucket
