@@ -9,8 +9,8 @@
 #  tiempo real → no hay xrun ni cortes. Solo mide.
 #
 #  Uso:
-#     ./measure_sync.sh                       # hw:1,0 + /dev/video10, 8 s
-#     ./measure_sync.sh hw:1,0 /dev/video10   # dispositivos explícitos
+#     ./measure_sync.sh                       # hw:1,0 + /dev/video0, 8 s
+#     ./measure_sync.sh hw:1,0 /dev/video0   # dispositivos explícitos
 #     DUR=6 CH=32 WCH=0 JUMP=15 ./measure_sync.sh
 #     FROM_OUT=encoded CUR_DELAY=450 ./measure_sync.sh   # sobre el directo (mejor)
 #
@@ -36,7 +36,7 @@
 set -euo pipefail
 
 AUDIO="${1:-hw:1,0}"
-VIDEO="${2:-/dev/video10}"
+VIDEO="${2:-/dev/video0}"
 CH="${CH:-32}"          # canales que abre el device de audio (X32 = 32)
 WCH="${WCH:-0}"         # canal a escuchar (W del FOA = omni; 0 en 1-2 ch)
 DUR="${DUR:-8}"         # segundos a capturar

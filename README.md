@@ -69,7 +69,6 @@ certificate. Desktop controls: drag to look, mouse wheel to zoom, space to play.
 | [Live scene setup](docs/live-editor-tutorial.md) | From cold hardware to a live stream: the editor's LIVE panel, A/V delay, publishing |
 | [Installation](docs/installation.md) | Production machine from scratch: every dependency, NVENC, AWS CLI and credentials |
 | [Production hardware](docs/produccion-hardware.md) | The capture/encode PC, NVENC, S3/CloudFront publishing |
-| [`x4_bridge/`](x4_bridge/README.md) | Insta360 X4 → virtual camera bridge |
 | [Reference](docs/reference.md) | Player controls, debug flags, test tools, file map, `/api/*`, `scene.json` schema |
 
 **How it is built**

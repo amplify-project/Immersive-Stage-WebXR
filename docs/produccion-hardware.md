@@ -217,8 +217,8 @@ video+audio with wall-clock timestamps, auto-detects the transient in each strea
 prints the offset in ms:
 
 ```bash
-./measure_sync.sh                     # hw:1,0 + /dev/video10, 8 s
-DUR=6 CH=32 WCH=0 THRESH=-30 ./measure_sync.sh hw:1,0 /dev/video10
+./measure_sync.sh                     # hw:1,0 + /dev/video0, 8 s
+DUR=6 CH=32 WCH=0 THRESH=-30 ./measure_sync.sh hw:1,0 /dev/video6
 ```
 
 Method: it's **one action** that is both seen and heard — when it starts, stay ~1 s
@@ -268,8 +268,8 @@ mismatch is the capture-side stitching latency. Measure/tune it directly in the 
 
 **The value is setup-dependent — re-measure it whenever the camera or audio device changes.**
 It's the video-vs-audio latency of the *capture chain*, not a fixed camera number: a plain
-USB webcam lands around ~**500 ms**, while the Insta360 X4 (v4l2 bridge + FlowState stitching)
-adds more. It lives in `scene.json` `live.audio.delay`, so it applies to every client — reset
+USB webcam lands around ~**500 ms**, while a 360 camera that stitches
+in-camera (the Insta360 X5 as UVC) adds its stitching time. It lives in `scene.json` `live.audio.delay`, so it applies to every client — reset
 the player-side `setOutputDelay` to 0 once it's baked into the encode.
 
 ### The editor buttons

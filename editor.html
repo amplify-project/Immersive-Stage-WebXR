@@ -188,12 +188,6 @@
       </div>
     </div>
 
-    <div class="row" id="bridgeBox" style="align-items:center;gap:10px;margin-top:8px">
-      <button class="go"     id="btnBridgeStart" style="flex:0 0 auto" onclick="startBridge()">Initialize Insta360 camera</button>
-      <button class="danger" id="btnBridgeStop"  style="flex:0 0 auto" onclick="stopBridge()" disabled>Stop</button>
-      <span class="small" id="bridgeStatus" style="opacity:.8">bridge stopped</span>
-    </div>
-    <p class="hint">Creates the virtual camera <code>/dev/video10</code> (Insta360 Virtual) and feeds it via the SDK. After initializing, select it above as the USB source.</p>
 
     <label style="margin-top:14px">Multichannel audio (X32 / mixer)</label>
     <div class="row">
@@ -643,8 +637,6 @@ async function init() {
   syncSelPanel();          // deja los campos de sala en su estado inicial
   pollStatus();
   setInterval(pollStatus, 1500);
-  pollBridge();
-  setInterval(()=>{ if($('liveSources').style.display!=='none') pollBridge(); }, 3000);
   pollSceneRev();
   setInterval(pollSceneRev, 2000);
 }
@@ -2108,28 +2100,6 @@ function clearRoi(){
   const st=$('roiStatus'); st.style.display=''; st.textContent='no ROI · detected across the whole frame'; st.style.color='';
 }
 
-// ── Insta360 bridge → v4l2 virtual camera ─────────────────────────────────────
-async function startBridge(){
-  const r=await fetch('/api/bridge/start',{method:'POST'});
-  const j=await r.json().catch(()=>({}));
-  toast(r.ok?'Bridge started':('Error: '+(j.error||r.status)));
-  pollBridge();
-}
-async function stopBridge(){
-  const r=await fetch('/api/bridge/stop',{method:'POST'});
-  toast(r.ok?'Bridge stopped':'Nothing to stop');
-  pollBridge();
-}
-async function pollBridge(){
-  let s; try { s=await fetch('/api/bridge/status').then(r=>r.json()); } catch(_){ return; }
-  const on=!!s.running;
-  $('btnBridgeStart').disabled=on;
-  $('btnBridgeStop').disabled=!on;
-  const last=(s.log&&s.log.length)?s.log[s.log.length-1]:'';
-  const el=$('bridgeStatus');
-  el.textContent = on ? ('active · /dev/video10'+(last?(' · '+last):'')) : (s.exit!=null?('stopped (code '+s.exit+')'):'bridge stopped');
-  el.style.color = on ? 'var(--ok)' : '';
-}
 async function makeProxy(){
   const src=$('proxySrc').value, scale=$('proxyScale').value.trim()||'1920:960';
   const r=await fetch('/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({src,scale})});

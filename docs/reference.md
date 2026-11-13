@@ -95,7 +95,6 @@ src/audio/              Reusable immersive-audio engine (ESM)
   OmnitoneFOADecoder.js     Binaural FOA decode (HRTF) via Omnitone
   HOAST*.js / *.js          Cardioid fallback, matrices, axes
 telemetry/              Pose relay, recorder and headset simulator
-x4_bridge/              Insta360 X4 → virtual camera bridge for live capture
 media/                  360 video, FOA bed and stems (Git LFS — not free to reuse)
 meshes/                 Musician .glb models for AR (git-ignored but test-figure.glb)
 tools/                  Node tests, bed analysis, docs-bundle.sh (all docs in one file)

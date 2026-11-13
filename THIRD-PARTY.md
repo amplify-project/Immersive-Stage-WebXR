@@ -6,9 +6,7 @@ Nothing is bundled by a package manager: browser libraries are loaded from a
 CDN by the pages, and the files under `src/vendor/` travel with the repository
 so the player still works without network access to them.
 
-Every licence below is compatible with releasing this code under GPLv3. The one
-component that is not open source, the Insta360 SDK, is only needed by the
-optional X4 bridge.
+Every licence below is compatible with releasing this code under GPLv3.
 
 ## Loaded from a CDN at runtime
 
@@ -58,19 +56,12 @@ Everything else in `src/audio/` (`ImmersiveAudioEngine.js`,
 
 The rest of the server (`server.js`) uses only Node built-ins.
 
-## Insta360 SDK (optional X4 bridge)
+## Proprietary SDKs
 
-`x4_bridge/libs/` holds the **Insta360 CameraSDK 2.1.1** (headers and
-`libCameraSDK.so`) and the **MediaSDK 3.1.1** (`.deb`), carried by Git LFS. They
-are Insta360's proprietary software, not covered by this repository's licence,
-and are only used by `x4_bridge/`, to open an Insta360 X4 and stitch its image.
-A camera that shows up as a plain UVC webcam (e.g. the X5) does not need them.
-
-> **«CONFIRM»** — whether Insta360's SDK terms allow redistributing these files
-> in a public repository. If they do not, they must be removed from the
-> repository (and its LFS history) and obtained from Insta360's developer
-> programme instead; `install_insta360_sdk.sh` already installs them from
-> `libs/`, wherever they came from.
+None. The 360 camera is captured as a plain UVC webcam (the Insta360 X5 is
+exposed that way by the kernel), so no camera SDK is needed. An earlier X4
+bridge that linked Insta360's proprietary Camera/Media SDK has been removed
+from the repository.
 
 ## External tools
 
@@ -83,7 +74,6 @@ licences do not extend to this code:
 | NVIDIA driver (NVENC) | Hardware H.264 encoding for live 4K | Proprietary |
 | Node.js | `server.js` and `telemetry/` | MIT |
 | AWS CLI | S3 publishing (`upload-s3.sh`) | Apache-2.0 |
-| v4l2loopback | Only for the X4 bridge | GPL-2.0 |
 
 Shipping any of them installed with this software (a machine image, a
 container, a configured PC for a venue) would be distributing them, and their

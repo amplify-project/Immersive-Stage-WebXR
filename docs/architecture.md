@@ -8,7 +8,6 @@ in new features.
 - The **audio engine API** → [`core-api.md`](core-api.md).
 - **How the audio is built**, mic to ears (for audio people) → [`audio-pipeline.md`](audio-pipeline.md).
 - The **two pending partner features** (AR tracking, zoom-quality) → [`handoff.md`](handoff.md).
-- **Live 360 capture** (Insta360 X4 bridge) → [`../x4_bridge/README.md`](../x4_bridge/README.md).
 
 ---
 
@@ -53,7 +52,6 @@ those two contracts, and the other side keeps working.
 | `editor.html` | **Visual editor.** Authors `scene.json`: sources, top-down placement radar, front height view, spotlight, encode controls, live device pickers. | Add an authoring control or a new scene field. |
 | `server.js` | **Backend.** Static file server (Range/MSE) + `/api/*` (scene I/O, encode/proxy jobs, live devices, monitor). No npm deps. | Add an API route or a job type. |
 | `stream.sh` | **Encoder.** Builds the ffmpeg invocation that packages video + multichannel Opus (+ close-ups) into DASH, for VOD and live. | Add an encode option / output layout. |
-| `x4_bridge/` | **Live 360 capture.** Stitches the Insta360 X4 and exposes `/dev/video10`. | Live capture pipeline only. |
 | `scene.json` | The shared config artifact. | Whenever a feature needs new authored data. |
 
 ---

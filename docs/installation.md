@@ -11,12 +11,11 @@ development checkout the README's *Quick start* is enough.
 | `ws` (npm) | Pose telemetry and voice recording only. Without it the server warns once and runs with them disabled. | `cd telemetry && npm install` |
 | **ffmpeg** + **ffprobe** on `PATH`, with `libvpx-vp9`, `libopus`, `libx264` | Every encode (`stream.sh`, VOD and live) and media probing in the editor. | `ffmpeg` |
 | ffmpeg built with **NVENC** + NVIDIA driver ≥ 550 | Live 4K (`CODEC=h264_nvenc`). Software encoders cannot keep up at 4K. | below |
-| **git-lfs** | Media files (`*.mp4 / *.wav / *.mp3`) and the Insta360 SDK in `x4_bridge/libs/`. | `git-lfs` |
+| **git-lfs** | Media files (`*.mp4 / *.wav / *.mp3`) and the example 3D models (`*.glb`). | `git-lfs` |
 | **openssl** | `./gen-cert.sh` — WebXR over a LAN IP needs HTTPS. | `openssl` |
 | **v4l2-ctl** | Live: listing USB video devices in the editor. | `v4l-utils` |
 | **arecord** | Live: listing USB audio devices in the editor. | `alsa-utils` |
 | **AWS CLI** + credentials | Live: publishing to S3 (`upload-s3.sh`). Not needed for local output. | below |
-| `v4l2loopback` + Insta360 SDK | Only for an Insta360 X4 through the USB bridge. A camera that shows up as a plain UVC webcam does not need it. | see [`x4_bridge/README.md`](../x4_bridge/README.md) |
 
 ## Steps
 
@@ -82,12 +81,7 @@ to `/root`, the CLI no longer finds the keys, and nothing is uploaded, with no
 error. Bucket, region, IAM permissions and CORS are in
 [`docs/produccion-hardware.md`](produccion-hardware.md#publishing-to-s3--bucket-credentials-cors).
 
-**5. Insta360 X4 bridge (only if you use one)**
-
-Follow [`x4_bridge/README.md`](../x4_bridge/README.md): `install_insta360_sdk.sh`,
-`v4l2loopback`, then the bridge publishes the stitched camera on `/dev/video10`.
-
-**6. Check**
+**5. Check**
 
 ```bash
 node server.js     # prints https://… if the certs exist

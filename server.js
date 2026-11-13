@@ -72,8 +72,8 @@ function pushLog(line) {
 function startJob(mode, cmd, args, env) {
   if (job && job.proc) throw new Error('Ya hay un proceso en marcha (' + job.mode + ')');
   // Libera la cámara/ALSA que puedan tener abiertos los monitores, el snapshot o
-  // la medición: v4l2loopback es de un solo lector, así que si algo sigue leyendo
-  // el device, stream.sh lo ve "ocupado". Los paramos antes de arrancar.
+  // la medición: un device v4l2 admite un solo lector, así que si algo sigue
+  // leyéndolo, stream.sh lo ve "ocupado". Los paramos antes de arrancar.
   stopMeasure(); stopSnapshot();
   if (liveMonitor) liveMonitor.stop('An encode started: it needs the audio device.');
   if (videoPreview) videoPreview.stop();
@@ -104,51 +104,6 @@ function stopJob() {
   // Refuerzo: SIGKILL al grupo si sigue vivo tras 1.5s.
   const p = job.proc;
   setTimeout(() => { try { process.kill(-p.pid, 'SIGKILL'); } catch (_) {} }, 1500);
-  return true;
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Puente Insta360 → cámara virtual v4l2 (x4_bridge/bridge.sh). Es un proceso
-//  independiente del encode: crea /dev/video10 y la alimenta desde el SDK, para
-//  que LIVE pueda capturar de esa cámara virtual. Por eso lleva su propio slot.
-// ════════════════════════════════════════════════════════════════════════════
-const BRIDGE_DIR = path.join(ROOT, 'x4_bridge');
-const BRIDGE_BIN = path.join(BRIDGE_DIR, 'insta360_v4l2_bridge');
-let bridge = null;   // { proc, log:[], startedAt, exit }
-
-function pushBridgeLog(line) {
-  if (!bridge) return;
-  line = line.replace(/\s+$/, '');
-  if (!line) return;
-  bridge.log.push(line);
-  if (bridge.log.length > 200) bridge.log.shift();
-}
-
-function startBridge() {
-  if (bridge && bridge.proc) throw new Error('El puente ya está en marcha');
-  if (!fs.existsSync(BRIDGE_BIN)) {
-    throw new Error('Binario no compilado: ejecuta x4_bridge/build_insta360_v4l2_bridge.sh');
-  }
-  const proc = spawn('bash', ['bridge.sh'], { cwd: BRIDGE_DIR, env: process.env, detached: true });
-  bridge = { proc, log: [], startedAt: Date.now(), exit: null };
-  const onData = b => b.toString().split(/\r|\n/).forEach(pushBridgeLog);
-  proc.stdout.on('data', onData);
-  proc.stderr.on('data', onData);
-  proc.on('error', e => { pushBridgeLog('ERROR spawn: ' + e.message); bridge.exit = -1; bridge.proc = null; });
-  proc.on('exit', code => { pushBridgeLog('— puente terminado (code ' + code + ') —'); bridge.exit = code; bridge.proc = null; });
-  return bridge;
-}
-
-function stopBridge() {
-  if (!bridge || !bridge.proc) return false;
-  const p = bridge.proc;
-  try { process.kill(-p.pid, 'SIGINT'); } catch (_) {}
-  // bridge.sh es un watchdog while-true que relanza el binario bajo sudo; hay que
-  // matar el grupo entero y rematar el binario huérfano (corre como root → sudo).
-  setTimeout(() => {
-    try { process.kill(-p.pid, 'SIGKILL'); } catch (_) {}
-    try { spawn('sudo', ['-n', 'killall', '-9', 'insta360_v4l2_bridge'], { stdio: 'ignore' }); } catch (_) {}
-  }, 800);
   return true;
 }
 
@@ -795,27 +750,8 @@ async function handleAPI(req, res, pathname) {
       return sendJSON(res, 200, { ok: stopJob() });
     }
 
-    // ── Puente Insta360 → cámara virtual v4l2 (inicializar / parar / estado) ──
-    if (pathname === '/api/bridge/start' && req.method === 'POST') {
-      // bridge.sh reloads v4l2loopback, which cannot happen while anything has
-      // /dev/video10 open: let go of the editor's own camera readers first.
-      if (bridge && bridge.proc) return sendJSON(res, 409, { error: 'El puente ya está en marcha' });
-      stopSnapshot();
-      if (videoPreview) await videoPreview.release();
-      try { startBridge(); return sendJSON(res, 200, { ok: true }); }
-      catch (e) { return sendJSON(res, 409, { error: e.message }); }
-    }
-    if (pathname === '/api/bridge/stop' && req.method === 'POST') {
-      return sendJSON(res, 200, { ok: stopBridge() });
-    }
-    if (pathname === '/api/bridge/status' && req.method === 'GET') {
-      return sendJSON(res, 200, bridge ? {
-        running: !!bridge.proc, exit: bridge.exit, startedAt: bridge.startedAt, log: bridge.log.slice(-30),
-      } : { running: false, log: [] });
-    }
-
     // ── Snapshot de la cámara (un frame JPEG) para elegir el ROI ────────────
-    //  Solo vídeo (no toca ALSA). v4l2loopback no admite dos lectores, así que
+    //  Solo vídeo (no toca ALSA). Un device v4l2 no admite dos lectores, así que
     //  liberamos monitores antes; si hay un encode, el device está ocupado.
     // ── Camera preview for the soundcheck monitor (multipart MJPEG) ─────────
     if (pathname === '/api/monitor/video' && req.method === 'GET') {
@@ -830,7 +766,7 @@ async function handleAPI(req, res, pathname) {
       if (job && job.proc) return sendJSON(res, 409, { error: 'Hay un encode en marcha (' + job.mode + '). Párelo antes (la cámara está en uso).' });
       let scene = {}; try { scene = JSON.parse(fs.readFileSync(SCENE_FILE, 'utf8')); } catch (_) {}
       const V = (scene.live && scene.live.video) || {};
-      const dev = V.device || '/dev/video10';
+      const dev = V.device || '/dev/video0';
       stopMeasure(); stopSnapshot();   // libera el device
       if (videoPreview) await videoPreview.release();   // v4l2: one reader
       // Descarta los primeros frames (auto-exposición) y quédate con uno.
@@ -886,7 +822,7 @@ async function handleAPI(req, res, pathname) {
       const dur = 8;
       // ROI de detección (fracciones). Validado: 4 números 0..1 separados por ':'.
       const roiRel = (typeof body.roi === 'string' && /^(0(\.\d+)?|1(\.0+)?)(:(0(\.\d+)?|1(\.0+)?)){3}$/.test(body.roi)) ? body.roi : '';
-      const mArgs = [A.device || 'hw:1,0', V.device || '/dev/video10'];
+      const mArgs = [A.device || 'hw:1,0', V.device || '/dev/video0'];
       console.log('[measure] CH=' + fCh + ' WCH=' + fWch + ' DUR=' + dur + (roiRel ? ' ROI_REL=' + roiRel : '') + ' bash measure_sync.sh ' + mArgs.join(' '));
       if (!liveRun) {
         stopSnapshot();   // libera vídeo+audio (compartidos)

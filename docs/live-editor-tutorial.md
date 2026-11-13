@@ -63,7 +63,7 @@ certificate, and switch the tab from **VOD · files** to **LIVE · USB/UDP**.
 
 | Field | What to put |
 |---|---|
-| **Device** | Choose by label, not by number — `/dev/videoN` is reassigned when you replug. Cameras needing the Insta360 SDK bridge appear as `/dev/video10` only after pressing *Initialize Insta360 camera*; cameras the kernel already exposes as UVC show up directly, and then the bridge is not needed at all. |
+| **Device** | Choose by label, not by number — `/dev/videoN` is reassigned when you replug. The 360 camera must show up as a UVC webcam (the Insta360 X5 does); set its equirectangular resolution explicitly, since the X5 starts in a 1920×1080 webcam mode. |
 | **Resolution** | Leave it empty and you get the camera's default, which on most 360 cameras is a **1920×1080 webcam mode, not equirectangular**. Set it explicitly. |
 | **FPS** | Match what the driver will give, or it overrides you and logs `The driver changed the time per frame`. |
 | **Input format** | `mjpeg` for anything above 1080p — raw `yuyv422` cannot fit a 4K frame down a USB cable. |
@@ -308,7 +308,7 @@ The meters show the raw inputs: RMS as the bar, the peak as the tick. The bar
 turns yellow above −9 dBFS and red above −1 dBFS. Restart the monitor after
 changing the device, the channels or the list of musicians; azimuths are also
 read only at start. The monitor holds the audio device and the preview holds the
-camera (the X4 bridge's `/dev/video10` takes a single reader), so **Start LIVE** and
+camera (a v4l2 device takes a single reader), so **Start LIVE** and
 **Auto-measure delay** stop both, and **📷 ROI** stops the preview.
 
 ## Rehearse without the desk
