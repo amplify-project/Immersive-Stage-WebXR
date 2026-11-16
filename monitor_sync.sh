@@ -22,6 +22,13 @@ CH="${CH:-32}"            # canales que abre el dispositivo de audio (X32 = 32)
 WCH="${WCH:-0}"           # canal a monitorizar (por defecto el W del FOA = omni).
                           # OJO: -ac 2 no sabe bajar 32 canales discretos → silencio;
                           # por eso seleccionamos un canal concreto con pan.
+FPS="${FPS:-24}"          # fps a pedir a la cámara (la X5 por UVC solo da 30)
+
+# Formato y nº de canales que el device acepta de verdad (S32_LE en la X32 y en
+# el mixer de 18 ch del cliente; sin -acodec ffmpeg abre S16_LE y falla).
+source "$(dirname "${BASH_SOURCE[0]}")/alsa_probe.sh"
+alsa_probe "$AUDIO"
+(( WCH < CH )) || WCH=0
 
 # Delay audio→vídeo: NO con -itsoffset en el input. itsoffset obliga a ffmpeg a
 # bufferizar ~DELAY_MS de vídeo para intercalar el audio retrasado; con captura
@@ -48,8 +55,8 @@ echo "Monitor sync → video=$VIDEO  audio=$AUDIO (${CH}ch→estéreo)  delay=${
 # ffmpeg deja de leer la ALSA y su ring se desborda (xrun). Con delay grande la
 # baja latencia es imposible igualmente, así que aquí prima no romper el stream.
 ffmpeg -hide_banner -loglevel warning -fflags nobuffer -flags low_delay \
-  -thread_queue_size 4096 -f v4l2 -framerate 24 -use_wallclock_as_timestamps 1 -i "$VIDEO" \
-  -thread_queue_size 4096 -f alsa -channels "$CH" -use_wallclock_as_timestamps 1 -i "$AUDIO" \
+  -thread_queue_size 4096 -f v4l2 -framerate "$FPS" -use_wallclock_as_timestamps 1 -i "$VIDEO" \
+  -thread_queue_size 4096 -f alsa "${ALSA_FMT[@]}" -channels "$CH" -use_wallclock_as_timestamps 1 -i "$AUDIO" \
   -map 0:v -map 1:a -af "$AF" \
   -vf scale=960:-2 -c:v mjpeg -q:v 7 -c:a pcm_s16le -max_muxing_queue_size 4096 -f nut - \
 | ffplay -hide_banner -loglevel warning -framedrop -autoexit -i -
