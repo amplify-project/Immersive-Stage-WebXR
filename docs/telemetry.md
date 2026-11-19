@@ -247,8 +247,15 @@ order: it is the freshest thing you have and one batch of lag does not show.
 
 ## Reactions (`r`)
 
-The XR menu (long pinch on nothing) has a **Reactions** page: 👏 Applause,
-❤️ Love it, 😮 Wow, 😂 Funny, 🔥 On fire, 😢 Moving. Choosing one puts its id
+**Left-hand bar (VR and AR).** A pinch tap with the **left hand** opens a bar of
+four reactions in front of you: 👏 Applause, ❤️ Love it, 🔥 On fire, 😮 Wow (the
+first four of the set). Aim at one and pinch to send it; the bar says "Sent 👏"
+and closes by itself after 1.5 s, or after 8 s if nobody picks. A left pinch
+while it is open closes it. The left hand therefore no longer pins, unpins or
+zooms: that is the right hand's.
+
+The XR menu (long pinch on nothing) also has a **Reactions** page with the whole
+set: 👏 Applause, ❤️ Love it, 🔥 On fire, 😮 Wow, 😂 Funny, 😢 Moving. Choosing one puts its id
 in the `r` field of the pose samples, the way `z` carries the zoom: no message
 of its own, so every consumer of poses (the Unity render, the recorder, the
 gateway's archive and its `format=legacy`) gets it with no change, on the same
@@ -257,13 +264,13 @@ sample as where that head was and what it was hearing.
 `r` stays on the samples for `reactionHoldMs` (3 s by default) and then goes
 back to `null`; choosing again restarts the hold, so a render can show the emoji
 over that spectator while it is set. The sample that carries a new reaction is
-taken at once, not at the next rate tick. The page stays open after a choice,
+taken at once, not at the next rate tick. The list page stays open after a choice,
 showing "Sent 👏", so several can be sent in a row; pinch off the panel to close
 it. The item is disabled when the page has no telemetry. With a voice recording
 running, the reaction is also marked in it (`reaction:<id>`).
 
 `r` is the id, not the emoji: analysis groups by it, and a render maps it to
-its own art. The set is `telemetry.reactions` in `scene.json`.
+its own art. The set is `telemetry.reactions` in `scene.json`; the bar takes its first four.
 
 Counting reactions from a CSV: a reaction starts where `r` changes from the
 previous sample of that player. The same reaction chosen twice inside its hold

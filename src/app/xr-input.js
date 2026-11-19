@@ -1,7 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Ray and pinch: the hands-free input of the XR player (Pilot 3, T2).
  *
- *  Look at a musician and pinch (either hand, or a controller's trigger): in VR
+ *  Look at a musician and pinch (right hand, or a controller's trigger; the LEFT hand
+ *  opens the reaction bar instead): in VR
  *  it zooms in on them, in AR it pins them and shows their close-up video
  *  beside them. Pinch with the ray on nothing to undo (zoom back out / unpin). Hold the pinch on nothing to open the menu
  *  (switch VR ↔ AR, leave). It is the Quest's own system interaction —the home
@@ -418,6 +419,10 @@ export class RayPointer {
 const MENU_W = 0.56, MENU_PX = 1024;       // metres wide; canvas px wide
 const MENU_DIST = 0.9, MENU_DROP = 0.12;   // in front of the head, a bit below eye level
 const ROW_PX = 120, PAD_PX = 40, TITLE_PX = 110;
+// Row layout (the left-hand reaction bar): a strip of tiles side by side, each a
+// big emoji over a small label, no title. Wider than the list so four tiles
+// are comfortable to aim at.
+const BAR_W = 0.72, BAR_H_PX = 300, BAR_STATUS_PX = 60;
 
 export class XRMenu {
   /**
@@ -429,6 +434,7 @@ export class XRMenu {
     this._items = [];          // { id, label, active, disabled }
     this._hover = -1;
     this._status = '';
+    this._row = false;         // row layout (tiles side by side) instead of the list
     this._canvas = document.createElement('canvas');
     this._canvas.width = MENU_PX;
     this._tex = MeshFit.srgb(new THREE.CanvasTexture(this._canvas));
@@ -444,10 +450,14 @@ export class XRMenu {
   }
 
   get open() { return this.mesh.visible; }
+  /** Showing the row layout (the reaction bar), not the list. */
+  get row() { return this._row && this.open; }
 
-  /** Show `items` in front of the head. `pose` is the viewer XRPose. */
-  show(items, pose, status = '') {
+  /** Show `items` in front of the head. `pose` is the viewer XRPose.
+   *  `opts.row`: lay the items out side by side, as tiles with an `emoji`. */
+  show(items, pose, status = '', opts = {}) {
     this._items = items;
+    this._row = !!opts.row;
     this._hover = -1;
     this._status = status;
     const p = pose.transform.position, q = pose.transform.orientation;
@@ -467,9 +477,10 @@ export class XRMenu {
 
   /** Swap what an open menu shows, where it already is: a second page (e.g. the
    *  reactions) must not jump to wherever the head points by then. */
-  setItems(items, status = '') {
+  setItems(items, status = '', opts = {}) {
     if (!this.open) return;
     this._items = items;
+    this._row = !!opts.row;
     this._hover = -1;
     this._status = status;
     this._draw();
@@ -498,6 +509,12 @@ export class XRMenu {
     const local = this._o.set(o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t).applyMatrix4(this._inv);
     if (Math.abs(local.x) > 0.5 || Math.abs(local.y) > 0.5) return null;
     const py = (0.5 - local.y) * this._canvas.height;
+    if (this._row) {
+      const px = (local.x + 0.5) * MENU_PX, n = this._items.length;
+      const col = Math.floor((px - PAD_PX) / ((MENU_PX - 2 * PAD_PX) / n));
+      const on = py >= 0 && py < BAR_H_PX && col >= 0 && col < n && !this._items[col].disabled;
+      return { button: on ? col : -1, dist: t };
+    }
     const row = Math.floor((py - TITLE_PX) / ROW_PX);
     const button = row >= 0 && row < this._items.length && !this._items[row].disabled ? row : -1;
     return { button, dist: t };
@@ -510,7 +527,44 @@ export class XRMenu {
     if (it && !it.disabled) this._onChoose(it.id);
   }
 
+  _drawRow() {
+    const n = this._items.length;
+    const H = BAR_H_PX + (this._status ? BAR_STATUS_PX : 0);
+    const c = this._canvas;
+    if (c.height !== H) c.height = H;
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, MENU_PX, H);
+    g.fillStyle = 'rgba(8,14,22,0.88)';
+    roundRect(g, 4, 4, MENU_PX - 8, H - 8, 36); g.fill();
+    g.strokeStyle = 'rgba(0,212,255,0.65)'; g.lineWidth = 4;
+    roundRect(g, 4, 4, MENU_PX - 8, H - 8, 36); g.stroke();
+
+    const tw = (MENU_PX - 2 * PAD_PX) / n;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    this._items.forEach((it, i) => {
+      const x = PAD_PX + i * tw, hover = i === this._hover;
+      g.fillStyle = it.disabled ? 'rgba(255,255,255,0.04)'
+                  : hover ? 'rgba(0,212,255,0.35)' : 'rgba(255,255,255,0.08)';
+      roundRect(g, x + 8, 28, tw - 16, BAR_H_PX - 56, 24); g.fill();
+      g.fillStyle = '#e6edf3';
+      g.font = `${hover ? 120 : 104}px sans-serif`;
+      g.fillText(it.emoji || '', x + tw / 2, 128);
+      g.font = `${hover ? 'bold ' : ''}32px sans-serif`;
+      g.fillText(it.label, x + tw / 2, 222);
+    });
+    if (this._status) {
+      g.font = '32px sans-serif';
+      g.fillStyle = '#ffd24a';
+      g.fillText(this._status, MENU_PX / 2, BAR_H_PX + 14);
+    }
+    g.textAlign = 'start';
+    this.mesh.scale.set(BAR_W, BAR_W * H / MENU_PX, 1);
+    if (this.open) { this.mesh.updateMatrixWorld(true); this._inv.copy(this.mesh.matrixWorld).invert(); }
+    this._tex.needsUpdate = true;
+  }
+
   _draw() {
+    if (this._row) { this._drawRow(); return; }
     const n = this._items.length;
     const H = TITLE_PX + n * ROW_PX + (this._status ? 70 : 20) + PAD_PX / 2;
     const c = this._canvas;
