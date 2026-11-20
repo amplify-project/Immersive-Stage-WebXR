@@ -3661,7 +3661,6 @@ function xrMainItems() {
     { id: 'ar',   label: 'AR · passthrough', active: inAR, note: inAR ? 'now' : arOk ? '' : 'not available', disabled: !arOk },
     { id: 'adjust', label: 'Adjust scene', active: sceneAdjust,
       note: sceneAdjust ? (sceneEditable ? 'on' : 'on · not saved') : inAR ? 'move musicians' : 'calibrate' },
-    { id: 'react', label: 'Reactions  😊', disabled: !telemetry, note: telemetry ? '' : 'telemetry off' },
     { id: 'exit', label: 'Exit immersive' },
   ];
 }
@@ -3742,7 +3741,6 @@ function xrSendReaction(rid) {
 }
 
 function xrMenuChoose(id) {
-  if (id === 'react') { xrShowReactions(); return; }
   if (id === 'back')  { xrOpenMenuInPlace(); return; }
   if (id.startsWith('reaction:')) { xrSendReaction(id.slice(9)); return; }
   xrMenu.close();
