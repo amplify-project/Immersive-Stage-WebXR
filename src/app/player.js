@@ -212,6 +212,9 @@ function initThree() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
+  // r128 no aplicaba foveación; las versiones nuevas la ponen a 1 por defecto, y
+  // sobre el 360 en 4K eso emborrona los bordes. Se queda como estaba.
+  renderer.xr.setFoveation(0);
   // Espacio de color de salida (ver src/app/mesh-fit.js → Colour). Va aquí y no
   // en las mallas porque es del renderer entero: a partir de esta línea TODA
   // textura que lleve píxeles sRGB tiene que declararlo, o sale codificada dos
@@ -1456,17 +1459,22 @@ function startLiveWatch(src) {
 
 // Textura de vídeo que se sube SOLO cuando hay fotograma nuevo.
 //
-// El three que usamos es la r128, anterior a que VideoTexture conociera
-// requestVideoFrameCallback: su `update()` marca `needsUpdate` en CADA render
-// mientras el elemento tenga datos. Con un 360 de 24 fps eso significa subir a la
-// GPU la MISMA imagen de 8 Mpx 60 veces por segundo en escritorio y 90 dentro de
-// las gafas — más del doble del trabajo necesario, y todo en el hilo principal.
+// La r128 no conocía requestVideoFrameCallback: su VideoTexture marcaba
+// `needsUpdate` en CADA render, o sea, subir a la GPU la MISMA imagen de 8 Mpx 60
+// veces por segundo en escritorio y 90 dentro de las gafas. Por eso había aquí una
+// Texture normal marcada a mano desde rVFC, que dispara una vez por fotograma
+// presentado.
 //
-// Una Texture normal no se auto-marca, así que la marcamos nosotros desde rVFC,
-// que dispara exactamente una vez por fotograma presentado. Sin rVFC volvemos al
-// comportamiento de antes (lo marcan los bucles de render).
+// Desde la r186 THREE.VideoTexture hace eso mismo, y ya NO se puede sustituir por
+// una Texture con un <video> dentro: three reserva a una Texture con texStorage2D
+// —inmutable— leyendo `image.width`, que en un <video> es el atributo HTML (0) y
+// no `videoWidth`, y todas las subidas siguientes fallan ("glTexStorage2D:
+// dimensions must all be greater than zero", "level of detail outside of range"):
+// 360 negro con el audio sonando. La VideoTexture reserva con texImage2D, que es
+// mutable y sigue al vídeo cuando cambia de resolución (ABR). Lo que queda en el
+// tick de abajo es solo el reloj de medio del close-up.
 function makeVideoTexture(el) {
-  const tex = new THREE.Texture(el);
+  const tex = new THREE.VideoTexture(el);
   // El vídeo YA viene en sRGB. Sin decirlo, con outputEncoding puesto se
   // codificaría a la salida sin haberse decodificado nunca: 360 lavado y negros
   // lechosos. Diciéndolo, decodificar y codificar se cancelan y pasa intacto.
@@ -1474,11 +1482,9 @@ function makeVideoTexture(el) {
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = false;   // 8 Mpx: generar mipmaps por fotograma, ni de broma
-  tex.needsUpdate = true;
   if (HAS_RVFC) {
     const tick = (now, md) => {
       if (tex.__stop) return;    // textura ya reemplazada: no resucitarla
-      tex.needsUpdate = true;
       // The media time of the frame this texture now shows: the clock the
       // WebCodecs close-up follows (see closeupClock).
       el.__mt = md ? md.mediaTime : el.currentTime; el.__mtAt = performance.now();
@@ -1492,7 +1498,6 @@ function makeVideoTexture(el) {
 function attachVideoTexture() {
   if (videoTexture) { videoTexture.__stop = true; videoTexture.dispose(); }
   videoTexture = makeVideoTexture(videoEl);
-  videoTexture.format = THREE.RGBFormat;
   sphere.material = new THREE.MeshBasicMaterial({ map: videoTexture });
 }
 
@@ -3058,6 +3063,9 @@ function makeFocusRing() {
 // tal cual. Un GLB llega con materiales PBR, y un PBR sin luces sale NEGRO —
 // dentro de las gafas eso son bultos negros en medio del passthrough.
 //
+// (Intensidades ×π: desde la r155 las luces van en unidades físicas, y con los
+// valores de la r128 salían π veces más oscuras.)
+//
 // Hemisférica más una direccional suave: la primera da un ambiente parejo que no
 // deja ninguna cara a oscuras (en AR no hay escenario que iluminar, hay una sala
 // real cuya luz no conocemos), y la segunda marca volumen para que una figura no
@@ -3079,8 +3087,8 @@ function updateMeshAnims() {
 function ensureARLights() {
   if (arLights) return arLights;
   arLights = new THREE.Group();
-  arLights.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5));
-  const key = new THREE.DirectionalLight(0xffffff, 0.5);
+  arLights.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5 * Math.PI));
+  const key = new THREE.DirectionalLight(0xffffff, 0.5 * Math.PI);
   key.position.set(1, 3, 2);
   arLights.add(key);
   scene.environment = MeshFit.environment(renderer);
@@ -3128,7 +3136,12 @@ function attachMeshTo(marker, cfg, floorY) {
     marker.add(holder);
     // Al colgar la primera malla, y no antes: una escena sin mallas no gasta ni
     // una luz, que es como ha funcionado el player hasta ahora.
-    scene.add(ensureARLights());
+    // Un splat (.ply/.spz/…) no se ilumina —lleva el color horneado—, pero sí
+    // necesita a Spark en la escena, que es quien ordena y mezcla sus gaussianas.
+    // Va aquí y no en un solo sitio porque `MeshFit.splatRenderer` solo existe
+    // cuando ya ha llegado el primer splat.
+    if (fitted.userData.fit.splat) scene.add(MeshFit.splatRenderer(renderer));
+    else scene.add(ensureARLights());
     marker.userData.focusRing = holder.children[1];
     // La esfera de alambre era el sitio del músico mientras no había músico.
     marker.children[0].visible = false;
@@ -3268,11 +3281,14 @@ function lockARFocus(i) {
 //       another one while zoomed → the zoom swings across; on nothing → out.
 //   AR: on a musician → pin them, and their close-up video (if they have one)
 //       appears beside them; on the pinned one or on nothing → unpin, and it
-//       goes. On the close-up → it grows / shrinks back. A LEFT-hand pinch
-//       always closes (unpins), wherever it points: no aiming at empty space.
+//       goes. On the close-up → it grows / shrinks back.
+//   Either mode: a LEFT-hand pinch tap opens the reaction bar (see below).
 function xrSelect(target, src) {
+  // The LEFT hand is the reactions hand, in VR and AR: a pinch tap opens (or
+  // closes) the four-reaction bar. Pinning/unpinning and zoom are the right
+  // hand's (in AR, pinch the pinned one or nothing to unpin).
+  if (src && src.handedness === 'left' && (xrSession || arSession)) { xrToggleReactionBar(); return; }
   if (arSession) {
-    if (src && src.handedness === 'left') { if (arLocked >= 0) lockARFocus(-1); return; }
     // A tap on the close-up grows it (a second one back): it must not reach
     // the lock below, where CLOSEUP_TARGET would read as musician 999.
     if (target === CLOSEUP_TARGET) return closeupZoomTap();
@@ -3631,6 +3647,7 @@ function xrStemDirFrom(i, o) {
 // ── XR menu (long pinch on nothing) ─────────────────────────────────────────
 function xrOpenMenu() {
   if (!xrLastPose) return;
+  clearTimeout(reactionBarTimer);
   xrMenu.show(xrMainItems(), xrLastPose);
 }
 
@@ -3658,14 +3675,19 @@ function xrMainItems() {
 // than one. Pinch off the panel to close it. scene.json `telemetry.reactions`
 // ([{id, emoji, label}]) replaces the default set; `id` is what goes on the
 // wire and what analysis groups by, the emoji is for people.
+// The first REACTION_BAR_N are the left-hand bar's; the list page shows all.
 const DEFAULT_REACTIONS = [
   { id: 'clap',  emoji: '👏', label: 'Applause' },
   { id: 'love',  emoji: '❤️', label: 'Love it' },
+  { id: 'fire',  emoji: '🔥', label: 'On fire' },
   { id: 'wow',   emoji: '😮', label: 'Wow' },
   { id: 'laugh', emoji: '😂', label: 'Funny' },
-  { id: 'fire',  emoji: '🔥', label: 'On fire' },
   { id: 'sad',   emoji: '😢', label: 'Moving' },
 ];
+const REACTION_BAR_N = 4;
+const REACTION_BAR_IDLE_MS = 8000;   // the bar closes by itself if nobody picks
+const REACTION_BAR_SENT_MS = 1500;   // ...and this long after sending one
+let reactionBarTimer = 0;
 
 function xrReactions() {
   const r = telemetryCfg?.reactions;
@@ -3681,13 +3703,41 @@ function xrShowReactions(status = '') {
   ], status);
 }
 
+// Left-hand bar: pinch (left) to open it in front of you, aim at one and pinch
+// to send it. It stays up a moment saying "Sent …" and closes itself, so the
+// next reaction is two pinches away, never a menu to navigate.
+function reactionBarItems() {
+  return xrReactions().slice(0, REACTION_BAR_N).map(x => ({ id: 'reaction:' + x.id, emoji: x.emoji, label: x.label }));
+}
+function reactionBarClose() {
+  clearTimeout(reactionBarTimer);
+  if (xrMenu?.row) xrMenu.close();
+}
+function reactionBarTimeout(ms) {
+  clearTimeout(reactionBarTimer);
+  reactionBarTimer = setTimeout(reactionBarClose, ms);
+}
+function xrToggleReactionBar() {
+  if (!xrMenu) return;
+  if (xrMenu.open) { clearTimeout(reactionBarTimer); xrMenu.close(); return; }   // also closes the main menu
+  if (!xrLastPose) return;
+  xrMenu.show(reactionBarItems(), xrLastPose, telemetry ? '' : 'Telemetry is off: not sent', { row: true });
+  reactionBarTimeout(REACTION_BAR_IDLE_MS);
+}
+
 function xrSendReaction(rid) {
   const r = xrReactions().find(x => x.id === rid);
   if (!r) return;
-  if (!telemetry) { xrShowReactions('Not sent: telemetry is off'); return; }
+  const bar = xrMenu.row;
+  if (!telemetry) { if (bar) xrMenu.setItems(reactionBarItems(), 'Not sent: telemetry is off', { row: true }); else xrShowReactions('Not sent: telemetry is off'); return; }
   const hold = telemetryCfg?.reactionHoldMs;
   telemetry.setReaction(r.id, Number.isFinite(+hold) && hold !== '' && hold != null ? +hold : 3000);
   voice?.mark('reaction:' + r.id);   // en la grabación de voz también, si la hay
+  if (bar) {
+    xrMenu.setItems(reactionBarItems(), `Sent ${r.emoji || r.label}`, { row: true });
+    reactionBarTimeout(REACTION_BAR_SENT_MS);
+    return;
+  }
   xrShowReactions(`Sent ${r.emoji || r.label}`);
 }
 
@@ -4458,6 +4508,7 @@ function clearARSources() {
   // de más es trabajo del shader por cada fotograma que nadie ve. El entorno se
   // suelta igual (la textura sigue cacheada: volver a AR no la reconstruye).
   if (arLights) { scene.remove(arLights); scene.environment = null; }
+  { const sr = MeshFit.splatRenderer(renderer); if (sr) scene.remove(sr); }   // sin splats, Spark no pinta nada
   // El foco indexa este array: dejarlo vivo señalaría a un músico que ya no está.
   resetARFocus();
   // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,

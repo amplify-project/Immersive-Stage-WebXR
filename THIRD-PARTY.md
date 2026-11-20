@@ -13,21 +13,24 @@ Every licence below is compatible with releasing this code under GPLv3.
 | Component | Version | Where | Licence |
 |---|---|---|---|
 | [Shaka Player](https://github.com/shaka-project/shaka-player) | 4.3.6 | `index.html` — DASH playback | Apache-2.0 |
-| [three.js](https://github.com/mrdoob/three.js) | r128 | `index.html`, `editor.html` — rendering and WebXR | MIT |
+| [three.js](https://github.com/mrdoob/three.js) | r186 (vendored, `src/vendor/three/`) | `index.html`, `editor.html` — rendering and WebXR | MIT |
+| [Spark](https://github.com/sparkjsdev/spark), World Labs | 2.2.0 (vendored, `src/vendor/spark/`) | Gaussian splats in AR, loaded only when a scene uses one | MIT |
 | [numeric.js](https://github.com/sloisel/numeric) | 1.2.6 | `index.html` — matrix maths for the ambisonic rotator | MIT |
 | [spherical-harmonic-transform](https://github.com/polarch/Spherical-Harmonic-Transform-JS), Archontis Politis | 0.1.1 | `index.html` — spherical-harmonic rotation matrices (`sht.getSHrotMtx` in `HOASTRotator.js`) | BSD-3-Clause |
 | [mp4box.js](https://github.com/gpac/mp4box.js), GPAC | 0.5.2 | close-ups decoded with WebCodecs (`src/app/closeup-wc.js`) | BSD-3-Clause |
 
-Pinning is deliberate: three.js r128 is the last revision this player's WebXR
-and sphere code was verified against on a Quest, and moving it is a change to
-test on a headset, not a version bump.
+Pinning is deliberate: three.js is vendored, not taken from a CDN, and moving it
+is a change to test on a headset, not a version bump. It went from r128 to r186
+so that Spark (which needs three >= 0.180) could be added; the colour and light
+changes that implies are noted in the commit.
 
 ## Vendored (`src/vendor/`)
 
 | File | Origin | Licence |
 |---|---|---|
 | `omnitone.min.js` | [Omnitone](https://github.com/GoogleChrome/omnitone), Google Inc. — binaural FOA decoding, HRIRs embedded as base64 | Apache-2.0 (header kept in the file) |
-| `GLTFLoader.js`, `SkeletonUtils.js` | three.js examples — `.glb` loading and skinned-mesh cloning for the AR musician models | MIT (same as three.js) |
+| `three/` (`build/`, `GLTFLoader.js`, `SkeletonUtils.js`, `BufferGeometryUtils.js`, `Pass.js`) | three.js r186 — the library and the examples for `.glb` loading, skinned-mesh cloning and Spark | MIT |
+| `spark/spark.module.js` | Spark 2.2.0 (minified build) — Gaussian splat renderer | MIT |
 | `motion/` (12 files: `TimingObject.js`, `TimingMediaController.js`, `SocketTimingProvider.js`, `SocketSyncClock.js`, …) | **Orkestralib**, © 2022 Iñigo Tamayo Uria, Ana Domínguez Fanlo, Mikel Joseba Zorrilla Berasategui (Vicomtech) — Timing Object for shared playback (`?sync=`) | LGPL-3.0-or-later (header kept in each file) |
 
 Orkestralib is Vicomtech background, brought into this project; it keeps its

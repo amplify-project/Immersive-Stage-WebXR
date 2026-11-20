@@ -393,3 +393,36 @@ impression rather than a figure; see Pending.
 
 - **Optional raw `scale`** as described above, if an asset ever has to be shown at
   its authored size.
+
+## 8. Gaussian splats instead of a model
+
+The `mesh` slot (`stems[i].mesh`, `ar.mesh`) also takes a **Gaussian splat** — a capture
+of a real person or object — with the same fields, the same editor card and the same
+fit. The extension decides: `.ply`, `.spz`, `.splat`, `.ksplat`, `.sog` are drawn with
+[Spark](https://github.com/sparkjsdev/spark); `.glb` goes through the model path. Spark
+is imported on first use, so a scene without splats never downloads it.
+
+```json
+"stems": [ { "name": "DR", "mesh": { "url": "meshes/drummer.ply", "heightM": 1.7, "zUp": true } } ]
+```
+
+What differs from a model:
+
+- **Orientation.** Captures are rarely Y-up: Nerfstudio exports Z-up (`zUp`), COLMAP-style
+  captures come out upside down (`upsideDown`, new). Both are tick boxes in the preview.
+- **Measuring.** A splat has no box, so the fit measures the 1 %–99 % band of the visible
+  gaussians (opacity > 0.1, sampled to ~200 k). Stray gaussians ("floaters") far from the
+  subject are ignored, so `heightM` means the subject's height, not the capture volume's.
+- **No light, no animation.** The colour is baked in; `clip`, `animOffset` and the PBR
+  lighting do not apply. Musicians sharing a file share one decoded copy.
+- **Upload.** Same endpoint, 400 MB limit instead of 64, and the header is checked per
+  format (`ply`, gzip for `.spz`, zip for `.sog`; `.splat` and `.ksplat` carry none).
+- **Preview.** Spark sorts in a worker, so the editor keeps redrawing for a moment after
+  each change; a splat can take a second to appear.
+
+**Verified (2026-11-20, headless Chrome, software GL):** load, clone over shared data,
+fit (Nerfstudio `.ply`, Z-up → 1.70 m), drawing, the editor preview and upload.
+**Not verified:** AR in the headset — frame cost with a real capture (a person is tens of
+MB and hundreds of thousands of gaussians), Spark inside the player's own AR render loop,
+and what happens to the GPU data when leaving AR (the clones are dropped, not disposed).
+

@@ -348,7 +348,7 @@
          gira. Nada de esto toca el audio: la malla cuelga del punto que suena hacia
          el suelo, y el panner sigue en su sitio. -->
     <details class="fold" id="meshFold" open>
-      <summary>3D model (AR)<span class="who small" id="meshWho"></span></summary>
+      <summary>3D model or splat (AR)<span class="who small" id="meshWho"></span></summary>
       <div class="row">
         <div><label>Model</label>
           <select id="selMesh"><option value="">— none (wireframe marker) —</option></select></div>
@@ -359,8 +359,8 @@
         <div style="flex:0 0 120px"><label>Off floor m</label>
           <input type="number" id="selMeshOff" step="0.05" placeholder="0"></div>
         <div style="flex:0 0 150px"><label>&nbsp;</label>
-          <button type="button" id="meshUpBtn" style="width:100%">Upload .glb…</button>
-          <input type="file" id="meshUpFile" accept=".glb,model/gltf-binary" style="display:none"></div>
+          <button type="button" id="meshUpBtn" style="width:100%">Upload .glb / splat…</button>
+          <input type="file" id="meshUpFile" accept=".glb,.ply,.spz,.splat,.ksplat,.sog,model/gltf-binary" style="display:none"></div>
       </div>
       <p class="hint"><b>Mesh height</b> is how tall the figure is, feet to head — not where it is
         heard. That is <b>Height m</b> above (or <b>Elevation</b> on the sphere): the model hangs from
@@ -381,6 +381,9 @@
         <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer">
           <input type="checkbox" id="selMeshZUp" style="width:auto;margin:0"> Z-up model (arrives lying on its back)
         </label>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="selMeshUpsideDown" style="width:auto;margin:0"> Upside down (Y-down splat captures)
+        </label>
         <p class="hint">Exporters that work Z-up (Blender, CAD) hand the figure over rotated −90° about X.
           Bad orientation is nearly always axis-shaped, which is why this is a tick box and not an angle.</p>
         <p class="hint">Drag sideways to turn the model (writes <b>Yaw</b>); drag up and down to look
@@ -389,8 +392,12 @@
           which way the model actually faces.</p>
       </details>
       <p class="hint">Uploads land in <code>meshes/</code> on this machine and are offered to every
-        musician. <code>.glb</code> only — a <code>.gltf</code> drags its textures and buffers along as
-        separate files, which one upload cannot carry.</p>
+        musician. A <code>.glb</code> is a 3D model; a Gaussian splat (<code>.ply</code>, <code>.spz</code>,
+        <code>.splat</code>, <code>.ksplat</code>, <code>.sog</code>) is a capture of a real person or
+        object, drawn with Spark. A <code>.gltf</code> is not accepted: it drags its textures and
+        buffers along as separate files, which one upload cannot carry. Splats are measured on their
+        visible gaussians (stray ones are ignored), so <b>Mesh height</b> works as for a model; most
+        captures come out lying down (<b>Z-up</b>) or upside down (<b>Upside down</b>).</p>
     </details>
   </div>
 </div>
@@ -563,16 +570,17 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- Sólo para la vista previa de las mallas. Misma r128 que index.html, y el
-     mismo GLTFLoader vendorizado: la vista previa no vale nada si no carga y
-     coloca el GLB exactamente igual que el player. Si no hay red y three no
-     llega, el editor sigue funcionando entero y sólo desaparece la vista. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="./src/vendor/GLTFLoader.js"></script>
-<!-- SkeletonUtils (three r128 examples, vendorizado igual que el loader): un
-     clon plano de una malla con esqueleto queda atado al esqueleto del
-     original y no se mueve. Ver MeshFit.clone(). -->
-<script src="./src/vendor/SkeletonUtils.js"></script>
+<!-- Sólo para la vista previa de las mallas. Misma three r186 vendorizada que
+     index.html: la vista previa no vale nada si no coloca el GLB exactamente igual
+     que el player. -->
+<script type="importmap">
+{ "imports": { "three": "./src/vendor/three/build/three.module.js",
+               "three/addons/": "./src/vendor/three/examples/jsm/",
+               "@sparkjsdev/spark": "./src/vendor/spark/spark.module.js" } }
+</script>
+<!-- three r186, vendorizado (offline) como módulos; three-boot.js lo vuelve a
+     publicar como el global THREE que esperan mesh-fit.js y el editor. -->
+<script type="module" src="./src/app/three-boot.js"></script>
 <script src="./src/app/mesh-fit.js"></script>
 
 <script>
@@ -955,6 +963,7 @@ function bindControls() {
   $('selMeshOff').oninput  = e => { if(selected>=0){ setStemMesh(selected, { offsetYM: e.target.value }); updateMeshPreview(); } };
   // Z-up: gira −90° en X ANTES de medir, así que cambia la escala además de la
   // pose — un modelo tumbado se estaba escalando por su fondo, no por su altura.
+  $('selMeshUpsideDown').onchange = e => { if(selected>=0){ setStemMesh(selected, { upsideDown: e.target.checked }); updateMeshPreview(); } };
   $('selMeshZUp').onchange = e => { if(selected>=0){ setStemMesh(selected, { zUp: e.target.checked }); updateMeshPreview(); } };
   $('meshUpBtn').onclick   = () => $('meshUpFile').click();
   // Un canvas WebGL dentro de un <details> cerrado no tiene composición, y al
@@ -1077,6 +1086,7 @@ function setStemMesh(i, patch) {
   if (spec.yawDeg === 0) delete spec.yawDeg;
   if (spec.offsetYM === 0) delete spec.offsetYM;
   if (!spec.zUp) delete spec.zUp;
+  if (!spec.upsideDown) delete spec.upsideDown;
   if (!spec.url) { delete s.mesh; return; }     // "none" → fuera la malla entera
   // "Plain" es que NO haya nada más que la url, y se mira así —contando las
   // claves— en vez de enumerando las que conocemos: con una lista, el día que
@@ -1090,7 +1100,7 @@ function setStemMesh(i, patch) {
 
 function meshOptionsHTML(sel) {
   return '<option value="">— none (wireframe marker) —</option>' +
-    meshes.map(m=>`<option value="${m.file}" ${m.file===sel?'selected':''}>${m.name} · ${(m.size/1e6).toFixed(1)} MB</option>`).join('');
+    meshes.map(m=>`<option value="${m.file}" ${m.file===sel?'selected':''}>${m.name}${MeshFit.isSplat(m.name)?' (splat)':''} · ${(m.size/1e6).toFixed(1)} MB</option>`).join('');
 }
 
 async function uploadMesh(file) {
@@ -1134,6 +1144,7 @@ const meshView = {
   target: 0.85,        // altura a la que mira la cámara
   key: '',             // url|altura|zUp de lo que hay montado: el yaw no recarga nada
   fit: null,           // lo que midió el ajuste, para reencuadrar sin volver a cargar
+  splat: false, pump: false,   // el modelo montado es un splat / hay un bucle de repintado en marcha
   token: 0,            // descarta la carga de un músico del que ya te has ido
   pitch: 0.22, dist: 3.0,
 };
@@ -1178,10 +1189,8 @@ function mvInit() {
   r.setSize(cv.width, cv.height, false);   // false: el CSS ya lo estira a la columna
   MeshFit.setupRenderer(r);                // mismo espacio de color que el player
   const sc = new THREE.Scene();
-  // El fondo NO se convierte, al revés que todo lo demás: three lo pinta como
-  // clear color, que se escribe en el framebuffer sin pasar por el shader ni,
-  // por tanto, por outputEncoding. Convertido salía casi negro (medido: 1,1,2
-  // en vez de 10,14,20).
+  // El fondo es un hex en sRGB como el resto: three (r152+) lo convierte él y lo
+  // escribe como clear color ya en el espacio de salida (10,14,20 en pantalla).
   sc.background = new THREE.Color(0x0a0e14);
   // Las mismas luces y el mismo entorno que el player monta en AR, y con los
   // mismos valores: un GLB es PBR, así que la luz decide cómo se ve. Con otra
@@ -1189,8 +1198,8 @@ function mvInit() {
   // una escena que no existe. El entorno además es lo ÚNICO que ilumina un
   // metal, así que sin él la vista previa enseñaría negro un modelo que en las
   // gafas se ve — que es exactamente la mentira que este fichero evita.
-  sc.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5));
-  const key = new THREE.DirectionalLight(0xffffff, 0.5);
+  sc.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5 * Math.PI));
+  const key = new THREE.DirectionalLight(0xffffff, 0.5 * Math.PI);
   key.position.set(1, 3, 2); sc.add(key);
   sc.environment = MeshFit.environment(r);
   const grid = new THREE.GridHelper(8, 16, MeshFit.colour(0x33506a), MeshFit.colour(0x18222c));
@@ -1241,7 +1250,20 @@ function mvFrame(info, offsetY) {
 }
 
 function mvRender() {
-  if (meshView.ready) meshView.renderer.render(meshView.scene, meshView.camera);
+  if (!meshView.ready) return;
+  meshView.renderer.render(meshView.scene, meshView.camera);
+  // The preview is drawn on demand, which is enough for a model and not for a
+  // splat: Spark sorts its gaussians in a worker and the result lands a few
+  // frames after the camera moved. So after each change, keep drawing briefly.
+  if (meshView.splat && !meshView.pump) {
+    let n = 0;
+    meshView.pump = true;
+    const tick = () => {
+      meshView.renderer.render(meshView.scene, meshView.camera);
+      if (++n < 24 && meshView.splat) requestAnimationFrame(tick); else meshView.pump = false;
+    };
+    requestAnimationFrame(tick);
+  }
 }
 
 function mvBindDrag(cv) {
@@ -1313,6 +1335,8 @@ function mvMeasure(info) {
   // escena: aquí es donde ya se está mirando el fichero. La vista previa no lo
   // reproduce (se dibuja por eventos, no en bucle), pero el modelo se coloca en
   // su primer fotograma, que es contra lo que se midió la altura.
+  if (info.splat) t += '\n· Gaussian splat — measured on its visible gaussians, stray ones ignored. ' +
+                       'Lying down? tick Z-up. Upside down? tick Upside down.';
   if (info.clip) t += `\n· animated · clip "${info.clip}" · ${info.clipSecs.toFixed(1)} s`;
   let html = mvEsc(t);
   for (const w of info.warnings) html += `\n<span class="warn">⚠ ${mvEsc(w)}</span>`;
@@ -1321,7 +1345,7 @@ function mvMeasure(info) {
 
 function mvClearModel() {
   if (meshView.wrap) { meshView.scene.remove(meshView.wrap); meshView.wrap = null; }
-  meshView.fit = null;
+  meshView.fit = null; meshView.splat = false;
   // Sin dispose(): el clon comparte geometrías y materiales con el original que
   // guarda la caché de MeshFit, y liberarlos aquí vaciaría el siguiente montaje.
   meshView.key = '';
@@ -1343,7 +1367,7 @@ function updateMeshPreview() {
     return;
   }
   const spec = MeshFit.spec(s.mesh);
-  const key = spec.url + '|' + spec.heightM + '|' + spec.zUp;
+  const key = spec.url + '|' + spec.heightM + '|' + spec.zUp + '|' + spec.upsideDown;
   if (key === meshView.key) { mvPlace(spec); return; }   // sólo el giro o la altura
   const token = ++meshView.token;
   MeshFit.load(spec.url).then(src => {
@@ -1353,6 +1377,10 @@ function updateMeshPreview() {
     meshView.wrap = wrap; meshView.key = key;
     meshView.fit = wrap.userData.fit;
     meshView.scene.add(wrap);
+    // A splat needs Spark in the scene, and Spark sorts after the frame, so the
+    // first render shows nothing: mvRender() keeps rendering for a moment.
+    meshView.splat = !!wrap.userData.fit.splat;
+    if (meshView.splat) meshView.scene.add(MeshFit.splatRenderer(meshView.renderer));
     mvMeasure(wrap.userData.fit);
     mvPlace(spec);
   }).catch(e => {
@@ -1414,7 +1442,7 @@ function syncSelPanel() {
 // deselecciona, y lo que se mueve bajo el cursor no se puede arrastrar.
 function syncMeshFields() {
   const s = selected >= 0 ? scene.stems[selected] : null;
-  for (const id of ['selMesh','selMeshH','selMeshYaw','selMeshOff','selMeshZUp','meshUpBtn'])
+  for (const id of ['selMesh','selMeshH','selMeshYaw','selMeshOff','selMeshZUp','selMeshUpsideDown','meshUpBtn'])
     $(id).disabled = !s;
   // El nombre en la cabecera del plegable: el bloque ya no está pegado a la lista
   // de músicos, y "3D model" a secas no dice de quién es el modelo que se ve.
@@ -1429,6 +1457,7 @@ function syncMeshFields() {
   $('selMeshYaw').value = g.yawDeg  != null ? g.yawDeg  : '';
   $('selMeshOff').value = g.offsetYM != null ? g.offsetYM : '';
   $('selMeshZUp').checked = !!g.zUp;
+  $('selMeshUpsideDown').checked = !!g.upsideDown;
   updateMeshPreview();
 }
 

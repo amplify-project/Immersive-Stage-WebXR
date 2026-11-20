@@ -369,9 +369,9 @@ plus zoom of VR does not exist: there is no zoom, and the focus is the AR focus
 - Pinch a musician → they are pinned (spotlight, as before) **and** their
   close-up video fades in. Pinch another one → the panel fades out and comes
   back with theirs. Pinch nothing, or the pinned one again → both go.
-- A pinch with the **left hand** always closes: it unpins whatever it points
-  at, so there is no need to aim at empty space. The right hand does all of the
-  above.
+- The **left hand** is the reactions hand (see `docs/telemetry.md`, *Reactions*):
+  a left pinch opens the reaction bar and never pins or unpins. To close the
+  close-up, pinch the pinned musician again, or nothing, with the right hand.
 - Pinch the panel itself → it grows ×1.6; again → back. (`CLOSEUP_TARGET` is
   999, so `xrSelect` handles it before the lock: otherwise it would pin
   "musician 999".)
@@ -443,7 +443,7 @@ crops already put our laptop at its limit; a full band would not fit on it.
 start the live. `closeups.json` must appear next to the manifest with `"crop"`
 entries. On the headset, open the player with `?cusync=1`, enter AR and pinch a
 musician with the right hand: the panel comes beside them with the tag under
-it. A left-hand pinch closes it. On desktop and in VR a crop is laid over the
+it. A right-hand pinch on nothing closes it. On desktop and in VR a crop is laid over the
 same pixels of the sphere, so it barely shows. To see that it is active there,
 watch for `chunk_*_<rep>_*.m4s` requests in DevTools while zoomed in on the
 musician.
