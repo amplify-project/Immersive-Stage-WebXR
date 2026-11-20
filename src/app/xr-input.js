@@ -531,7 +531,7 @@ export class XRMenu {
     const n = this._items.length;
     const H = BAR_H_PX + (this._status ? BAR_STATUS_PX : 0);
     const c = this._canvas;
-    if (c.height !== H) c.height = H;
+    if (c.height !== H) { c.height = H; this._tex.dispose(); }   // the GPU copy keeps the old size otherwise: squashed, with the last panel showing
     const g = c.getContext('2d');
     g.clearRect(0, 0, MENU_PX, H);
     g.fillStyle = 'rgba(8,14,22,0.88)';
@@ -568,7 +568,7 @@ export class XRMenu {
     const n = this._items.length;
     const H = TITLE_PX + n * ROW_PX + (this._status ? 70 : 20) + PAD_PX / 2;
     const c = this._canvas;
-    if (c.height !== H) c.height = H;
+    if (c.height !== H) { c.height = H; this._tex.dispose(); }   // the GPU copy keeps the old size otherwise: squashed, with the last panel showing
     const g = c.getContext('2d');
     g.clearRect(0, 0, MENU_PX, H);
 
