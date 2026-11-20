@@ -254,8 +254,9 @@ and closes by itself after 1.5 s, or after 8 s if nobody picks. A left pinch
 while it is open closes it. The left hand therefore no longer pins, unpins or
 zooms: that is the right hand's.
 
-The XR menu (long pinch on nothing) also has a **Reactions** page with the whole
-set: 👏 Applause, ❤️ Love it, 🔥 On fire, 😮 Wow, 😂 Funny, 😢 Moving. Choosing one puts its id
+The XR menu (long pinch on nothing) has no Reactions entry: reactions are only
+sent from the left-hand bar, which shows the first four of the set (`telemetry.reactions`
+can list more, e.g. 😂 Funny, 😢 Moving, but the bar does not reach them). Choosing one puts its id
 in the `r` field of the pose samples, the way `z` carries the zoom: no message
 of its own, so every consumer of poses (the Unity render, the recorder, the
 gateway's archive and its `format=legacy`) gets it with no change, on the same
@@ -264,9 +265,8 @@ sample as where that head was and what it was hearing.
 `r` stays on the samples for `reactionHoldMs` (3 s by default) and then goes
 back to `null`; choosing again restarts the hold, so a render can show the emoji
 over that spectator while it is set. The sample that carries a new reaction is
-taken at once, not at the next rate tick. The list page stays open after a choice,
-showing "Sent 👏", so several can be sent in a row; pinch off the panel to close
-it. The item is disabled when the page has no telemetry. With a voice recording
+taken at once, not at the next rate tick. The bar shows "Sent 👏" after a choice and then closes by itself.
+With no telemetry it says "Not sent". With a voice recording
 running, the reaction is also marked in it (`reaction:<id>`).
 
 `r` is the id, not the emoji: analysis groups by it, and a render maps it to
