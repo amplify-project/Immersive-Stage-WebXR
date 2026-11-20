@@ -13,8 +13,9 @@ import fs from 'fs';
 const EDITOR = process.argv[2] || new URL('../editor.html', import.meta.url);
 const html = fs.readFileSync(EDITOR, 'utf8');
 // The editor's own code is the INLINE script. Taking the first <script> of any
-// kind broke the day the mesh viewer put three.js and GLTFLoader above it.
-const js = html.match(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/)[1];
+// kind broke the day the mesh viewer put three.js and GLTFLoader above it, and
+// the importmap that now loads them is an inline script too: skipped.
+const js = html.match(/<script(?![^>]*\b(?:src=|type="importmap"))[^>]*>([\s\S]*?)<\/script>/)[1];
 
 const grab = name => {
   const plain = js.indexOf(`function ${name}(`), asyn = js.indexOf(`async function ${name}(`);

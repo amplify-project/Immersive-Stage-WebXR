@@ -212,6 +212,9 @@ function initThree() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
+  // r128 no aplicaba foveación; las versiones nuevas la ponen a 1 por defecto, y
+  // sobre el 360 en 4K eso emborrona los bordes. Se queda como estaba.
+  renderer.xr.setFoveation(0);
   // Espacio de color de salida (ver src/app/mesh-fit.js → Colour). Va aquí y no
   // en las mallas porque es del renderer entero: a partir de esta línea TODA
   // textura que lleve píxeles sRGB tiene que declararlo, o sale codificada dos
@@ -1492,7 +1495,6 @@ function makeVideoTexture(el) {
 function attachVideoTexture() {
   if (videoTexture) { videoTexture.__stop = true; videoTexture.dispose(); }
   videoTexture = makeVideoTexture(videoEl);
-  videoTexture.format = THREE.RGBFormat;
   sphere.material = new THREE.MeshBasicMaterial({ map: videoTexture });
 }
 
@@ -3058,6 +3060,9 @@ function makeFocusRing() {
 // tal cual. Un GLB llega con materiales PBR, y un PBR sin luces sale NEGRO —
 // dentro de las gafas eso son bultos negros en medio del passthrough.
 //
+// (Intensidades ×π: desde la r155 las luces van en unidades físicas, y con los
+// valores de la r128 salían π veces más oscuras.)
+//
 // Hemisférica más una direccional suave: la primera da un ambiente parejo que no
 // deja ninguna cara a oscuras (en AR no hay escenario que iluminar, hay una sala
 // real cuya luz no conocemos), y la segunda marca volumen para que una figura no
@@ -3079,8 +3084,8 @@ function updateMeshAnims() {
 function ensureARLights() {
   if (arLights) return arLights;
   arLights = new THREE.Group();
-  arLights.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5));
-  const key = new THREE.DirectionalLight(0xffffff, 0.5);
+  arLights.add(new THREE.HemisphereLight(0xffffff, 0x707070, 0.5 * Math.PI));
+  const key = new THREE.DirectionalLight(0xffffff, 0.5 * Math.PI);
   key.position.set(1, 3, 2);
   arLights.add(key);
   scene.environment = MeshFit.environment(renderer);

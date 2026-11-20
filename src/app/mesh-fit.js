@@ -3,7 +3,7 @@
  *  Shared by the player and the editor.
  *
  *  A classic script (window.MeshFit), not an ES module, on purpose. The player
- *  is ESM but already takes THREE and GLTFLoader as globals from index.html,
+ *  is ESM but already takes THREE and GLTFLoader as a global (three-boot.js),
  *  and the editor is one inline <script> in a single page. A module here would
  *  buy a build step, or a second copy of the fit — and a second copy is exactly
  *  what this file exists to prevent: the editor's 3D preview is only worth
@@ -17,8 +17,9 @@
   var AR_MESH_MAX_SPAN = 3;     // widest footprint allowed, in multiples of that height
 
   // ── Loading ───────────────────────────────────────────────────────────────
-  // GLTFLoader is a vendored r128, the same version as the CDN three.min.js:
-  // mixing versions breaks in the worst place, inside the headset.
+  // GLTFLoader is the one from the vendored three r186 (src/vendor/three), the
+  // same copy the page imports: mixing versions breaks in the worst place,
+  // inside the headset. three-boot.js hangs it on window.THREE.
   var _loader = null;
   var _cache  = new Map();      // url -> Promise<Object3D> (the original, uncloned)
 
@@ -26,7 +27,7 @@
     if (_cache.has(url)) return _cache.get(url);
     var p = new Promise(function (resolve, reject) {
       if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader !== 'function')
-        return reject(new Error('GLTFLoader not loaded (check the <script> tags)'));
+        return reject(new Error('GLTFLoader not loaded (three-boot.js not loaded)'));
       _loader = _loader || new THREE.GLTFLoader();
       _loader.load(url, function (g) {
         // The clips arrive parsed in the same file and used to be dropped on
@@ -223,36 +224,32 @@
 
 
   // ── Colour ────────────────────────────────────────────────────────────────
-  // three lights the scene in linear light and then has to write a frame for a
-  // display that speaks sRGB. `outputEncoding` is that last step, and r128
-  // defaults to LinearEncoding: the linear number goes out raw and the panel
-  // reads it as sRGB, so mid grey (0.5 linear, which should be written as 0.73)
-  // arrives as 0.21. Everything looks dark and flat, and a GLB looks nothing
-  // like it did in Blender — GLTFLoader marks colour textures as sRGB, so the
-  // model is decoded on the way in and never encoded on the way out.
+  // three lights the scene in linear light and writes the frame for a display
+  // that speaks sRGB. Since r152 that is automatic: ColorManagement is on, the
+  // renderer outputs sRGB, a colour written as a hex literal is converted to the
+  // linear working space by `new THREE.Color(hex)` itself, and GLTFLoader tags
+  // its colour textures.
   //
-  // The catch is that this is a RENDERER-wide switch. A texture that already
-  // holds sRGB pixels and does not say so gets encoded without ever having been
-  // decoded: the 360 video would turn milky, blacks and all. srgb() is how a
-  // texture says so, and decode + encode then cancel out.
+  // What is left to us is the one input three cannot guess: a texture that
+  // already holds sRGB pixels and is not a glTF one — the 360 video, the
+  // canvas-drawn labels, the environment painting. srgb() is how a texture says
+  // so; decode (on sampling) and encode (on output) then cancel out and the
+  // pixels pass through intact.
   //
-  // Same for a colour written as a hex literal, which is a colour picked in
-  // sRGB: colour() puts it in the linear space the shader works in. (r152 and
-  // later do all of this by themselves — hence every tutorial that does not
-  // mention it.)
+  // setupRenderer() and colour() are kept, as no-ops in all but name, so the
+  // call sites do not care which three they run on.
   function setupRenderer(r) {
-    if (r && THREE.sRGBEncoding !== undefined) r.outputEncoding = THREE.sRGBEncoding;
+    if (r && THREE.SRGBColorSpace) r.outputColorSpace = THREE.SRGBColorSpace;
     return r;
   }
 
   function srgb(tex) {
-    if (tex && THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    if (tex && THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
   }
 
   function colour(hex) {
-    var c = new THREE.Color(hex);
-    return c.convertSRGBToLinear ? c.convertSRGBToLinear() : c;
+    return new THREE.Color(hex);
   }
 
   // ── Environment ───────────────────────────────────────────────────────────

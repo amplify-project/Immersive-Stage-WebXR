@@ -103,18 +103,17 @@
 <div id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.6/shaka-player.compiled.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script type="importmap">
+{ "imports": { "three": "./src/vendor/three/build/three.module.js",
+               "three/addons/": "./src/vendor/three/examples/jsm/" } }
+</script>
+<!-- three r186, vendorizado (offline) como módulos; three-boot.js lo vuelve a
+     publicar como el global THREE que esperan mesh-fit.js y el editor. -->
+<script type="module" src="./src/app/three-boot.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/numeric@1.2.6/numeric-1.2.6.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/spherical-harmonic-transform@0.1.1/bundle/spherical-harmonic-transform.js"></script>
 <!-- Omnitone (binaural FOA con HRTF embebidos) — vendorizado, funciona offline -->
 <script src="./src/vendor/omnitone.min.js"></script>
-<!-- Mallas de los músicos en AR (scene.json → stems[i].mesh). Vendorizado y no del
-     CDN a propósito: tiene que ser exactamente la r128 del three de arriba. -->
-<script src="./src/vendor/GLTFLoader.js"></script>
-<!-- SkeletonUtils (three r128 examples, vendorizado igual que el loader): un
-     clon plano de una malla con esqueleto queda atado al esqueleto del
-     original y no se mueve. Ver MeshFit.clone(). -->
-<script src="./src/vendor/SkeletonUtils.js"></script>
 <!-- Carga y ajuste de las mallas, compartido con el editor: la vista previa de
      allí tiene que colocar el modelo igual que aquí, o no sirve de nada. -->
 <script src="./src/app/mesh-fit.js"></script>
