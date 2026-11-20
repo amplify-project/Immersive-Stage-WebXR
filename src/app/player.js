@@ -3281,11 +3281,14 @@ function lockARFocus(i) {
 //       another one while zoomed → the zoom swings across; on nothing → out.
 //   AR: on a musician → pin them, and their close-up video (if they have one)
 //       appears beside them; on the pinned one or on nothing → unpin, and it
-//       goes. On the close-up → it grows / shrinks back. A LEFT-hand pinch
-//       always closes (unpins), wherever it points: no aiming at empty space.
+//       goes. On the close-up → it grows / shrinks back.
+//   Either mode: a LEFT-hand pinch tap opens the reaction bar (see below).
 function xrSelect(target, src) {
+  // The LEFT hand is the reactions hand, in VR and AR: a pinch tap opens (or
+  // closes) the four-reaction bar. Pinning/unpinning and zoom are the right
+  // hand's (in AR, pinch the pinned one or nothing to unpin).
+  if (src && src.handedness === 'left' && (xrSession || arSession)) { xrToggleReactionBar(); return; }
   if (arSession) {
-    if (src && src.handedness === 'left') { if (arLocked >= 0) lockARFocus(-1); return; }
     // A tap on the close-up grows it (a second one back): it must not reach
     // the lock below, where CLOSEUP_TARGET would read as musician 999.
     if (target === CLOSEUP_TARGET) return closeupZoomTap();
@@ -3644,6 +3647,7 @@ function xrStemDirFrom(i, o) {
 // ── XR menu (long pinch on nothing) ─────────────────────────────────────────
 function xrOpenMenu() {
   if (!xrLastPose) return;
+  clearTimeout(reactionBarTimer);
   xrMenu.show(xrMainItems(), xrLastPose);
 }
 
@@ -3671,14 +3675,19 @@ function xrMainItems() {
 // than one. Pinch off the panel to close it. scene.json `telemetry.reactions`
 // ([{id, emoji, label}]) replaces the default set; `id` is what goes on the
 // wire and what analysis groups by, the emoji is for people.
+// The first REACTION_BAR_N are the left-hand bar's; the list page shows all.
 const DEFAULT_REACTIONS = [
   { id: 'clap',  emoji: '👏', label: 'Applause' },
   { id: 'love',  emoji: '❤️', label: 'Love it' },
+  { id: 'fire',  emoji: '🔥', label: 'On fire' },
   { id: 'wow',   emoji: '😮', label: 'Wow' },
   { id: 'laugh', emoji: '😂', label: 'Funny' },
-  { id: 'fire',  emoji: '🔥', label: 'On fire' },
   { id: 'sad',   emoji: '😢', label: 'Moving' },
 ];
+const REACTION_BAR_N = 4;
+const REACTION_BAR_IDLE_MS = 8000;   // the bar closes by itself if nobody picks
+const REACTION_BAR_SENT_MS = 1500;   // ...and this long after sending one
+let reactionBarTimer = 0;
 
 function xrReactions() {
   const r = telemetryCfg?.reactions;
@@ -3694,13 +3703,41 @@ function xrShowReactions(status = '') {
   ], status);
 }
 
+// Left-hand bar: pinch (left) to open it in front of you, aim at one and pinch
+// to send it. It stays up a moment saying "Sent …" and closes itself, so the
+// next reaction is two pinches away, never a menu to navigate.
+function reactionBarItems() {
+  return xrReactions().slice(0, REACTION_BAR_N).map(x => ({ id: 'reaction:' + x.id, emoji: x.emoji, label: x.label }));
+}
+function reactionBarClose() {
+  clearTimeout(reactionBarTimer);
+  if (xrMenu?.row) xrMenu.close();
+}
+function reactionBarTimeout(ms) {
+  clearTimeout(reactionBarTimer);
+  reactionBarTimer = setTimeout(reactionBarClose, ms);
+}
+function xrToggleReactionBar() {
+  if (!xrMenu) return;
+  if (xrMenu.open) { clearTimeout(reactionBarTimer); xrMenu.close(); return; }   // also closes the main menu
+  if (!xrLastPose) return;
+  xrMenu.show(reactionBarItems(), xrLastPose, telemetry ? '' : 'Telemetry is off: not sent', { row: true });
+  reactionBarTimeout(REACTION_BAR_IDLE_MS);
+}
+
 function xrSendReaction(rid) {
   const r = xrReactions().find(x => x.id === rid);
   if (!r) return;
-  if (!telemetry) { xrShowReactions('Not sent: telemetry is off'); return; }
+  const bar = xrMenu.row;
+  if (!telemetry) { if (bar) xrMenu.setItems(reactionBarItems(), 'Not sent: telemetry is off', { row: true }); else xrShowReactions('Not sent: telemetry is off'); return; }
   const hold = telemetryCfg?.reactionHoldMs;
   telemetry.setReaction(r.id, Number.isFinite(+hold) && hold !== '' && hold != null ? +hold : 3000);
   voice?.mark('reaction:' + r.id);   // en la grabación de voz también, si la hay
+  if (bar) {
+    xrMenu.setItems(reactionBarItems(), `Sent ${r.emoji || r.label}`, { row: true });
+    reactionBarTimeout(REACTION_BAR_SENT_MS);
+    return;
+  }
   xrShowReactions(`Sent ${r.emoji || r.label}`);
 }
 
