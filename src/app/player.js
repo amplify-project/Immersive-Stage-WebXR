@@ -3133,7 +3133,12 @@ function attachMeshTo(marker, cfg, floorY) {
     marker.add(holder);
     // Al colgar la primera malla, y no antes: una escena sin mallas no gasta ni
     // una luz, que es como ha funcionado el player hasta ahora.
-    scene.add(ensureARLights());
+    // Un splat (.ply/.spz/…) no se ilumina —lleva el color horneado—, pero sí
+    // necesita a Spark en la escena, que es quien ordena y mezcla sus gaussianas.
+    // Va aquí y no en un solo sitio porque `MeshFit.splatRenderer` solo existe
+    // cuando ya ha llegado el primer splat.
+    if (fitted.userData.fit.splat) scene.add(MeshFit.splatRenderer(renderer));
+    else scene.add(ensureARLights());
     marker.userData.focusRing = holder.children[1];
     // La esfera de alambre era el sitio del músico mientras no había músico.
     marker.children[0].visible = false;
@@ -4463,6 +4468,7 @@ function clearARSources() {
   // de más es trabajo del shader por cada fotograma que nadie ve. El entorno se
   // suelta igual (la textura sigue cacheada: volver a AR no la reconstruye).
   if (arLights) { scene.remove(arLights); scene.environment = null; }
+  { const sr = MeshFit.splatRenderer(renderer); if (sr) scene.remove(sr); }   // sin splats, Spark no pinta nada
   // El foco indexa este array: dejarlo vivo señalaría a un músico que ya no está.
   resetARFocus();
   // soltar las anclas: las fuentes vuelven a la esfera solidaria a la cabeza,

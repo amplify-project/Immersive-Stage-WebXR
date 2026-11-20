@@ -41,6 +41,12 @@ const MIME = {
   '.glb':  'model/gltf-binary',
   '.gltf': 'model/gltf+json',
   '.bin':  'application/octet-stream',
+  // Gaussian splats (the same slot as a mesh: stems[i].mesh → a splat file).
+  '.ply':    'application/octet-stream',
+  '.spz':    'application/octet-stream',
+  '.splat':  'application/octet-stream',
+  '.ksplat': 'application/octet-stream',
+  '.sog':    'application/octet-stream',
 };
 
 const VIDEO_EXT = ['.mp4', '.mov', '.webm', '.mkv', '.m4v'];
@@ -161,8 +167,22 @@ function destInMedia(base, size) {
 //  media/: no son material de la toma, son la representación del músico, y el
 //  editor las lista por separado porque se eligen en otro sitio y otro momento.
 // ════════════════════════════════════════════════════════════════════════════
-const MESH_EXT = ['.glb'];
+//
+//  Un splat de gaussianas (.ply, .spz, .splat, .ksplat, .sog) entra en el mismo
+//  sitio que un GLB: el player decide por la extensión cómo dibujarlo.
+const SPLAT_EXT = ['.ply', '.spz', '.splat', '.ksplat', '.sog'];
+const MESH_EXT = ['.glb', ...SPLAT_EXT];
 const MESH_MAX_BYTES = 64 * 1024 * 1024;
+const SPLAT_MAX_BYTES = 400 * 1024 * 1024;      // una captura entera pesa decenas de MB
+
+// Lo que cada formato dice de sí mismo en sus primeros bytes. .splat y .ksplat no
+// llevan cabecera: ahí solo se puede fiar del nombre.
+const MESH_MAGIC = {
+  '.glb': { bytes: Buffer.from('glTF'), what: 'falta la cabecera glTF' },
+  '.ply': { bytes: Buffer.from('ply'),  what: 'falta la cabecera "ply"' },
+  '.spz': { bytes: Buffer.from([0x1f, 0x8b]), what: 'un .spz es un gzip y esto no lo es' },
+  '.sog': { bytes: Buffer.from('PK'),   what: 'un .sog es un zip y esto no lo es' },
+};
 
 function listMeshes() {
   let files = [];
@@ -219,14 +239,16 @@ function saveMeshUpload(req, dest, maxBytes) {
     req.on('end', () => {
       if (failed) return;
       out.end(() => {
-        // glTF binario empieza por el magic "glTF". Comprobarlo aquí evita que un
-        // .zip renombrado se quede en el disco y falle luego dentro de las gafas,
-        // que es el peor sitio para enterarse.
+        // Cada formato empieza por su magic ("glTF", "ply", gzip, zip). Comprobarlo
+        // aquí evita que un .zip renombrado se quede en el disco y falle luego
+        // dentro de las gafas, que es el peor sitio para enterarse.
+        const ext = path.extname(dest).toLowerCase();
+        const magic = MESH_MAGIC[ext];
         let head = Buffer.alloc(4);
         try { const fd = fs.openSync(tmp, 'r'); fs.readSync(fd, head, 0, 4, 0); fs.closeSync(fd); } catch (_) {}
-        if (head.toString('latin1') !== 'glTF') {
+        if (magic && !head.subarray(0, magic.bytes.length).equals(magic.bytes)) {
           fs.unlink(tmp, () => {});
-          const e = new Error('no es un .glb (falta la cabecera glTF)');
+          const e = new Error(`no es un ${ext} (${magic.what})`);
           e.statusCode = 415;
           return reject(e);
         }
@@ -460,9 +482,10 @@ async function handleAPI(req, res, pathname) {
     // para envolverlo sería trabajo de más para el mismo resultado.
     if (pathname === '/api/mesh' && req.method === 'POST') {
       const name = safeMeshName(new URL(req.url, 'http://x').searchParams.get('name'));
-      if (!name) return sendJSON(res, 400, { error: 'Nombre no válido: se admite .glb' });
+      if (!name) return sendJSON(res, 400, { error: 'Nombre no válido: se admite ' + MESH_EXT.join(', ') });
       try {
-        const size = await saveMeshUpload(req, path.join(MESH_DIR, name), MESH_MAX_BYTES);
+        const size = await saveMeshUpload(req, path.join(MESH_DIR, name),
+          SPLAT_EXT.includes(path.extname(name)) ? SPLAT_MAX_BYTES : MESH_MAX_BYTES);
         console.log(`[mesh] ${name} (${(size / 1e6).toFixed(1)} MB)`);
         return sendJSON(res, 200, { ok: true, file: 'meshes/' + name, name, size });
       } catch (e) {
@@ -926,10 +949,10 @@ const handler = (req, res) => {
     // Código del player/editor: no cachear, o el navegador sirve una versión
     // vieja tras editar (ya pasó: "sigue igual" = index.html cacheado). Los
     // segmentos de media (.m4s/.webm/.mp4) sí se pueden cachear con normalidad.
-    // .glb entra aquí con el código, y no con los segmentos: una malla se sustituye
+    // .glb (y los splats) entran aquí con el código, y no con los segmentos: una malla se sustituye
     // mientras se ajusta la escena, siempre con el mismo nombre, y un modelo viejo
     // servido de caché se depura dentro de las gafas creyendo que es el nuevo.
-    const noCache = ['.html', '.js', '.mjs', '.css', '.json', '.glb', '.gltf'].includes(ext);
+    const noCache = ['.html', '.js', '.mjs', '.css', '.json', '.glb', '.gltf', ...SPLAT_EXT].includes(ext);
     const total = stat.size;
     const range = req.headers.range;
     if (range) {

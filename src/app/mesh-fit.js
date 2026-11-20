@@ -23,8 +23,51 @@
   var _loader = null;
   var _cache  = new Map();      // url -> Promise<Object3D> (the original, uncloned)
 
+  // ── Gaussian splats ───────────────────────────────────────────────────────
+  // A splat goes through the same slot as a GLB (`stems[i].mesh` / `ar.mesh`)
+  // and the same fit; the extension decides. Spark (the renderer) is imported on
+  // first use, not with the page: it is 2.7 MB nobody needs in a scene of GLBs.
+  // A splat has no skeleton, no clip and no light — and no box either, see
+  // splatBox().
+  var SPLAT_RE = /\.(ply|spz|splat|ksplat|sog)(\?.*)?$/i;
+  function isSplat(url) { return SPLAT_RE.test(String(url || '')); }
+
+  var _spark = null;            // Promise<module>, once asked for
+  var _sparkMod = null;         // the module, once it has arrived
+  function loadSpark() {
+    if (!_spark) _spark = import('@sparkjsdev/spark').then(function (m) { return (_sparkMod = m); });
+    return _spark;
+  }
+
+  function loadSplatOnce(url) {
+    return loadSpark().then(function (S) {
+      var m = new S.SplatMesh({ url: url });
+      m.raycastable = false;    // pointer rays go to markers, not to millions of gaussians
+      return m.initialized.then(function () {
+        m.userData.isSplat = true;
+        m.animations = [];
+        return m;
+      });
+    });
+  }
+
+  // Spark has to be IN the scene: it sorts and blends every splat in it. One per
+  // renderer; null until the first splat has been loaded.
+  var _sparkR = new WeakMap();
+  function splatRenderer(renderer) {
+    if (!renderer || !_sparkMod) return null;
+    if (!_sparkR.has(renderer)) _sparkR.set(renderer, new _sparkMod.SparkRenderer({ renderer: renderer }));
+    return _sparkR.get(renderer);
+  }
+
   function loadMeshOnce(url) {
     if (_cache.has(url)) return _cache.get(url);
+    if (isSplat(url)) {
+      var sp = loadSplatOnce(url);
+      _cache.set(url, sp);
+      sp.catch(function () { _cache.delete(url); });   // a failed load is not a verdict
+      return sp;
+    }
     var p = new Promise(function (resolve, reject) {
       if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader !== 'function')
         return reject(new Error('GLTFLoader not loaded (three-boot.js not loaded)'));
@@ -53,6 +96,15 @@
   // either way — and it bites inside the headset while the editor's preview,
   // which holds the only instance, looks perfectly fine.
   function cloneMesh(src) {
+    if (src.userData && src.userData.isSplat) {
+      // A second SplatMesh over the SAME decoded data: musicians sharing one
+      // capture cost one download and one decode, and each gets its own node.
+      var c = new _sparkMod.SplatMesh({ packedSplats: src.packedSplats });
+      c.raycastable = false;
+      c.userData.isSplat = true;
+      c.animations = [];
+      return c;
+    }
     var skinned = false;
     src.traverse(function (o) { if (o.isSkinnedMesh) skinned = true; });
 
@@ -101,6 +153,8 @@
       heightM: isFinite(+m.heightM) && +m.heightM > 0 ? +m.heightM : AR_MESH_HEIGHT,
       yawDeg:  isFinite(+m.yawDeg) ? +m.yawDeg : 0,
       zUp:     !!m.zUp,
+      // 3DGS captures (COLMAP) are usually Y-DOWN: they arrive upside down.
+      upsideDown: !!m.upsideDown,
       // How far off the floor the model hangs. The fit stands everything on the
       // floor, which is right for a person and wrong for anything a person
       // holds: a trumpet on its own belongs at playing height, not at your feet.
@@ -136,6 +190,29 @@
   //     wrap   scale = k, rotation.y = yaw, position.y = offset   ← spins in place
   //      └ axis  rotation.x = zUp, position = −centre
   //         └ obj  the model, exactly as the file has it
+  // The box of a splat. Box3.setFromObject would measure the instanced quad
+  // Spark draws it with, not the scene; and the centres cannot be taken whole
+  // either: a capture drags "floaters" — stray gaussians metres from the subject —
+  // that would shrink the subject to a speck. So: the 1 %–99 % band of each axis,
+  // over the gaussians that are actually visible, sampled when there are
+  // millions (the fit runs on the main thread, in the headset).
+  function splatBox(obj) {
+    var n = (obj.packedSplats && obj.packedSplats.numSplats) || 0;
+    var stride = Math.max(1, Math.floor(n / 200000));
+    var xs = [], ys = [], zs = [], p = new THREE.Vector3(), m = obj.matrixWorld;
+    obj.forEachSplat(function (i, center, scales, quat, opacity) {
+      if (i % stride || opacity < 0.1) return;
+      p.copy(center).applyMatrix4(m);
+      xs.push(p.x); ys.push(p.y); zs.push(p.z);
+    });
+    if (!xs.length) return new THREE.Box3();         // empty → "could not measure it"
+    var q = function (a, f) { return a[Math.min(a.length - 1, Math.floor(f * a.length))]; };
+    var asc = function (a, b) { return a - b; };
+    xs.sort(asc); ys.sort(asc); zs.sort(asc);
+    return new THREE.Box3(new THREE.Vector3(q(xs, 0.01), q(ys, 0.01), q(zs, 0.01)),
+                          new THREE.Vector3(q(xs, 0.99), q(ys, 0.99), q(zs, 0.99)));
+  }
+
   function fitMeshToRoom(obj, opts) {
     var o = spec(opts || {});
     var name = (opts && opts.name) || o.url || 'mesh';
@@ -150,6 +227,7 @@
     // height is along Z, so measuring first would scale by the wrong dimension
     // and the model would come out lying down AND the wrong size.
     if (o.zUp) axis.rotation.x = -Math.PI / 2;
+    if (o.upsideDown) axis.rotation.x += Math.PI;
 
     // Pose it at the clip's own zero BEFORE measuring. A model exported in a
     // T-pose whose clip is a seated drummer would otherwise be normalised
@@ -167,7 +245,7 @@
 
     // Measured through matrixWorld, so `wrap` must not be parented yet — a
     // parent's transform would be measured as part of the model.
-    var box  = new THREE.Box3().setFromObject(axis);
+    var box  = (obj.userData && obj.userData.isSplat) ? splatBox(obj) : new THREE.Box3().setFromObject(axis);
     var size = box.getSize(new THREE.Vector3());
     info.raw = { x: size.x, y: size.y, z: size.z };
 
@@ -213,6 +291,7 @@
     info.spanM = span;
     info.heightM = size.y * k;                   // what it actually ended up being
     info.offsetYM = o.offsetYM;
+    info.splat = !!(obj.userData && obj.userData.isSplat);
     info.clip = clip ? (clip.name || '(unnamed)') : null;
     info.clipSecs = clip ? clip.duration : 0;
     wrap.userData.fit = info;
@@ -371,6 +450,8 @@
     spec: spec,
     fit: fitMeshToRoom,
     clone: cloneMesh,
+    isSplat: isSplat,
+    splatRenderer: splatRenderer,
     animator: animator,
     setupRenderer: setupRenderer,
     environment: environment,
