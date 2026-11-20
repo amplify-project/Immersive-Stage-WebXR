@@ -358,7 +358,7 @@ function renderLoop(time) {
     sampleScreenTelemetry();
   }
   if (videoEl && videoEl.readyState >= 2) {
-    if (videoTexture && !HAS_RVFC) videoTexture.needsUpdate = true;
+    if (videoTexture && !HAS_RVFC) markVideoTexture(videoTexture, videoEl.videoWidth, videoEl.videoHeight);
     updateProgress();
   }
   updateCloseupAnim();
@@ -1468,6 +1468,22 @@ function startLiveWatch(src) {
 // Una Texture normal no se auto-marca, así que la marcamos nosotros desde rVFC,
 // que dispara exactamente una vez por fotograma presentado. Sin rVFC volvemos al
 // comportamiento de antes (lo marcan los bucles de render).
+//
+// Con la r186 hay una condición más, que la r128 perdonaba: `needsUpdate` sobre un
+// <video> que aún no tiene imagen (videoWidth 0) reserva una textura de 0×0, y
+// como three reserva con texStorage2D —inmutable— esa textura ya no puede crecer:
+// el vídeo llega después y cada subida falla ("no video", "level of detail
+// outside of range") y se ve negro con el audio sonando. Por eso se marca SOLO
+// con imagen, y se recrea si cambia de tamaño (ABR a otra resolución).
+function markVideoTexture(tex, w, h) {
+  if (!w || !h) return;                         // todavía sin imagen
+  if (tex.__w !== w || tex.__h !== h) {
+    if (tex.__w) tex.dispose();                 // el almacenamiento no sigue al tamaño
+    tex.__w = w; tex.__h = h;
+  }
+  tex.needsUpdate = true;
+}
+
 function makeVideoTexture(el) {
   const tex = new THREE.Texture(el);
   // El vídeo YA viene en sRGB. Sin decirlo, con outputEncoding puesto se
@@ -1477,11 +1493,11 @@ function makeVideoTexture(el) {
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = false;   // 8 Mpx: generar mipmaps por fotograma, ni de broma
-  tex.needsUpdate = true;
+  markVideoTexture(tex, el.videoWidth, el.videoHeight);
   if (HAS_RVFC) {
     const tick = (now, md) => {
       if (tex.__stop) return;    // textura ya reemplazada: no resucitarla
-      tex.needsUpdate = true;
+      markVideoTexture(tex, el.videoWidth, el.videoHeight);
       // The media time of the frame this texture now shows: the clock the
       // WebCodecs close-up follows (see closeupClock).
       el.__mt = md ? md.mediaTime : el.currentTime; el.__mtAt = performance.now();
@@ -1909,7 +1925,7 @@ function updateCloseupAnim() {
   // the track is selected, shown or not, so it is decoded when it is wanted.
   if (closeupWC && closeupStem >= 0) {
     const f = closeupWC.update(closeupClock());
-    if (f && f !== closeupTexture.image) { closeupTexture.image = f; closeupTexture.needsUpdate = true; }
+    if (f && f !== closeupTexture.image) { closeupTexture.image = f; markVideoTexture(closeupTexture, f.displayWidth || f.codedWidth, f.displayHeight || f.codedHeight); }
   }
 
   // No empezar a entrar hasta que la pista nueva tenga imagen Y esté corriendo:
@@ -1946,7 +1962,7 @@ function updateCloseupAnim() {
   // fade — the picture underneath is the same, so it reads as sharpening.
   closeupZoom += (closeupZoomGoal - closeupZoom) * Math.min(1, dt * 8);
   if (!crop) closeupMesh.scale.setScalar((CLOSEUP_SCALE_IN + (1 - CLOSEUP_SCALE_IN) * e) * closeupZoom * closeupBase);
-  if (!closeupWC && closeupTexture && !HAS_RVFC) closeupTexture.needsUpdate = true;
+  if (!closeupWC && closeupTexture && !HAS_RVFC) markVideoTexture(closeupTexture, closeupEl.videoWidth, closeupEl.videoHeight);
 }
 
 // ── Audio/sync tag ───────────────────────────────────────────────────────────
@@ -2739,7 +2755,7 @@ async function enterXR() {
 
       // ── Actualizar textura vídeo ──────────────────
       if (videoEl && videoEl.readyState >= 2) {
-        if (videoTexture && !HAS_RVFC) videoTexture.needsUpdate = true;
+        if (videoTexture && !HAS_RVFC) markVideoTexture(videoTexture, videoEl.videoWidth, videoEl.videoHeight);
       }
       updateCloseupAnim();
 
